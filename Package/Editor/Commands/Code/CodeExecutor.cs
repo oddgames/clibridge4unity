@@ -1,5 +1,6 @@
 using System;
 using System.CodeDom.Compiler;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -13,16 +14,39 @@ using UnityEngine;
 namespace clibridge4unity
 {
     /// <summary>
-    /// Compile and execute C# code using CSharpCodeProvider.
+    /// Compile and execute C# code using Roslyn (preferred) or CSharpCodeProvider/mcs (fallback).
     /// CODE_EXEC: fire-and-forget (returns immediately, check LOG for result)
     /// CODE_EXEC_RETURN: waits for result (25s main thread timeout)
     /// </summary>
     public static class CodeExecutor
     {
         private static ConcurrentDictionary<int, Assembly> cachedAssemblies = new ConcurrentDictionary<int, Assembly>();
-        private static string[] referenceAssemblies;
-        private static string monoLibDir;
         private static bool initialized = false;
+
+        // Active compiler backend
+        private static bool useRoslyn;
+        internal static string lastRoslynError; // Debug: last Roslyn error for inspection
+
+        // mcs state
+        private static string[] mcsReferences;
+        private static string monoLibDir;
+        private static string mcsResponseFilePath;
+
+        // Roslyn state (reflection-based, no compile-time dependency on Microsoft.CodeAnalysis)
+        private static string[] roslynReferencePaths;
+        private static object roslynParseOptions;     // CSharpParseOptions instance
+        private static object roslynCompileOptions;   // CSharpCompilationOptions instance
+        private static MethodInfo roslynParseText;    // CSharpSyntaxTree.ParseText(string, CSharpParseOptions)
+        private static MethodInfo roslynCreateRef;    // MetadataReference.CreateFromFile(string)
+        private static MethodInfo roslynCreate;       // CSharpCompilation.Create(string, IEnumerable<SyntaxTree>, IEnumerable<MetadataReference>, CSharpCompilationOptions)
+        private static MethodInfo roslynEmit;         // CSharpCompilation.Emit(Stream, ...)
+        private static PropertyInfo roslynSuccess;    // EmitResult.Success
+        private static PropertyInfo roslynDiags;      // EmitResult.Diagnostics
+        private static PropertyInfo roslynSeverity;   // Diagnostic.Severity
+        private static object roslynSeverityError;    // DiagnosticSeverity.Error enum value
+        private static Type roslynSyntaxTreeType;     // SyntaxTree base type (for typed arrays)
+        private static Type roslynMetaRefType;        // MetadataReference base type (for typed arrays)
+        private static Array roslynCachedRefs;        // Pre-built MetadataReference[] array
 
         /// <summary>
         /// If code starts with @, treat it as a file path and read the code from that file.
@@ -33,13 +57,9 @@ namespace clibridge4unity
             if (code != null && code.StartsWith("@"))
             {
                 string filePath = code.Substring(1).Trim();
+                Debug.Log($"[Bridge] ResolveCode: path=[{filePath}] exists={File.Exists(filePath)}");
                 if (File.Exists(filePath))
-                {
-                    string fileCode = File.ReadAllText(filePath);
-                    // Clean up temp file after reading
-                    try { File.Delete(filePath); } catch { }
-                    return fileCode;
-                }
+                    return File.ReadAllText(filePath);
             }
             return code;
         }
@@ -169,20 +189,98 @@ namespace clibridge4unity
             public string Error;
         }
 
-        private static string responseFilePath;
-
         private static CompileResult Compile(string fullCode)
+        {
+            if (useRoslyn)
+            {
+                try
+                {
+                    var result = CompileWithRoslyn(fullCode);
+                    if (result.Error != null)
+                        Debug.LogWarning($"[Bridge] Roslyn compilation error (not falling back):\n{result.Error}");
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    lastRoslynError = $"{ex.GetType().Name}: {ex.Message}\n{ex.InnerException?.GetType().Name}: {ex.InnerException?.Message}";
+                    Debug.LogError($"[Bridge] Roslyn internal error, falling back to mcs: {lastRoslynError}");
+                }
+            }
+            return CompileWithMcs(fullCode);
+        }
+
+        private static CompileResult CompileWithRoslyn(string fullCode)
+        {
+            // Parse source code — fill all optional params with defaults
+            var parseParams = roslynParseText.GetParameters();
+            var parseArgs = new object[parseParams.Length];
+            parseArgs[0] = fullCode;  // string text
+            parseArgs[1] = roslynParseOptions;  // CSharpParseOptions options
+            for (int i = 2; i < parseArgs.Length; i++)
+                parseArgs[i] = parseParams[i].HasDefaultValue ? parseParams[i].DefaultValue : null;
+            var syntaxTree = roslynParseText.Invoke(null, parseArgs);
+
+            // Create typed SyntaxTree[] array for CSharpCompilation.Create
+            var treesArray = Array.CreateInstance(roslynSyntaxTreeType, 1);
+            treesArray.SetValue(syntaxTree, 0);
+
+            // Create compilation — fill all optional params with defaults
+            var createParams = roslynCreate.GetParameters();
+            var createArgs = new object[createParams.Length];
+            createArgs[0] = "CodeExec_" + fullCode.GetHashCode().ToString("X");
+            createArgs[1] = treesArray;
+            createArgs[2] = roslynCachedRefs;
+            createArgs[3] = roslynCompileOptions;
+            for (int i = 4; i < createArgs.Length; i++)
+                createArgs[i] = createParams[i].HasDefaultValue ? createParams[i].DefaultValue : null;
+            var compilation = roslynCreate.Invoke(null, createArgs);
+
+            // Emit to memory stream
+            using var ms = new MemoryStream();
+            var emitParams = roslynEmit.GetParameters();
+            var emitArgs = new object[emitParams.Length];
+            emitArgs[0] = ms;
+            for (int i = 1; i < emitArgs.Length; i++)
+                emitArgs[i] = emitParams[i].HasDefaultValue ? emitParams[i].DefaultValue : null;
+
+            var emitResult = roslynEmit.Invoke(compilation, emitArgs);
+            bool success = (bool)roslynSuccess.GetValue(emitResult);
+
+            if (!success)
+            {
+                var diagnostics = (IEnumerable)roslynDiags.GetValue(emitResult);
+                var sourceLines = fullCode.Split('\n');
+                var errors = new List<string>();
+                foreach (var diag in diagnostics)
+                {
+                    var severity = roslynSeverity.GetValue(diag);
+                    if (severity.Equals(roslynSeverityError))
+                    {
+                        // Diagnostic.ToString() includes location and message, e.g. "(12,5): error CS1002: ; expected"
+                        string msg = diag.ToString();
+                        errors.Add(msg);
+                    }
+                }
+                return new CompileResult { Error = Response.Error($"Compilation failed (Roslyn):\n{string.Join("\n", errors)}") };
+            }
+
+            ms.Seek(0, SeekOrigin.Begin);
+            var assembly = Assembly.Load(ms.ToArray());
+            return new CompileResult { Assembly = assembly };
+        }
+
+        private static CompileResult CompileWithMcs(string fullCode)
         {
             // Write assembly references to a response file to avoid command-line length limits.
             // Windows has a ~32KB command line limit and Unity 6 can load 200+ assemblies,
             // each with a long absolute path, easily exceeding this limit.
-            if (responseFilePath == null)
+            if (mcsResponseFilePath == null)
             {
-                responseFilePath = Path.Combine(Path.GetTempPath(), "clibridge_mcs_refs.rsp");
+                mcsResponseFilePath = Path.Combine(Path.GetTempPath(), "clibridge_mcs_refs.rsp");
                 var sb = new StringBuilder();
-                foreach (var r in referenceAssemblies)
+                foreach (var r in mcsReferences)
                     sb.AppendLine($"-r:\"{r}\"");
-                File.WriteAllText(responseFilePath, sb.ToString());
+                File.WriteAllText(mcsResponseFilePath, sb.ToString());
             }
 
             using var provider = new CSharpCodeProvider();
@@ -191,7 +289,7 @@ namespace clibridge4unity
                 GenerateInMemory = true,
                 GenerateExecutable = false,
                 TreatWarningsAsErrors = false,
-                CompilerOptions = $"-nostdlib -lib:\"{monoLibDir}\" @\"{responseFilePath}\""
+                CompilerOptions = $"-nostdlib -lib:\"{monoLibDir}\" @\"{mcsResponseFilePath}\""
             };
 
             // Don't use ReferencedAssemblies — they go on the command line and hit the length limit.
@@ -201,13 +299,19 @@ namespace clibridge4unity
 
             if (result.Errors.HasErrors)
             {
+                var sourceLines = fullCode.Split('\n');
                 var errors = new List<string>();
                 foreach (CompilerError error in result.Errors)
                 {
                     if (!error.IsWarning)
-                        errors.Add($"Line {error.Line}: {error.ErrorText}");
+                    {
+                        string srcLine = (error.Line > 0 && error.Line <= sourceLines.Length)
+                            ? sourceLines[error.Line - 1].TrimEnd()
+                            : "???";
+                        errors.Add($"Line {error.Line}: {error.ErrorText}\n  > {srcLine}");
+                    }
                 }
-                return new CompileResult { Error = Response.Error($"Compilation failed:\n{string.Join("\n", errors)}") };
+                return new CompileResult { Error = Response.Error($"Compilation failed (mcs):\n{string.Join("\n", errors)}") };
             }
 
             return new CompileResult { Assembly = result.CompiledAssembly };
@@ -287,13 +391,317 @@ namespace clibridge4unity
 
         private static void Initialize()
         {
+            string editorPath = Path.GetDirectoryName(UnityEditor.EditorApplication.applicationPath);
+
+            // Try Roslyn first — loaded from Unity's bundled DotNetSdkRoslyn directory
+            if (TryInitRoslyn(editorPath))
+            {
+                CollectRoslynReferences();
+                BuildRoslynMetadataRefs();
+                Debug.Log($"[Bridge] Code executor: Roslyn backend (C# 11, {roslynCachedRefs.Length} refs)");
+            }
+
+            // Always init mcs as fallback
+            CollectMcsReferences(editorPath);
+            if (!useRoslyn)
+                Debug.LogWarning($"[Bridge] Code executor: mcs backend ({mcsReferences.Length} refs) — Roslyn unavailable, C# features limited");
+
+            initialized = true;
+        }
+
+        // Directories to search for missing Roslyn dependencies (e.g., System.Reflection.Metadata)
+        private static string[] roslynDepDirs;
+
+        private static Assembly OnAssemblyResolve(object sender, ResolveEventArgs args)
+        {
+            if (roslynDepDirs == null) return null;
+            var asmName = new AssemblyName(args.Name);
+            foreach (var dir in roslynDepDirs)
+            {
+                string path = Path.Combine(dir, asmName.Name + ".dll");
+                if (File.Exists(path))
+                {
+                    try { return Assembly.LoadFrom(path); }
+                    catch { }
+                }
+            }
+            return null;
+        }
+
+        private static bool TryInitRoslyn(string editorPath)
+        {
+            try
+            {
+                Assembly csharpAsm = null, coreAsm = null;
+
+                // Register assembly resolver for Roslyn dependencies BEFORE loading/accessing types.
+                // Unity 6 Editor runs on Mono, which doesn't auto-resolve deps like CoreCLR TPA.
+                // Missing assemblies (System.Reflection.Metadata, System.Memory, etc.) are found
+                // in the NetCoreRuntime shared framework directory.
+                string packageRoslynDir = FindPackageRoslynDir();
+                string netCoreDir = null;
+                string ncBase = Path.Combine(editorPath, "Data", "NetCoreRuntime", "shared", "Microsoft.NETCore.App");
+                if (Directory.Exists(ncBase))
+                {
+                    // Pick the newest version directory
+                    var dirs = Directory.GetDirectories(ncBase);
+                    if (dirs.Length > 0)
+                    {
+                        Array.Sort(dirs);
+                        netCoreDir = dirs[dirs.Length - 1];
+                    }
+                }
+
+                var depDirs = new List<string>();
+                if (packageRoslynDir != null) depDirs.Add(packageRoslynDir);
+                if (netCoreDir != null) depDirs.Add(netCoreDir);
+                roslynDepDirs = depDirs.ToArray();
+                AppDomain.CurrentDomain.AssemblyResolve -= OnAssemblyResolve; // idempotent
+                AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;
+
+                {
+                    // 1. Pre-load dependency DLLs from bundled package
+                    if (packageRoslynDir != null)
+                    {
+                        foreach (var dll in Directory.GetFiles(packageRoslynDir, "*.dll"))
+                        {
+                            try { Assembly.LoadFrom(dll); }
+                            catch { }
+                        }
+                    }
+
+                    // 2. Try loading from known directories
+                    string[] searchDirs = packageRoslynDir != null
+                        ? new[] { packageRoslynDir, Path.Combine(editorPath, "Data", "DotNetSdkRoslyn") }
+                        : new[] { Path.Combine(editorPath, "Data", "DotNetSdkRoslyn") };
+
+                    foreach (var dir in searchDirs)
+                    {
+                        string corePath = Path.Combine(dir, "Microsoft.CodeAnalysis.dll");
+                        string csharpPath = Path.Combine(dir, "Microsoft.CodeAnalysis.CSharp.dll");
+                        if (!File.Exists(corePath) || !File.Exists(csharpPath))
+                            continue;
+
+                        try
+                        {
+                            coreAsm = Assembly.LoadFrom(corePath);
+                            csharpAsm = Assembly.LoadFrom(csharpPath);
+                            Debug.Log($"[Bridge] Roslyn: loaded from {dir} (v{coreAsm.GetName().Version})");
+                            break;
+                        }
+                        catch (Exception loadEx)
+                        {
+                            Debug.LogWarning($"[Bridge] Roslyn: failed to load from {dir}: {loadEx.Message}");
+                            coreAsm = null;
+                            csharpAsm = null;
+                        }
+                    }
+
+                    // 3. If loading from directories failed, check if already in AppDomain
+                    if (coreAsm == null || csharpAsm == null)
+                    {
+                        coreAsm = AppDomain.CurrentDomain.GetAssemblies()
+                            .FirstOrDefault(a => a.GetName().Name == "Microsoft.CodeAnalysis");
+                        csharpAsm = AppDomain.CurrentDomain.GetAssemblies()
+                            .FirstOrDefault(a => a.GetName().Name == "Microsoft.CodeAnalysis.CSharp");
+                        if (coreAsm != null && csharpAsm != null)
+                            Debug.Log($"[Bridge] Roslyn: using pre-loaded assemblies (v{coreAsm.GetName().Version})");
+                    }
+                }
+
+                if (coreAsm == null || csharpAsm == null)
+                {
+                    Debug.LogWarning("[Bridge] Roslyn: no compatible assemblies found, using mcs fallback");
+                    return false;
+                }
+
+                // Resolve types
+                var syntaxTreeCSharp = csharpAsm.GetType("Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree");
+                var compilationType = csharpAsm.GetType("Microsoft.CodeAnalysis.CSharp.CSharpCompilation");
+                var compileOptionsType = csharpAsm.GetType("Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions");
+                var parseOptionsType = csharpAsm.GetType("Microsoft.CodeAnalysis.CSharp.CSharpParseOptions");
+                var langVersionType = csharpAsm.GetType("Microsoft.CodeAnalysis.CSharp.LanguageVersion");
+                roslynSyntaxTreeType = coreAsm.GetType("Microsoft.CodeAnalysis.SyntaxTree");
+                roslynMetaRefType = coreAsm.GetType("Microsoft.CodeAnalysis.MetadataReference");
+                var portableRefType = coreAsm.GetType("Microsoft.CodeAnalysis.PortableExecutableReference");
+                var outputKindType = coreAsm.GetType("Microsoft.CodeAnalysis.OutputKind");
+                var diagSeverityType = coreAsm.GetType("Microsoft.CodeAnalysis.DiagnosticSeverity");
+                var diagnosticType = coreAsm.GetType("Microsoft.CodeAnalysis.Diagnostic");
+
+                if (syntaxTreeCSharp == null || compilationType == null || roslynSyntaxTreeType == null)
+                    return false;
+
+                // Build parse options: CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Latest)
+                // Cannot use Activator.CreateInstance — constructor has many optional params, no single-arg overload
+                object langLatest = Enum.Parse(langVersionType, "Latest");
+                var parseDefault = parseOptionsType.GetProperty("Default", BindingFlags.Public | BindingFlags.Static);
+                roslynParseOptions = parseDefault.GetValue(null);
+                var withLangVersion = parseOptionsType.GetMethod("WithLanguageVersion");
+                roslynParseOptions = withLangVersion.Invoke(roslynParseOptions, new object[] { langLatest });
+
+                // Build compilation options via constructor with all params filled from defaults
+                // CSharpCompilationOptions has one constructor with OutputKind as first required param + many optional
+                object outputKindDll = Enum.Parse(outputKindType, "DynamicallyLinkedLibrary");
+                var optionsCtor = compileOptionsType.GetConstructors().OrderByDescending(c => c.GetParameters().Length).First();
+                var ctorParams = optionsCtor.GetParameters();
+                var ctorArgs = new object[ctorParams.Length];
+                ctorArgs[0] = outputKindDll; // OutputKind (required)
+                for (int i = 1; i < ctorParams.Length; i++)
+                    ctorArgs[i] = ctorParams[i].HasDefaultValue ? ctorParams[i].DefaultValue : null;
+                roslynCompileOptions = optionsCtor.Invoke(ctorArgs);
+                // Enable unsafe code
+                var withUnsafe = compileOptionsType.GetMethod("WithAllowUnsafe");
+                if (withUnsafe != null)
+                    roslynCompileOptions = withUnsafe.Invoke(roslynCompileOptions, new object[] { true });
+
+                // Cache methods
+                // CSharpSyntaxTree.ParseText — pick overload that takes string as first param
+                // Use the overload with the most params and fill defaults, to ensure compatibility
+                roslynParseText = syntaxTreeCSharp.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                    .Where(m => m.Name == "ParseText" && m.GetParameters().Length >= 2
+                        && m.GetParameters()[0].ParameterType == typeof(string))
+                    .OrderByDescending(m => m.GetParameters().Length)
+                    .FirstOrDefault();
+
+                // MetadataReference.CreateFromFile(string path, ...)
+                roslynCreateRef = roslynMetaRefType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                    .Where(m => m.Name == "CreateFromFile")
+                    .OrderBy(m => m.GetParameters().Length)
+                    .First();
+
+                // CSharpCompilation.Create(string, IEnumerable<SyntaxTree>, IEnumerable<MetadataReference>, CSharpCompilationOptions)
+                roslynCreate = compilationType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                    .Where(m => m.Name == "Create" && m.GetParameters().Length >= 4)
+                    .OrderBy(m => m.GetParameters().Length)
+                    .First();
+
+                // CSharpCompilation.Emit(Stream, ...)
+                roslynEmit = compilationType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                    .Where(m => m.Name == "Emit" && m.GetParameters().Length > 0 && m.GetParameters()[0].ParameterType == typeof(Stream))
+                    .OrderBy(m => m.GetParameters().Length)
+                    .First();
+
+                // EmitResult properties
+                var emitResultType = roslynEmit.ReturnType;
+                roslynSuccess = emitResultType.GetProperty("Success");
+                roslynDiags = emitResultType.GetProperty("Diagnostics");
+
+                // Diagnostic.Severity
+                roslynSeverity = diagnosticType.GetProperty("Severity");
+                roslynSeverityError = Enum.Parse(diagSeverityType, "Error");
+
+                if (roslynParseText == null || roslynCreateRef == null || roslynCreate == null || roslynEmit == null)
+                    return false;
+
+                useRoslyn = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Bridge] Roslyn init failed: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+                return false;
+            }
+        }
+
+        private static string FindPackageRoslynDir()
+        {
+            // Find Roslyn DLLs bundled with this package (Editor/Commands/Code/Roslyn/)
+            // Works for both local development and UPM installations
+            try
+            {
+                // Use the location of this assembly (clibridge4unity.Commands.Code.dll)
+                // to find the Roslyn directory relative to it
+                var thisAsm = typeof(CodeExecutor).Assembly;
+                if (!string.IsNullOrEmpty(thisAsm.Location))
+                {
+                    // In UPM, DLLs compiled from asmdef are in Library/ScriptAssemblies/
+                    // but source files are in Packages/. Use Unity's package path instead.
+                }
+
+                // Search known locations for the bundled Roslyn DLLs
+                string[] candidates = new[]
+                {
+                    // UPM package (symlinked or cached)
+                    "Packages/au.com.oddgames.clibridge4unity/Editor/Plugins/Roslyn",
+                    // Local development
+                    "Assets/Editor/Plugins/Roslyn",
+                };
+
+                foreach (var candidate in candidates)
+                {
+                    string fullPath = Path.GetFullPath(candidate);
+                    if (Directory.Exists(fullPath) &&
+                        File.Exists(Path.Combine(fullPath, "Microsoft.CodeAnalysis.dll")))
+                        return fullPath;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static void CollectRoslynReferences()
+        {
+            // Roslyn on CoreCLR can use all loaded assemblies directly — no filtering needed
+            var refs = new List<string>();
+            var added = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    if (assembly.IsDynamic || string.IsNullOrEmpty(assembly.Location))
+                        continue;
+                    if (!File.Exists(assembly.Location))
+                        continue;
+                    if (added.Add(assembly.Location))
+                        refs.Add(assembly.Location);
+                }
+                catch { }
+            }
+
+            // Also add CoreCLR trusted platform assemblies that may not be loaded yet
+            var trustedPlatformAssemblies = AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") as string;
+            if (trustedPlatformAssemblies != null)
+            {
+                foreach (var path in trustedPlatformAssemblies.Split(Path.PathSeparator))
+                {
+                    if (File.Exists(path) && added.Add(path))
+                        refs.Add(path);
+                }
+            }
+
+            roslynReferencePaths = refs.ToArray();
+        }
+
+        private static void BuildRoslynMetadataRefs()
+        {
+            var refsList = new List<object>();
+            foreach (var path in roslynReferencePaths)
+            {
+                try
+                {
+                    // MetadataReference.CreateFromFile(path) — call with default optional params
+                    var createParams = roslynCreateRef.GetParameters();
+                    var args = new object[createParams.Length];
+                    args[0] = path;
+                    for (int i = 1; i < args.Length; i++)
+                        args[i] = createParams[i].HasDefaultValue ? createParams[i].DefaultValue : null;
+                    refsList.Add(roslynCreateRef.Invoke(null, args));
+                }
+                catch { }
+            }
+
+            roslynCachedRefs = Array.CreateInstance(roslynMetaRefType, refsList.Count);
+            for (int i = 0; i < refsList.Count; i++)
+                roslynCachedRefs.SetValue(refsList[i], i);
+        }
+
+        private static void CollectMcsReferences(string editorPath)
+        {
             var refs = new List<string>();
             var added = new HashSet<string>();
 
             // Find Unity's Mono lib directory (CSharpCodeProvider uses mono's mcs compiler)
-            // The -nostdlib flag prevents mcs from auto-referencing its mscorlib,
-            // and -lib: tells it where to find framework assemblies
-            string editorPath = Path.GetDirectoryName(UnityEditor.EditorApplication.applicationPath);
             monoLibDir = Path.Combine(editorPath, "Data", "MonoBleedingEdge", "lib", "mono", "4.5");
 
             // Add Mono's core framework assemblies (required by mcs compiler)
@@ -310,7 +718,7 @@ namespace clibridge4unity
                 refs.Add(netstandardPath);
 
             // Add all loaded assemblies (Unity, project, etc) - skip CoreCLR framework assemblies
-            // that conflict with Mono's (mscorlib, System.Private.CoreLib, etc)
+            // that conflict with Mono's. Mono framework assemblies are added explicitly above.
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
                 try
@@ -320,10 +728,16 @@ namespace clibridge4unity
                     if (!File.Exists(assembly.Location))
                         continue;
 
-                    // Skip CoreCLR framework assemblies - the Mono compiler can't use them
+                    // Skip ALL System.* and Microsoft.CodeAnalysis* assemblies from loaded assemblies.
+                    // CoreCLR loads its own System.Linq, System.Collections, etc. which conflict
+                    // with Mono's framework (System.Core.dll, System.dll). The Mono framework
+                    // assemblies are added explicitly above, so we don't need any System.* from
+                    // the AppDomain.
                     string asmName = assembly.GetName().Name;
-                    if (asmName == "mscorlib" || asmName == "System.Private.CoreLib" ||
-                        asmName == "System.Runtime" || asmName == "netstandard")
+                    if (asmName == "mscorlib" || asmName == "netstandard" ||
+                        asmName.StartsWith("System.") || asmName.StartsWith("System,") ||
+                        asmName == "System.Private.CoreLib" || asmName == "System" ||
+                        asmName.StartsWith("Microsoft.CodeAnalysis"))
                         continue;
 
                     if (added.Add(assembly.Location))
@@ -332,10 +746,8 @@ namespace clibridge4unity
                 catch { }
             }
 
-            referenceAssemblies = refs.ToArray();
-            responseFilePath = null; // Force response file regeneration
-            initialized = true;
-            Debug.Log($"[Bridge] Code executor initialized with {referenceAssemblies.Length} references (Mono lib: {monoLibDir})");
+            mcsReferences = refs.ToArray();
+            mcsResponseFilePath = null; // Force response file regeneration
         }
     }
 }

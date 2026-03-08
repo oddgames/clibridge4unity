@@ -21,10 +21,10 @@ namespace clibridge4unity
         [BridgeCommand("RENDER",
             "Render prefabs or GameObjects to PNG. Multiple paths = labeled grid.",
             Category = "UI",
-            Usage = "RENDER Assets/Prefabs/MyPrefab.prefab\n" +
+            Usage = "RENDER Assets/Prefabs/MyPrefab.prefab   (auto-sizes to content)\n" +
                     "  RENDER path1.prefab path2.prefab path3.prefab   (grid)\n" +
                     "  RENDER {\"items\":[\"a.prefab\",\"b.prefab\"],\"cols\":3,\"cellWidth\":640,\"cellHeight\":480}\n" +
-                    "  RENDER {\"prefab\":\"X.prefab\",\"width\":1920,\"height\":1080}\n" +
+                    "  RENDER {\"prefab\":\"X.prefab\",\"width\":800,\"height\":600}   (explicit size)\n" +
                     "  Output: %TEMP%/clibridge4unity_screenshots/render_*.png",
             RequiresMainThread = false)]
         public static async Task<string> Render(string data)
@@ -49,9 +49,9 @@ namespace clibridge4unity
                             json["cellWidth"]?.Value<int>() ?? 640,
                             json["cellHeight"]?.Value<int>() ?? 480);
 
-                    // Single-item JSON mode
-                    int width = json["width"]?.Value<int>() ?? 1920;
-                    int height = json["height"]?.Value<int>() ?? 1080;
+                    // Single-item JSON mode (0 = auto-size from content)
+                    int width = json["width"]?.Value<int>() ?? 0;
+                    int height = json["height"]?.Value<int>() ?? 0;
                     string path = json["prefab"]?.ToString()
                                ?? json["gameObject"]?.ToString();
                     if (path == null)
@@ -64,9 +64,9 @@ namespace clibridge4unity
                 if (paths.Count > 1)
                     return await RenderGridAsync(paths, 0, 640, 480);
 
-                // ── Single path ──
+                // ── Single path ── (0,0 = auto-size from content bounds)
                 if (paths.Count == 1)
-                    return await RenderSingleAsync(paths[0], 1920, 1080);
+                    return await RenderSingleAsync(paths[0], 0, 0);
 
                 return Response.Error("Usage: RENDER <path> [path2 path3 ...]");
             }
@@ -245,6 +245,99 @@ namespace clibridge4unity
         }
 
         // ───────────────────── Prefab Rendering (sync on main thread) ─────────────────────
+
+        /// <summary>
+        /// Measures a UI prefab's natural size by instantiating under a temp Canvas, forcing layout,
+        /// then computing the enclosing bounds of all Graphic components. Adds padding.
+        /// Returns (width, height) in pixels. Falls back to 1920x1080 if measurement fails.
+        /// </summary>
+        static (int w, int h) MeasureUIPrefabSize(GameObject prefab)
+        {
+            var canvasGo = new GameObject("__MEASURE_CANVAS__");
+            canvasGo.hideFlags = HideFlags.HideAndDontSave;
+            var canvas = canvasGo.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            var scaler = canvasGo.AddComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
+
+            var instance = UnityEngine.Object.Instantiate(prefab, canvasGo.transform);
+            instance.hideFlags = HideFlags.HideAndDontSave;
+
+            // Center the instance, keep its natural size
+            var instanceRect = instance.GetComponent<RectTransform>();
+            if (instanceRect != null)
+            {
+                instanceRect.anchorMin = new Vector2(0.5f, 0.5f);
+                instanceRect.anchorMax = new Vector2(0.5f, 0.5f);
+                instanceRect.anchoredPosition = Vector2.zero;
+            }
+
+            Canvas.ForceUpdateCanvases();
+
+            // Measure bounds from all RectTransforms with Graphic components
+            int w = 1920, h = 1080;
+            var graphics = instance.GetComponentsInChildren<Graphic>(true);
+            if (graphics.Length > 0)
+            {
+                // Also include the root RectTransform
+                var allRects = instance.GetComponentsInChildren<RectTransform>(true);
+                if (allRects.Length > 0)
+                {
+                    float minX = float.MaxValue, minY = float.MaxValue;
+                    float maxX = float.MinValue, maxY = float.MinValue;
+                    foreach (var rt in allRects)
+                    {
+                        Vector3[] corners = new Vector3[4];
+                        rt.GetWorldCorners(corners);
+                        foreach (var c in corners)
+                        {
+                            if (c.x < minX) minX = c.x;
+                            if (c.y < minY) minY = c.y;
+                            if (c.x > maxX) maxX = c.x;
+                            if (c.y > maxY) maxY = c.y;
+                        }
+                    }
+                    int measuredW = Mathf.CeilToInt(maxX - minX);
+                    int measuredH = Mathf.CeilToInt(maxY - minY);
+                    if (measuredW > 4 && measuredH > 4)
+                    {
+                        // Add 10% padding, minimum 20px each side
+                        int padX = Mathf.Max(20, Mathf.CeilToInt(measuredW * 0.05f));
+                        int padY = Mathf.Max(20, Mathf.CeilToInt(measuredH * 0.05f));
+                        w = measuredW + padX * 2;
+                        h = measuredH + padY * 2;
+                    }
+                }
+            }
+            else if (instanceRect != null)
+            {
+                // No graphics but has RectTransform — use sizeDelta
+                var size = instanceRect.rect.size;
+                if (size.x > 4 && size.y > 4)
+                {
+                    w = Mathf.CeilToInt(size.x) + 40;
+                    h = Mathf.CeilToInt(size.y) + 40;
+                }
+            }
+
+            UnityEngine.Object.DestroyImmediate(canvasGo);
+
+            // If the measured size is very small, the prefab likely auto-sizes (e.g. TMP text)
+            // or uses layout groups. Use a sensible default that shows content clearly.
+            if (w < 200 || h < 200)
+            {
+                // Scale up proportionally, minimum 400px on the short side
+                float scale = 400f / Mathf.Min(w, h);
+                w = Mathf.CeilToInt(w * scale);
+                h = Mathf.CeilToInt(h * scale);
+            }
+
+            // Clamp to reasonable bounds
+            w = Mathf.Clamp(w, 200, 3840);
+            h = Mathf.Clamp(h, 200, 2160);
+            return (w, h);
+        }
+
         static string RenderPrefab(string prefabPath, int width, int height)
         {
             var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
@@ -253,15 +346,38 @@ namespace clibridge4unity
 
             var canvas = prefab.GetComponentInChildren<Canvas>(true);
             if (canvas != null)
+            {
+                // Auto-size: use the Canvas's RectTransform size
+                if (width <= 0 || height <= 0)
+                {
+                    var canvasRect = prefab.GetComponent<RectTransform>();
+                    if (canvasRect != null && canvasRect.rect.width > 1 && canvasRect.rect.height > 1)
+                    {
+                        width = Mathf.CeilToInt(canvasRect.rect.width);
+                        height = Mathf.CeilToInt(canvasRect.rect.height);
+                    }
+                    else
+                    {
+                        width = 1920; height = 1080;
+                    }
+                }
                 return RenderUIPrefab(prefab, prefabPath, width, height);
+            }
 
             // UI prefab without a Canvas (e.g. a button, panel, or widget meant to be a child of a Canvas).
-            // Detect by checking for RectTransform or common UI components.
             var hasRect = prefab.GetComponent<RectTransform>() != null;
             var hasUI = prefab.GetComponentInChildren<Graphic>(true) != null;
             if (hasRect || hasUI)
+            {
+                // Auto-size: measure the prefab's natural dimensions
+                if (width <= 0 || height <= 0)
+                {
+                    (width, height) = MeasureUIPrefabSize(prefab);
+                }
                 return RenderUIPrefabWithTempCanvas(prefab, prefabPath, width, height);
+            }
 
+            if (width <= 0 || height <= 0) { width = 1024; height = 1024; }
             return Render3DPrefab(prefab, prefabPath, width, height);
         }
 
@@ -277,7 +393,7 @@ namespace clibridge4unity
             camGo.hideFlags = HideFlags.HideAndDontSave;
             var cam = camGo.AddComponent<Camera>();
             cam.clearFlags = CameraClearFlags.SolidColor;
-            cam.backgroundColor = new Color(0, 0, 0, 0);
+            cam.backgroundColor = new Color(0.12f, 0.12f, 0.12f, 1f);
             cam.orthographic = true;
             cam.nearClipPlane = 0.1f;
             cam.farClipPlane = 100f;
@@ -316,21 +432,21 @@ namespace clibridge4unity
             var instance = UnityEngine.Object.Instantiate(prefab, canvasGo.transform);
             instance.hideFlags = HideFlags.HideAndDontSave;
 
-            // Stretch the instance to fill the canvas if it has a RectTransform
+            // Center the instance in the canvas at its natural size (don't stretch)
             var instanceRect = instance.GetComponent<RectTransform>();
             if (instanceRect != null)
             {
-                instanceRect.anchorMin = Vector2.zero;
-                instanceRect.anchorMax = Vector2.one;
-                instanceRect.offsetMin = Vector2.zero;
-                instanceRect.offsetMax = Vector2.zero;
+                instanceRect.anchorMin = new Vector2(0.5f, 0.5f);
+                instanceRect.anchorMax = new Vector2(0.5f, 0.5f);
+                instanceRect.anchoredPosition = Vector2.zero;
+                // Keep the prefab's original sizeDelta (natural size)
             }
 
             var camGo = new GameObject("__RENDER_CAM__");
             camGo.hideFlags = HideFlags.HideAndDontSave;
             var cam = camGo.AddComponent<Camera>();
             cam.clearFlags = CameraClearFlags.SolidColor;
-            cam.backgroundColor = new Color(0, 0, 0, 0);
+            cam.backgroundColor = new Color(0.12f, 0.12f, 0.12f, 1f);
             cam.orthographic = true;
             cam.nearClipPlane = 0.1f;
             cam.farClipPlane = 100f;
@@ -437,20 +553,41 @@ namespace clibridge4unity
         // ───────────────────── Scene GameObject Rendering ─────────────────────
         static async Task<string> RenderGameObjectAsync(string targetPath, int width, int height)
         {
+            // Auto-size: resolve dimensions on main thread first
+            if (width <= 0 || height <= 0)
+            {
+                var size = await CommandRegistry.RunOnMainThreadAsync<(int w, int h)>(() =>
+                {
+                    var target = FindSceneGameObject(targetPath);
+                    if (target == null) return (1920, 1080);
+                    var canvas = target.GetComponentInChildren<Canvas>(true)
+                              ?? target.GetComponentInParent<Canvas>();
+                    if (canvas != null)
+                    {
+                        var canvasRect = canvas.GetComponent<RectTransform>();
+                        if (canvasRect != null && canvasRect.rect.width > 1 && canvasRect.rect.height > 1)
+                            return (Mathf.CeilToInt(canvasRect.rect.width), Mathf.CeilToInt(canvasRect.rect.height));
+                        return (1920, 1080);
+                    }
+                    return (1024, 1024);
+                });
+                width = size.w;
+                height = size.h;
+            }
+
+            int w = width, h = height;
             var result = await CommandRegistry.RunOnMainThreadAsync(() =>
             {
                 GameObject target = FindSceneGameObject(targetPath);
                 if (target == null)
                     return $"Error: GameObject not found: {targetPath}";
 
-                // Check for Canvas (uGUI)
                 var canvas = target.GetComponentInChildren<Canvas>(true)
                           ?? target.GetComponentInParent<Canvas>();
                 if (canvas != null)
-                    return RenderSceneCanvas(canvas, target, width, height);
+                    return RenderSceneCanvas(canvas, target, w, h);
 
-                // 3D object
-                return RenderScene3D(target, width, height);
+                return RenderScene3D(target, w, h);
             });
 
             return result;
@@ -461,15 +598,60 @@ namespace clibridge4unity
             var origRenderMode = canvas.renderMode;
             var origCamera = canvas.worldCamera;
 
-            canvas.renderMode = RenderMode.ScreenSpaceCamera;
+            // Temporarily activate the canvas hierarchy if inactive
+            var inactiveObjects = new List<GameObject>();
+            for (var t = canvas.transform; t != null; t = t.parent)
+            {
+                if (!t.gameObject.activeSelf)
+                {
+                    inactiveObjects.Add(t.gameObject);
+                    t.gameObject.SetActive(true);
+                }
+            }
 
+            // Switch to WorldSpace — ScreenSpaceOverlay bypasses cameras entirely
+            canvas.renderMode = RenderMode.WorldSpace;
+            var canvasRect = canvas.GetComponent<RectTransform>();
+
+            // Save original transform
+            var origPos = canvasRect.position;
+            var origRot = canvasRect.rotation;
+            var origScale = canvasRect.localScale;
+
+            // Set pivot to center, position at origin
+            canvasRect.pivot = new Vector2(0.5f, 0.5f);
+            canvasRect.position = Vector3.zero;
+            canvasRect.rotation = Quaternion.identity;
+            canvasRect.localScale = Vector3.one;
+
+            // Force layout rebuild in new mode
+            Canvas.ForceUpdateCanvases();
+
+            // Measure actual content bounds after layout
+            float canvasW = canvasRect.rect.width;
+            float canvasH = canvasRect.rect.height;
+
+            // Camera: orthographic, centered on canvas, sized to fit
             var camGo = new GameObject("__RENDER_CAM__");
             camGo.hideFlags = HideFlags.HideAndDontSave;
             var cam = camGo.AddComponent<Camera>();
             cam.clearFlags = CameraClearFlags.SolidColor;
-            cam.backgroundColor = new Color(0, 0, 0, 0);
+            cam.backgroundColor = new Color(0.12f, 0.12f, 0.12f, 1f);
             cam.orthographic = true;
-            canvas.worldCamera = cam;
+            cam.cullingMask = -1;
+            cam.nearClipPlane = 0.1f;
+            cam.farClipPlane = 100f;
+
+            // Match camera aspect to render target, fit canvas height
+            float renderAspect = (float)width / height;
+            float canvasAspect = canvasW / canvasH;
+            if (canvasAspect > renderAspect)
+                cam.orthographicSize = (canvasW / renderAspect) * 0.5f;
+            else
+                cam.orthographicSize = canvasH * 0.5f;
+
+            camGo.transform.position = new Vector3(0, 0, -10f);
+            camGo.transform.rotation = Quaternion.identity;
 
             var rt = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32);
             rt.Create();
@@ -483,8 +665,13 @@ namespace clibridge4unity
             }
             finally
             {
+                canvasRect.position = origPos;
+                canvasRect.rotation = origRot;
+                canvasRect.localScale = origScale;
                 canvas.renderMode = origRenderMode;
                 canvas.worldCamera = origCamera;
+                foreach (var go in inactiveObjects)
+                    go.SetActive(false);
                 cam.targetTexture = null;
                 UnityEngine.Object.DestroyImmediate(camGo);
                 rt.Release();
