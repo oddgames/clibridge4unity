@@ -1,0 +1,19 @@
+{
+    "name": "clibridge4unity.Commands.Code",
+    "rootNamespace": "clibridge4unity.Commands",
+    "references": [
+        "clibridge4unity.Core",
+        "Unity.Newtonsoft.Json"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

@@ -1,0 +1,27 @@
+# Everything excluded by default
+*
+
+# Repo structure: cli/ + Package/ + root files
+!cli/
+!cli/**
+!Package/
+!Package/**
+!README.md
+!LICENSE
+!install.ps1
+!.gitignore
+
+# Build outputs inside cli/
+cli/bin/
+cli/obj/
+
+# Unity generated
+Library/
+Temp/
+Logs/
+UserSettings/
+obj/
+
+# OS
+.DS_Store
+Thumbs.db
