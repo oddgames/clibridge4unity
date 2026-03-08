@@ -12,12 +12,11 @@ namespace clibridge4unity
 {
     public static class UICommands
     {
-        [BridgeCommand("UI_DISCOVER", "Discover UI assets: sprites, fonts, UI prefabs, UXML/USS templates, and scenes",
+        [BridgeCommand("UI_DISCOVER", "Discover UI assets: sprites, fonts, UI prefabs, and scenes",
             Category = "UI",
             Usage = "UI_DISCOVER\n" +
                     "  UI_DISCOVER sprites           - List sprite folders with counts\n" +
-                    "  UI_DISCOVER prefabs           - List prefabs with Canvas root\n" +
-                    "  UI_DISCOVER templates          - List UXML templates with linked USS\n" +
+                    "  UI_DISCOVER prefabs           - List prefabs (Canvas screens + RectTransform elements)\n" +
                     "  UI_DISCOVER scenes            - List scenes containing UI\n" +
                     "  UI_DISCOVER fonts             - List available fonts\n" +
                     "  UI_DISCOVER sprites:Icons/128  - List sprites in a specific folder",
@@ -40,10 +39,8 @@ namespace clibridge4unity
                     return DiscoverUIScenes();
                 if (filter == "fonts")
                     return DiscoverFonts();
-                if (filter == "templates" || filter == "uxml" || filter == "uss")
-                    return DiscoverTemplates();
 
-                return Response.Error($"Unknown filter: {data}. Use: sprites, prefabs, templates, scenes, fonts, or sprites:<folder>");
+                return Response.Error($"Unknown filter: {data}. Use: sprites, prefabs, scenes, fonts, or sprites:<folder>");
             }
             catch (Exception ex)
             {
@@ -134,30 +131,57 @@ namespace clibridge4unity
             sb.AppendLine();
 
             // --- UI Prefabs ---
-            sb.AppendLine("## UI Prefabs (with Canvas)");
             var prefabGuids = AssetDatabase.FindAssets("t:Prefab", new[] { "Assets" });
-            int uiPrefabCount = 0;
+            var canvasPrefabs = new List<(string path, GameObject go)>();
+            var elementPrefabs = new List<(string path, GameObject go)>();
+
             foreach (var guid in prefabGuids)
             {
                 var path = AssetDatabase.GUIDToAssetPath(guid);
                 var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
                 if (prefab == null) continue;
 
-                var canvas = prefab.GetComponentInChildren<Canvas>(true);
-                if (canvas == null) continue;
+                if (prefab.GetComponentInChildren<Canvas>(true) != null)
+                    canvasPrefabs.Add((path, prefab));
+                else if (prefab.GetComponent<RectTransform>() != null)
+                    elementPrefabs.Add((path, prefab));
+            }
 
-                uiPrefabCount++;
+            sb.AppendLine($"## UI Screen Prefabs — Canvas root ({canvasPrefabs.Count})");
+            foreach (var (path, prefab) in canvasPrefabs)
+            {
+                var canvas = prefab.GetComponentInChildren<Canvas>(true);
                 var imageCount = prefab.GetComponentsInChildren<Image>(true).Length;
                 var textCount = prefab.GetComponentsInChildren<Text>(true).Length;
                 var buttonCount = prefab.GetComponentsInChildren<Button>(true).Length;
                 sb.AppendLine($"  {path}  ({canvas.renderMode}, {imageCount} Img, {textCount} Txt, {buttonCount} Btn)");
             }
-            if (uiPrefabCount == 0)
+            if (canvasPrefabs.Count == 0)
                 sb.AppendLine("  (none found)");
             sb.AppendLine();
 
-            // --- UXML/USS Templates ---
-            sb.AppendLine(DiscoverTemplates());
+            sb.AppendLine($"## UI Element Prefabs — RectTransform root, place inside Canvas ({elementPrefabs.Count})");
+            var elementsByFolder = elementPrefabs
+                .GroupBy(e => Path.GetDirectoryName(e.path).Replace("\\", "/"))
+                .OrderBy(g => g.Key);
+            foreach (var group in elementsByFolder)
+            {
+                sb.AppendLine($"  {group.Key}/");
+                foreach (var (path, prefab) in group.OrderBy(e => e.path))
+                {
+                    var imageCount = prefab.GetComponentsInChildren<Image>(true).Length;
+                    var buttonCount = prefab.GetComponentsInChildren<Button>(true).Length;
+                    var tmpCount = prefab.GetComponentsInChildren<TMPro.TMP_Text>(true).Length;
+                    var parts = new List<string>();
+                    if (imageCount > 0) parts.Add($"{imageCount} Img");
+                    if (tmpCount > 0) parts.Add($"{tmpCount} TMP");
+                    if (buttonCount > 0) parts.Add($"{buttonCount} Btn");
+                    string info = parts.Count > 0 ? $"  ({string.Join(", ", parts)})" : "";
+                    sb.AppendLine($"    {Path.GetFileNameWithoutExtension(path)}{info}");
+                }
+            }
+            if (elementPrefabs.Count == 0)
+                sb.AppendLine("  (none found)");
             sb.AppendLine();
 
             // --- Scenes with UI ---
@@ -268,11 +292,10 @@ namespace clibridge4unity
         private static string DiscoverUIPrefabs()
         {
             var sb = new StringBuilder();
-            sb.AppendLine("UI Prefabs (containing Canvas):");
-            sb.AppendLine();
 
             var prefabGuids = AssetDatabase.FindAssets("t:Prefab", new[] { "Assets" });
-            int count = 0;
+            var canvasPrefabs = new List<(string path, GameObject go)>();
+            var elementPrefabs = new List<(string path, GameObject go)>();
 
             foreach (var guid in prefabGuids)
             {
@@ -280,24 +303,31 @@ namespace clibridge4unity
                 var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
                 if (prefab == null) continue;
 
-                var canvas = prefab.GetComponentInChildren<Canvas>(true);
-                if (canvas == null) continue;
+                if (prefab.GetComponentInChildren<Canvas>(true) != null)
+                    canvasPrefabs.Add((path, prefab));
+                else if (prefab.GetComponent<RectTransform>() != null)
+                    elementPrefabs.Add((path, prefab));
+            }
 
-                count++;
+            // --- Canvas prefabs (full UI screens) ---
+            sb.AppendLine($"UI Prefabs with Canvas ({canvasPrefabs.Count}):");
+            sb.AppendLine();
+            foreach (var (path, prefab) in canvasPrefabs)
+            {
+                var canvas = prefab.GetComponentInChildren<Canvas>(true);
                 sb.AppendLine($"  {path}");
 
-                // Show component summary
                 var images = prefab.GetComponentsInChildren<Image>(true);
-                var texts = prefab.GetComponentsInChildren<Text>(true);
                 var buttons = prefab.GetComponentsInChildren<Button>(true);
                 var inputs = prefab.GetComponentsInChildren<InputField>(true);
                 var toggles = prefab.GetComponentsInChildren<Toggle>(true);
                 var sliders = prefab.GetComponentsInChildren<Slider>(true);
+                var tmps = prefab.GetComponentsInChildren<TMPro.TMP_Text>(true);
                 var scrollRects = prefab.GetComponentsInChildren<ScrollRect>(true);
 
                 var parts = new List<string>();
                 if (images.Length > 0) parts.Add($"{images.Length} Image");
-                if (texts.Length > 0) parts.Add($"{texts.Length} Text");
+                if (tmps.Length > 0) parts.Add($"{tmps.Length} TMP");
                 if (buttons.Length > 0) parts.Add($"{buttons.Length} Button");
                 if (inputs.Length > 0) parts.Add($"{inputs.Length} InputField");
                 if (toggles.Length > 0) parts.Add($"{toggles.Length} Toggle");
@@ -306,22 +336,56 @@ namespace clibridge4unity
 
                 sb.AppendLine($"    Canvas: {canvas.renderMode} | {string.Join(", ", parts)}");
 
-                // Show immediate children for structure overview
                 var root = prefab.transform;
                 for (int i = 0; i < Mathf.Min(root.childCount, 8); i++)
-                {
-                    var child = root.GetChild(i);
-                    sb.AppendLine($"    - {child.name}");
-                }
+                    sb.AppendLine($"    - {root.GetChild(i).name}");
                 if (root.childCount > 8)
                     sb.AppendLine($"    - ... +{root.childCount - 8} more");
                 sb.AppendLine();
             }
+            if (canvasPrefabs.Count == 0)
+                sb.AppendLine("  (none found)\n");
 
-            if (count == 0)
+            // --- Element prefabs (RectTransform root, no Canvas) ---
+            sb.AppendLine($"UI Element Prefabs (RectTransform, no Canvas) ({elementPrefabs.Count}):");
+            sb.AppendLine();
+            var byFolder = elementPrefabs
+                .GroupBy(e => Path.GetDirectoryName(e.path).Replace("\\", "/"))
+                .OrderBy(g => g.Key);
+            foreach (var group in byFolder)
+            {
+                sb.AppendLine($"  {group.Key}/");
+                foreach (var (path, prefab) in group.OrderBy(e => e.path))
+                {
+                    var images = prefab.GetComponentsInChildren<Image>(true);
+                    var buttons = prefab.GetComponentsInChildren<Button>(true);
+                    var tmps = prefab.GetComponentsInChildren<TMPro.TMP_Text>(true);
+                    var toggles = prefab.GetComponentsInChildren<Toggle>(true);
+                    var sliders = prefab.GetComponentsInChildren<Slider>(true);
+
+                    var parts = new List<string>();
+                    if (images.Length > 0) parts.Add($"{images.Length} Img");
+                    if (tmps.Length > 0) parts.Add($"{tmps.Length} TMP");
+                    if (buttons.Length > 0) parts.Add($"{buttons.Length} Btn");
+                    if (toggles.Length > 0) parts.Add($"{toggles.Length} Toggle");
+                    if (sliders.Length > 0) parts.Add($"{sliders.Length} Slider");
+
+                    string info = parts.Count > 0 ? $"  ({string.Join(", ", parts)})" : "";
+                    string name = Path.GetFileNameWithoutExtension(path);
+
+                    // Show root children as structure hint
+                    var root = prefab.transform;
+                    var childNames = Enumerable.Range(0, Mathf.Min(root.childCount, 5))
+                        .Select(i => root.GetChild(i).name);
+                    string children = root.childCount > 0 ? $"  [{string.Join(", ", childNames)}{(root.childCount > 5 ? ", ..." : "")}]" : "";
+
+                    sb.AppendLine($"    {name}{info}{children}");
+                }
+                sb.AppendLine();
+            }
+            if (elementPrefabs.Count == 0)
                 sb.AppendLine("  (none found)");
 
-            sb.AppendLine($"Total: {count} UI prefabs");
             return sb.ToString().TrimEnd();
         }
 
@@ -381,96 +445,6 @@ namespace clibridge4unity
                     }
                 }
             }
-
-            return sb.ToString().TrimEnd();
-        }
-
-        private static string DiscoverTemplates()
-        {
-            var sb = new StringBuilder();
-            sb.AppendLine("## UI Toolkit Templates (UXML + USS)");
-            sb.AppendLine();
-
-            var uxmlGuids = AssetDatabase.FindAssets("t:VisualTreeAsset", new[] { "Assets" });
-            var uxmlPaths = uxmlGuids.Select(g => AssetDatabase.GUIDToAssetPath(g))
-                .Where(p => !p.StartsWith("Assets/UI Toolkit/")) // skip Unity defaults
-                .OrderBy(p => p).ToArray();
-
-            if (uxmlPaths.Length == 0)
-            {
-                sb.AppendLine("  (none found)");
-                return sb.ToString().TrimEnd();
-            }
-
-            // Group by folder
-            var byFolder = uxmlPaths
-                .GroupBy(p => Path.GetDirectoryName(p).Replace("\\", "/"))
-                .OrderBy(g => g.Key);
-
-            foreach (var group in byFolder)
-            {
-                sb.AppendLine($"  {group.Key}/");
-                foreach (var uxmlPath in group)
-                {
-                    string name = Path.GetFileNameWithoutExtension(uxmlPath);
-                    string ussPath = Path.Combine(Path.GetDirectoryName(uxmlPath), name + ".uss").Replace("\\", "/");
-                    bool hasUss = File.Exists(ussPath);
-
-                    // Read UXML to count elements and find template references
-                    int elementCount = 0;
-                    var templateRefs = new List<string>();
-                    try
-                    {
-                        var lines = File.ReadAllLines(uxmlPath);
-                        foreach (var line in lines)
-                        {
-                            var trimmed = line.Trim();
-                            if (trimmed.StartsWith("<ui:") && !trimmed.StartsWith("<ui:UXML") && !trimmed.StartsWith("<ui:Style"))
-                                elementCount++;
-                            // Find Template references
-                            if (trimmed.Contains("<Template ") || trimmed.Contains("<ui:Template "))
-                            {
-                                var match = System.Text.RegularExpressions.Regex.Match(trimmed, @"name=""([^""]+)""");
-                                if (match.Success)
-                                    templateRefs.Add(match.Groups[1].Value);
-                            }
-                        }
-                    }
-                    catch { /* skip unreadable */ }
-
-                    var parts = new List<string>();
-                    if (hasUss) parts.Add("USS");
-                    if (elementCount > 0) parts.Add($"{elementCount} elements");
-                    if (templateRefs.Count > 0) parts.Add($"uses: {string.Join(", ", templateRefs)}");
-
-                    string info = parts.Count > 0 ? $" ({string.Join(", ", parts)})" : "";
-                    sb.AppendLine($"    {name}.uxml{info}");
-                }
-            }
-
-            // Also list standalone USS files (no matching UXML)
-            var ussGuids = AssetDatabase.FindAssets("t:StyleSheet", new[] { "Assets" });
-            var ussPaths = ussGuids.Select(g => AssetDatabase.GUIDToAssetPath(g))
-                .Where(p => p.EndsWith(".uss") && !p.StartsWith("Assets/UI Toolkit/"))
-                .OrderBy(p => p).ToArray();
-            var uxmlNames = new HashSet<string>(uxmlPaths.Select(p =>
-                Path.Combine(Path.GetDirectoryName(p), Path.GetFileNameWithoutExtension(p)).Replace("\\", "/")));
-            var standaloneUss = ussPaths.Where(p =>
-            {
-                string withoutExt = Path.Combine(Path.GetDirectoryName(p), Path.GetFileNameWithoutExtension(p)).Replace("\\", "/");
-                return !uxmlNames.Contains(withoutExt);
-            }).ToArray();
-
-            if (standaloneUss.Length > 0)
-            {
-                sb.AppendLine();
-                sb.AppendLine("  Standalone USS (no matching UXML):");
-                foreach (var uss in standaloneUss)
-                    sb.AppendLine($"    {uss}");
-            }
-
-            sb.AppendLine();
-            sb.AppendLine($"  Total: {uxmlPaths.Length} UXML, {ussPaths.Length} USS");
 
             return sb.ToString().TrimEnd();
         }

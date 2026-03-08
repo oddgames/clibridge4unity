@@ -1,3 +1,5 @@
+// COMMENTED OUT: UI Toolkit UXML conversion removed
+#if false
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -1584,3 +1586,4 @@ namespace clibridge4unity
         }
     }
 }
+#endif

@@ -2,12 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.UI;
-using UnityEngine.UIElements;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using Newtonsoft.Json.Linq;
@@ -21,12 +19,12 @@ namespace clibridge4unity
             "clibridge4unity_screenshots");
 
         [BridgeCommand("RENDER",
-            "Render prefabs, UXML docs, or GameObjects to PNG. Multiple paths = labeled grid.",
+            "Render prefabs or GameObjects to PNG. Multiple paths = labeled grid.",
             Category = "UI",
             Usage = "RENDER Assets/Prefabs/MyPrefab.prefab\n" +
-                    "  RENDER path1.prefab path2.uxml path3.prefab   (grid)\n" +
-                    "  RENDER {\"items\":[\"a.prefab\",\"b.uxml\"],\"cols\":3,\"cellWidth\":640,\"cellHeight\":480}\n" +
-                    "  RENDER {\"prefab\":\"X.prefab\",\"width\":1920,\"height\":1080,\"background\":\"#333\"}\n" +
+                    "  RENDER path1.prefab path2.prefab path3.prefab   (grid)\n" +
+                    "  RENDER {\"items\":[\"a.prefab\",\"b.prefab\"],\"cols\":3,\"cellWidth\":640,\"cellHeight\":480}\n" +
+                    "  RENDER {\"prefab\":\"X.prefab\",\"width\":1920,\"height\":1080}\n" +
                     "  Output: %TEMP%/clibridge4unity_screenshots/render_*.png",
             RequiresMainThread = false)]
         public static async Task<string> Render(string data)
@@ -54,17 +52,11 @@ namespace clibridge4unity
                     // Single-item JSON mode
                     int width = json["width"]?.Value<int>() ?? 1920;
                     int height = json["height"]?.Value<int>() ?? 1080;
-                    Color bgColor = new Color(0, 0, 0, 0);
-                    var bg = json["background"]?.ToString();
-                    if (bg != null)
-                        ColorUtility.TryParseHtmlString(bg, out bgColor);
-
                     string path = json["prefab"]?.ToString()
-                               ?? json["uxml"]?.ToString()
                                ?? json["gameObject"]?.ToString();
                     if (path == null)
-                        return Response.Error("Missing prefab, uxml, or gameObject");
-                    return await RenderSingleAsync(path, width, height, bgColor);
+                        return Response.Error("Missing prefab or gameObject");
+                    return await RenderSingleAsync(path, width, height);
                 }
 
                 // ── Plain text: check for multiple paths ──
@@ -74,7 +66,7 @@ namespace clibridge4unity
 
                 // ── Single path ──
                 if (paths.Count == 1)
-                    return await RenderSingleAsync(paths[0], 1920, 1080, new Color(0, 0, 0, 0));
+                    return await RenderSingleAsync(paths[0], 1920, 1080);
 
                 return Response.Error("Usage: RENDER <path> [path2 path3 ...]");
             }
@@ -86,45 +78,25 @@ namespace clibridge4unity
 
         // ───────────────────── Single item render ─────────────────────
 
-        static async Task<string> RenderSingleAsync(string path, int width, int height, Color bgColor)
+        static async Task<string> RenderSingleAsync(string path, int width, int height)
         {
-            // Detect type
-            if (path.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase))
-                return await RenderUxmlAsync(path, width, height, bgColor);
-
             if (path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
             {
-                var prefabResult = await CommandRegistry.RunOnMainThreadAsync(
+                return await CommandRegistry.RunOnMainThreadAsync(
                     () => RenderPrefab(path, width, height));
-                if (prefabResult.StartsWith("UXML_REDIRECT:"))
-                {
-                    var parts = prefabResult.Split(':');
-                    return await RenderUxmlAsync(parts[1], int.Parse(parts[2]), int.Parse(parts[3]), bgColor);
-                }
-                return prefabResult;
             }
 
-            // Auto-detect
+            // Auto-detect asset type
             var detected = await CommandRegistry.RunOnMainThreadAsync(() =>
             {
                 var assetType = AssetDatabase.GetMainAssetTypeAtPath(path);
-                if (assetType == typeof(VisualTreeAsset)) return "uxml";
                 if (assetType == typeof(GameObject)) return "prefab";
                 return "gameObject";
             });
 
-            if (detected == "uxml")
-                return await RenderUxmlAsync(path, width, height, bgColor);
             if (detected == "prefab")
-            {
-                var r = await CommandRegistry.RunOnMainThreadAsync(() => RenderPrefab(path, width, height));
-                if (r.StartsWith("UXML_REDIRECT:"))
-                {
-                    var parts = r.Split(':');
-                    return await RenderUxmlAsync(parts[1], int.Parse(parts[2]), int.Parse(parts[3]), bgColor);
-                }
-                return r;
-            }
+                return await CommandRegistry.RunOnMainThreadAsync(() => RenderPrefab(path, width, height));
+
             return await RenderGameObjectAsync(path, width, height);
         }
 
@@ -142,13 +114,11 @@ namespace clibridge4unity
 
                 // Find the earliest known extension
                 int prefabIdx = remaining.IndexOf(".prefab", StringComparison.OrdinalIgnoreCase);
-                int uxmlIdx = remaining.IndexOf(".uxml", StringComparison.OrdinalIgnoreCase);
                 int unityIdx = remaining.IndexOf(".unity", StringComparison.OrdinalIgnoreCase);
 
                 // Pick whichever extension comes first
                 var candidates = new List<(int idx, int len)>();
                 if (prefabIdx >= 0) candidates.Add((prefabIdx, ".prefab".Length));
-                if (uxmlIdx >= 0) candidates.Add((uxmlIdx, ".uxml".Length));
                 if (unityIdx >= 0) candidates.Add((unityIdx, ".unity".Length));
 
                 if (candidates.Count == 0)
@@ -187,7 +157,7 @@ namespace clibridge4unity
                 cellLabels[i] = Path.GetFileNameWithoutExtension(itemPath);
 
                 // Render the item at cell size — result contains "output: <path>"
-                string renderResult = await RenderSingleAsync(itemPath, renderW, renderH, new Color(0, 0, 0, 0));
+                string renderResult = await RenderSingleAsync(itemPath, renderW, renderH);
 
                 // Extract output path from result
                 string tempFile = null;
@@ -274,152 +244,12 @@ namespace clibridge4unity
             return result;
         }
 
-        // ───────────────────── UXML Rendering (runtime UIDocument + RenderTexture, async) ─────────────────────
-
-        // Persistent state across async phases
-        static GameObject _uxmlRenderGo;
-        static PanelSettings _uxmlPanelSettings;
-        static RenderTexture _uxmlRenderTarget;
-
-        static async Task<string> RenderUxmlAsync(string uxmlPath, int width, int height, Color bgColor)
-        {
-            // Phase 1: Pre-warm textures and create runtime panel
-            var error = await CommandRegistry.RunOnMainThreadAsync(() =>
-            {
-                var treeAsset = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(uxmlPath);
-                if (treeAsset == null) return $"UXML not found: {uxmlPath}";
-
-                // Pre-warm all texture/sprite/font assets so they're in GPU memory
-                var deps = AssetDatabase.GetDependencies(uxmlPath, true);
-                foreach (var dep in deps)
-                {
-                    if (dep.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
-                        dep.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
-                        dep.EndsWith(".tga", StringComparison.OrdinalIgnoreCase))
-                    {
-                        AssetDatabase.LoadAssetAtPath<Texture2D>(dep);
-                        AssetDatabase.LoadAssetAtPath<Sprite>(dep);
-                    }
-                    else if (dep.EndsWith(".ttf", StringComparison.OrdinalIgnoreCase) ||
-                             dep.EndsWith(".otf", StringComparison.OrdinalIgnoreCase))
-                    {
-                        AssetDatabase.LoadAssetAtPath<Font>(dep);
-                    }
-                }
-
-                _uxmlRenderTarget = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32);
-                _uxmlRenderTarget.Create();
-
-                _uxmlPanelSettings = ScriptableObject.CreateInstance<PanelSettings>();
-                _uxmlPanelSettings.targetTexture = _uxmlRenderTarget;
-                _uxmlPanelSettings.scaleMode = PanelScaleMode.ConstantPixelSize;
-                _uxmlPanelSettings.clearColor = true;
-                _uxmlPanelSettings.colorClearValue = bgColor;
-
-                _uxmlRenderGo = new GameObject("__RENDER_UXML_TEMP__");
-                _uxmlRenderGo.hideFlags = HideFlags.HideAndDontSave;
-                var doc = _uxmlRenderGo.AddComponent<UIDocument>();
-                doc.panelSettings = _uxmlPanelSettings;
-                doc.visualTreeAsset = treeAsset;
-
-                // Initial panel update
-                ForceUxmlPanelRender(doc);
-
-                return (string)null;
-            });
-
-            if (error != null) return Response.Error(error);
-
-            // Phase 2-4: Multiple render passes with delays to allow texture atlas generation
-            for (int round = 0; round < 3; round++)
-            {
-                await Task.Delay(300);
-                await CommandRegistry.RunOnMainThreadAsync(() =>
-                {
-                    if (_uxmlRenderGo != null)
-                    {
-                        var doc = _uxmlRenderGo.GetComponent<UIDocument>();
-                        if (doc != null) ForceUxmlPanelRender(doc);
-                    }
-                    return 0;
-                });
-            }
-
-            // Phase 5: Final capture
-            var result = await CommandRegistry.RunOnMainThreadAsync(() =>
-            {
-                try
-                {
-                    if (_uxmlRenderTarget == null)
-                        return Response.Error("Render target was destroyed");
-
-                    // One final render pass
-                    var doc = _uxmlRenderGo?.GetComponent<UIDocument>();
-                    if (doc != null) ForceUxmlPanelRender(doc);
-                    GL.Flush();
-
-                    string outputPath = Path.Combine(OutputDir, "render_uxml.png");
-                    Directory.CreateDirectory(OutputDir);
-                    ReadRtAndSaveToFile(_uxmlRenderTarget, width, height, outputPath);
-
-                    var sb = new StringBuilder();
-                    sb.AppendLine($"Rendered UXML: {uxmlPath}");
-                    sb.AppendLine($"size: {width}x{height}");
-                    sb.AppendLine($"output: {outputPath}");
-                    return sb.ToString().TrimEnd();
-                }
-                finally
-                {
-                    if (_uxmlRenderGo != null) UnityEngine.Object.DestroyImmediate(_uxmlRenderGo);
-                    if (_uxmlPanelSettings != null) UnityEngine.Object.DestroyImmediate(_uxmlPanelSettings);
-                    if (_uxmlRenderTarget != null) { _uxmlRenderTarget.Release(); UnityEngine.Object.DestroyImmediate(_uxmlRenderTarget); }
-                    _uxmlRenderGo = null;
-                    _uxmlPanelSettings = null;
-                    _uxmlRenderTarget = null;
-                }
-            });
-
-            return result;
-        }
-
-        static void ForceUxmlPanelRender(UIDocument doc)
-        {
-            var root = doc.rootVisualElement;
-            var panel = root?.panel;
-            if (panel == null) return;
-
-            var bindFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            var updateMethod = panel.GetType().GetMethod("Update", bindFlags, null, Type.EmptyTypes, null);
-            var updateForRepaint = panel.GetType().GetMethod("UpdateForRepaint", bindFlags, null, Type.EmptyTypes, null);
-            var repaintMethod = panel.GetType().GetMethod("Repaint", bindFlags, null, new[] { typeof(Event) }, null);
-            var renderMethod = panel.GetType().GetMethod("Render", bindFlags, null, Type.EmptyTypes, null);
-
-            var repaintEvent = new Event { type = EventType.Repaint };
-
-            for (int i = 0; i < 5; i++)
-            {
-                updateMethod?.Invoke(panel, null);
-                updateForRepaint?.Invoke(panel, null);
-                repaintMethod?.Invoke(panel, new object[] { repaintEvent });
-                renderMethod?.Invoke(panel, null);
-            }
-        }
-
         // ───────────────────── Prefab Rendering (sync on main thread) ─────────────────────
         static string RenderPrefab(string prefabPath, int width, int height)
         {
             var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
             if (prefab == null)
                 return Response.Error($"Prefab not found: {prefabPath}");
-
-            // Check if it's a UI Toolkit prefab (has UIDocument)
-            var uiDoc = prefab.GetComponentInChildren<UIDocument>(true);
-            if (uiDoc != null && uiDoc.visualTreeAsset != null)
-            {
-                var uxmlPath = AssetDatabase.GetAssetPath(uiDoc.visualTreeAsset);
-                // Can't do async from here, so return a hint
-                return $"UXML_REDIRECT:{uxmlPath}:{width}:{height}";
-            }
 
             var canvas = prefab.GetComponentInChildren<Canvas>(true);
             if (canvas != null)
@@ -613,15 +443,6 @@ namespace clibridge4unity
                 if (target == null)
                     return $"Error: GameObject not found: {targetPath}";
 
-                // Check for UIDocument (UI Toolkit)
-                var uiDoc = target.GetComponent<UIDocument>()
-                         ?? target.GetComponentInParent<UIDocument>();
-                if (uiDoc != null && uiDoc.visualTreeAsset != null)
-                {
-                    var uxmlPath = AssetDatabase.GetAssetPath(uiDoc.visualTreeAsset);
-                    return $"UXML_REDIRECT:{uxmlPath}:{width}:{height}";
-                }
-
                 // Check for Canvas (uGUI)
                 var canvas = target.GetComponentInChildren<Canvas>(true)
                           ?? target.GetComponentInParent<Canvas>();
@@ -631,13 +452,6 @@ namespace clibridge4unity
                 // 3D object
                 return RenderScene3D(target, width, height);
             });
-
-            // Handle UXML redirect
-            if (result.StartsWith("UXML_REDIRECT:"))
-            {
-                var parts = result.Split(':');
-                return await RenderUxmlAsync(parts[1], int.Parse(parts[2]), int.Parse(parts[3]), new Color(0, 0, 0, 0));
-            }
 
             return result;
         }
