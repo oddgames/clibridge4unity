@@ -9,7 +9,11 @@
 !README.md
 !LICENSE
 !install.ps1
+!deploy.ps1
 !.gitignore
+!.claude/
+!.claude/**
+.claude/settings.local.json
 
 # Build outputs inside cli/
 cli/bin/
