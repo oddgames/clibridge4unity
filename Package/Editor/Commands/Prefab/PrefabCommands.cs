@@ -99,6 +99,95 @@ namespace clibridge4unity
         }
 
         /// <summary>
+        /// Saves a scene GameObject as a prefab asset. Keeps the scene instance connected.
+        /// </summary>
+        [BridgeCommand("PREFAB_SAVE", "Save a scene GameObject as a prefab asset",
+            Category = "Prefab",
+            Usage = "PREFAB_SAVE GameObjectName Assets/Prefabs/MyPrefab.prefab\n" +
+                    "  PREFAB_SAVE GameObjectName  (auto-saves to Assets/Prefabs/)",
+            RequiresMainThread = true)]
+        public static string Save(string data)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(data))
+                    return Response.Error("Usage: PREFAB_SAVE <gameObjectName> [outputPath]");
+
+                string goName;
+                string outputPath;
+
+                if (data.TrimStart().StartsWith("{"))
+                {
+                    var json = JObject.Parse(data);
+                    goName = json["name"]?.ToString() ?? json["gameObject"]?.ToString();
+                    outputPath = json["path"]?.ToString();
+                }
+                else
+                {
+                    // Plain args: PREFAB_SAVE <name> [path]
+                    // Handle paths with spaces — split on .prefab if present
+                    int prefabIdx = data.IndexOf(".prefab", StringComparison.OrdinalIgnoreCase);
+                    if (prefabIdx >= 0)
+                    {
+                        // Everything before the last space before .prefab is the GO name
+                        // Everything from that space onward is the path
+                        int pathStart = data.LastIndexOf(' ', prefabIdx);
+                        if (pathStart > 0)
+                        {
+                            goName = data.Substring(0, pathStart).Trim();
+                            outputPath = data.Substring(pathStart).Trim();
+                        }
+                        else
+                        {
+                            goName = data.Trim();
+                            outputPath = null;
+                        }
+                    }
+                    else
+                    {
+                        var parts = data.Trim().Split(new[] { ' ' }, 2);
+                        goName = parts[0];
+                        outputPath = parts.Length > 1 ? parts[1] : null;
+                    }
+                }
+
+                if (string.IsNullOrEmpty(goName))
+                    return Response.Error("GameObject name is required");
+
+                var go = GameObject.Find(goName);
+                if (go == null)
+                    return Response.Error($"GameObject not found: {goName}");
+
+                // Default path
+                if (string.IsNullOrEmpty(outputPath))
+                    outputPath = $"Assets/Prefabs/{go.name}.prefab";
+                else if (!outputPath.EndsWith(".prefab"))
+                    outputPath = $"{outputPath}/{go.name}.prefab";
+
+                EnsureDirectory(outputPath);
+
+                // Save as prefab and keep connected
+                var prefab = PrefabUtility.SaveAsPrefabAssetAndConnect(
+                    go, outputPath, InteractionMode.AutomatedAction);
+
+                if (prefab == null)
+                    return Response.Error($"Failed to save prefab at {outputPath}");
+
+                return Response.SuccessWithData(new
+                {
+                    path = outputPath,
+                    name = prefab.name,
+                    childCount = prefab.transform.childCount,
+                    components = prefab.GetComponents<Component>().Select(c => c.GetType().Name).ToArray()
+                });
+            }
+            catch (Exception ex)
+            {
+                return Response.Exception(ex);
+            }
+        }
+
+        /// <summary>
         /// Instantiates a prefab in the scene.
         /// JSON: {"prefab":"Assets/Prefabs/Thing.prefab", "position":[x,y,z], "parent":"ParentPath"}
         /// </summary>
