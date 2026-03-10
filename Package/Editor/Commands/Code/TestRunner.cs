@@ -22,14 +22,22 @@ namespace clibridge4unity
         private static int failedTests;
         private static DateTime startTime;
 
+        private static readonly string[] TestFlags = { "playmode", "editmode", "all" };
+
         [BridgeCommand("TEST", "Run Unity tests",
             Category = "Code",
-            Usage = "TEST [filter]",
+            Usage = "TEST [mode] [filter]\n" +
+                    "  TEST                   - Run EditMode tests\n" +
+                    "  TEST playmode          - Run PlayMode tests\n" +
+                    "  TEST all               - Run all tests\n" +
+                    "  TEST MyTestClass       - Run specific test by name",
             RequiresMainThread = true)]
         public static async Task<string> Run(string filter = null)
         {
             try
             {
+                var args = CommandArgs.Parse(filter, TestFlags);
+
                 if (api == null)
                     api = ScriptableObject.CreateInstance<TestRunnerApi>();
 
@@ -48,16 +56,16 @@ namespace clibridge4unity
                 // Create filter
                 var testFilter = new Filter
                 {
-                    testMode = TestMode.EditMode
+                    testMode = args.Has("playmode") ? TestMode.PlayMode : TestMode.EditMode
                 };
 
-                if (!string.IsNullOrEmpty(filter))
-                {
-                    if (filter.ToLower() == "playmode")
-                        testFilter.testMode = TestMode.PlayMode;
-                    else if (filter.ToLower() != "editmode" && filter.ToLower() != "all")
-                        testFilter.testNames = new[] { filter };
-                }
+                // Positional args or unknown tokens = test name filter
+                string testName = args.Positional.Count > 0
+                    ? string.Join(" ", args.Positional)
+                    : args.Warnings.Count > 0 ? string.Join(" ", args.Warnings) : null;
+
+                if (!string.IsNullOrEmpty(testName))
+                    testFilter.testNames = new[] { testName };
 
                 // Run tests
                 api.Execute(new ExecutionSettings(testFilter));

@@ -264,9 +264,9 @@ namespace clibridge4unity
         /// Searches code using query syntax.
         /// Queries: class:Name, method:Name, field:Name, inherits:Type, attribute:Name, refs:Symbol
         /// </summary>
-        [BridgeCommand("SEARCH", "Search code by type, method, field, or inheritance",
+        [BridgeCommand("CODE_SEARCH", "Search code by type, method, field, or inheritance",
             Category = "Code",
-            Usage = "SEARCH class:Name | method:Name | field:Name | inherits:Type | attribute:Name | refs:Symbol")]
+            Usage = "CODE_SEARCH class:Name | method:Name | field:Name | inherits:Type | attribute:Name | refs:Symbol")]
         public static string Search(string query)
         {
             try
@@ -325,25 +325,15 @@ namespace clibridge4unity
             }
         }
 
-        /// <summary>
-        /// Returns a real stack trace from the current call for testing.
-        /// </summary>
-        [BridgeCommand("TESTSTACK", "Get a live stack trace for testing",
-            Category = "Code",
-            Usage = "TESTSTACK")]
-        public static string GetTestStackTrace()
-        {
-            return Environment.StackTrace;
-        }
 
         /// <summary>
         /// Analyzes code elements using reflection + source parsing.
         /// Supports: stack traces, "ClassName", "ClassName.MethodName", "ClassName.fieldName"
         /// Searches both Assets and Packages folders automatically.
         /// </summary>
-        [BridgeCommand("ANALYZE", "Analyze a class, member, or stack trace",
+        [BridgeCommand("CODE_ANALYZE", "Analyze a class, member, or stack trace",
             Category = "Code",
-            Usage = "ANALYZE ClassName | ANALYZE ClassName.MethodName | ANALYZE <stack trace>")]
+            Usage = "CODE_ANALYZE ClassName | CODE_ANALYZE ClassName.MethodName | CODE_ANALYZE <stack trace>")]
         public static string Analyze(string query)
         {
             try

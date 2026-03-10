@@ -239,10 +239,17 @@ namespace clibridge4unity
             }
         }
 
+        private static readonly string[] SceneViewFlags = { "frame", "2d", "3d" };
+        private static readonly string[] SceneViewOptions = { "frame", "padding" };
+
         [BridgeCommand("SCENEVIEW", "Control the Scene view (2D mode, frame, zoom)",
             Category = "Scene",
-            Usage = "SCENEVIEW frame  OR  SCENEVIEW frame:DialogPanel  OR  SCENEVIEW 2d  OR  SCENEVIEW 3d\n" +
-                    "  SCENEVIEW {\"frame\":\"Canvas/Panel\",\"2d\":true,\"padding\":0.1}",
+            Usage = "SCENEVIEW [mode]\n" +
+                    "  SCENEVIEW frame                - Frame current selection\n" +
+                    "  SCENEVIEW frame:DialogPanel    - Frame a named object\n" +
+                    "  SCENEVIEW 2d                   - Switch to 2D mode\n" +
+                    "  SCENEVIEW 3d                   - Switch to 3D mode\n" +
+                    "  SCENEVIEW 2d frame:Panel       - Combinable",
             RequiresMainThread = true)]
         public static string SceneView(string data)
         {
@@ -252,39 +259,10 @@ namespace clibridge4unity
                 if (sceneView == null)
                     return Response.Error("No active Scene view");
 
-                // Simple string commands
-                if (string.IsNullOrWhiteSpace(data) || data.Trim().Equals("frame", StringComparison.OrdinalIgnoreCase))
+                // JSON mode preserved for complex cases
+                if (data?.TrimStart().StartsWith("{") == true)
                 {
-                    sceneView.FrameSelected();
-                    sceneView.Repaint();
-                    return Response.Success("Framed selection");
-                }
-
-                string trimmed = data.Trim();
-                if (trimmed.Equals("2d", StringComparison.OrdinalIgnoreCase))
-                {
-                    sceneView.in2DMode = true;
-                    sceneView.Repaint();
-                    return Response.Success("Scene view set to 2D mode");
-                }
-                if (trimmed.Equals("3d", StringComparison.OrdinalIgnoreCase))
-                {
-                    sceneView.in2DMode = false;
-                    sceneView.Repaint();
-                    return Response.Success("Scene view set to 3D mode");
-                }
-
-                // frame:ObjectName shorthand
-                if (trimmed.StartsWith("frame:", StringComparison.OrdinalIgnoreCase))
-                {
-                    string target = trimmed["frame:".Length..].Trim();
-                    return FrameObject(sceneView, target, 0.15f);
-                }
-
-                // JSON mode
-                if (trimmed.StartsWith("{"))
-                {
-                    var json = JObject.Parse(trimmed);
+                    var json = JObject.Parse(data);
                     string frameTarget = json["frame"]?.ToString();
                     bool? mode2d = json["2d"]?.Value<bool>();
                     float padding = json["padding"]?.Value<float>() ?? 0.15f;
@@ -299,8 +277,45 @@ namespace clibridge4unity
                     return Response.Success($"Scene view updated (2D={sceneView.in2DMode})");
                 }
 
-                // Assume it's an object name to frame
-                return FrameObject(sceneView, trimmed, 0.15f);
+                var args = CommandArgs.Parse(data, SceneViewFlags, SceneViewOptions);
+
+                // Apply mode flags
+                if (args.Has("2d"))
+                {
+                    sceneView.in2DMode = true;
+                    sceneView.Repaint();
+                }
+                if (args.Has("3d"))
+                {
+                    sceneView.in2DMode = false;
+                    sceneView.Repaint();
+                }
+
+                // Frame: option (frame:ObjectName) or flag (frame selection)
+                string frameObj = args.Get("frame");
+                float pad = 0.15f;
+                if (args.Options.ContainsKey("padding"))
+                    float.TryParse(args.Get("padding"), out pad);
+
+                if (!string.IsNullOrEmpty(frameObj))
+                    return FrameObject(sceneView, frameObj, pad);
+
+                if (args.Has("frame"))
+                {
+                    sceneView.FrameSelected();
+                    sceneView.Repaint();
+                    return Response.Success("Framed selection");
+                }
+
+                // No flags at all = frame selection (default)
+                if (args.IsEmpty)
+                {
+                    sceneView.FrameSelected();
+                    sceneView.Repaint();
+                    return Response.Success("Framed selection");
+                }
+
+                return args.WarningPrefix() + Response.Success($"Scene view updated (2D={sceneView.in2DMode})");
             }
             catch (Exception ex)
             {
