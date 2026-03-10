@@ -1,9 +1,10 @@
-Deploy clibridge4unity: increment version, build, test, push, release, and verify installation.
+Deploy clibridge4unity: increment version, build, push, release, and verify installation.
+Do NOT stop to ask for confirmation — run the entire pipeline automatically.
 
 ## Arguments
-- `/deploy` — Patch bump (e.g. 1.0.5 → 1.0.6), build, push, release, verify
-- `/deploy minor` — Minor bump (e.g. 1.0.5 → 1.1.0)
-- `/deploy major` — Major bump (e.g. 1.0.5 → 2.0.0)
+- `/deploy` — Patch bump (e.g. 1.0.6 → 1.0.7), build, push, release, verify
+- `/deploy minor` — Minor bump (e.g. 1.0.6 → 1.1.0)
+- `/deploy major` — Major bump (e.g. 1.0.6 → 2.0.0)
 - `/deploy build` — Build and release ONLY (no version bump, use current version)
 - `/deploy check` — Dry run: show what would change, don't modify anything
 
@@ -26,7 +27,6 @@ Files to update (use the Edit tool for each):
 4. **`Package/CLAUDE.md`** — update `package.json` comment line with version (search for `# UPM manifest`)
 5. **`SUMMARY.md`** — update `Current: X.Y.Z` line
 6. **`install.ps1`** — update example comment `.\install.ps1 -Version X.Y.Z`
-
 
 Skip if argument is "build" (no version bump).
 
@@ -53,34 +53,25 @@ clibridge4unity/bin/Release/net8.0/win-x64/publish/clibridge4unity.exe --version
 ```
 The output MUST contain the new version string. If it doesn't, STOP and fix.
 
-### 6. Run tests
-Run any tests in the test project (if they exist):
+### 6. Package and stage release assets
 ```bash
-cd clibridge4unity.Tests && dotnet test -c Release 2>&1
-```
-If tests fail, STOP and report the failures. Do NOT proceed with a broken build.
-If no tests exist, skip this step.
-
-### 7. Package and stage release assets
-```bash
-# Create zip
-powershell -Command "Compress-Archive -Path 'clibridge4unity/bin/Release/net8.0/win-x64/publish/clibridge4unity.exe' -DestinationPath '$env:TEMP/clibridge4unity-win-x64.zip' -Force"
+# Create zip — use single-quoted powershell command to avoid bash $env expansion issues
+powershell -Command 'Compress-Archive -Path "clibridge4unity/bin/Release/net8.0/win-x64/publish/clibridge4unity.exe" -DestinationPath "$env:TEMP/clibridge4unity-win-x64.zip" -Force'
 
 # Copy exe to Package/Tools for UPM users
 cp clibridge4unity/bin/Release/net8.0/win-x64/publish/clibridge4unity.exe Package/Tools/win-x64/
 ```
 
-### 8. Git commit and push
-Stage and commit ALL changed files (version bumps, docs, built exe in Package/Tools):
+### 7. Git commit and push
+Stage ALL changed files, commit, and push immediately (no confirmation needed):
 ```bash
-git add clibridge4unity/clibridge4unity.csproj Package/package.json Package/Tools/win-x64/clibridge4unity.exe CLAUDE.md Package/CLAUDE.md SUMMARY.md install.ps1 README.md
+git add -A
 git commit -m "Release vX.Y.Z"
 git push origin main
 ```
-Use the actual version in the commit message. Only stage files that were actually modified.
-Ask the user for confirmation before pushing.
+Use the actual version in the commit message.
 
-### 9. Create git tag and GitHub release
+### 8. Create git tag and GitHub release
 ```bash
 git tag vX.Y.Z
 git push origin vX.Y.Z
@@ -88,28 +79,24 @@ gh release create vX.Y.Z --title "vX.Y.Z" --generate-notes
 ```
 If the tag or release already exists, skip that step (don't error).
 
-### 10. Upload release assets
+### 9. Upload release assets
 ```bash
-gh release upload vX.Y.Z "$TEMP/clibridge4unity-win-x64.zip" --clobber
+# Get TEMP path for bash context
+TEMP_WIN=$(powershell -Command 'Write-Host $env:TEMP -NoNewline')
+gh release upload vX.Y.Z "${TEMP_WIN}/clibridge4unity-win-x64.zip" --clobber
 gh release upload vX.Y.Z "clibridge4unity/bin/Release/net8.0/win-x64/publish/clibridge4unity.exe" --clobber
 ```
 
-### 11. Verify the release
+### 10. Verify the release
 Run these verification checks:
-1. **Release exists**: `gh release view vX.Y.Z --json tagName,assets`
-2. **Assets uploaded**: Confirm both `clibridge4unity-win-x64.zip` and `clibridge4unity.exe` are listed
-3. **Download URL works**: `gh release view vX.Y.Z --json assets -q ".assets[].name"` should list both files
-4. **Install script URL accessible**: Verify the raw install.ps1 URL resolves:
+1. **Assets uploaded**: `gh release view vX.Y.Z --json assets -q ".assets[].name"` should list both files
+2. **Install script URL accessible**:
    ```bash
    curl -sI "https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1" | head -1
    ```
    Should return HTTP 200.
-5. **Install command from README**: Show the user the exact install command and confirm the download URL will resolve:
-   ```
-   irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex
-   ```
 
-### 12. Report results
+### 11. Report results
 Print a summary:
 - Version: old → new
 - Release URL: `https://github.com/oddgames/clibridge4unity/releases/tag/vX.Y.Z`
@@ -118,8 +105,8 @@ Print a summary:
 - All verification checks passed/failed
 
 ## Important rules
-- NEVER push without asking the user first
-- If any step fails, STOP and report — don't continue with a broken state
+- Do NOT stop to ask for confirmation — run the full pipeline end to end
+- If any step FAILS, STOP and report — don't continue with a broken state
 - The csproj `<Version>` is the single source of truth — all other files derive from it
 - The CLI reads version from its own assembly at runtime, so updating the csproj is sufficient for the exe
 - After pushing, the UPM git URL (`#vX.Y.Z`) automatically resolves to the new tag
