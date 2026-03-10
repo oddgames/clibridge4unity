@@ -8,7 +8,7 @@ Use the Bash tool to call the Gemini API. Use a 60-second timeout for the curl c
 
 Step 1 - Generate:
 ```bash
-curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=***REDACTED***" \
+curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=${GEMINI_API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"contents":[{"parts":[{"text":"THE_PROMPT_HERE"}]}],"generationConfig":{"responseModalities":["TEXT","IMAGE"]}}' \
   -o /tmp/gemini_response.json
