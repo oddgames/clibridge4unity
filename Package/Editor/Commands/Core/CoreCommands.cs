@@ -20,10 +20,10 @@ namespace clibridge4unity
 
         [BridgeCommand("HELP", "List all available commands",
             Category = "Core",
-            Usage = "HELP")]
-        public static string Help()
+            Usage = "HELP [verbose|COMMAND]")]
+        public static string Help(string data)
         {
-            return CommandRegistry.GetHelp();
+            return CommandRegistry.GetHelp(data);
         }
 
         [BridgeCommand("PROBE", "Quick main thread health check (2s timeout)",

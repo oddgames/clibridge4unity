@@ -107,10 +107,10 @@ namespace clibridge4unity
         /// <summary>
         /// Add a component to a GameObject.
         /// </summary>
-        [BridgeCommand("ADDCOMPONENT", "Add a component to a GameObject",
+        [BridgeCommand("COMPONENT_ADD", "Add a component to a GameObject",
             Category = "Component",
-            Usage = "ADDCOMPONENT Canvas/Panel BoxCollider\n" +
-                    "  ADDCOMPONENT {\"gameObject\":\"Canvas/Panel\",\"component\":\"BoxCollider\"}",
+            Usage = "COMPONENT_ADD Canvas/Panel BoxCollider\n" +
+                    "  COMPONENT_ADD {\"gameObject\":\"Canvas/Panel\",\"component\":\"BoxCollider\"}",
             RequiresMainThread = true)]
         public static string AddComponent(string jsonData)
         {
@@ -162,10 +162,10 @@ namespace clibridge4unity
         /// <summary>
         /// Remove a component from a GameObject.
         /// </summary>
-        [BridgeCommand("REMOVECOMPONENT", "Remove a component from a GameObject",
+        [BridgeCommand("COMPONENT_REMOVE", "Remove a component from a GameObject",
             Category = "Component",
-            Usage = "REMOVECOMPONENT Canvas/Panel BoxCollider\n" +
-                    "  REMOVECOMPONENT {\"gameObject\":\"Canvas/Panel\",\"component\":\"BoxCollider\"}",
+            Usage = "COMPONENT_REMOVE Canvas/Panel BoxCollider\n" +
+                    "  COMPONENT_REMOVE {\"gameObject\":\"Canvas/Panel\",\"component\":\"BoxCollider\"}",
             RequiresMainThread = true)]
         public static string RemoveComponent(string jsonData)
         {

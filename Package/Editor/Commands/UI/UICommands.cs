@@ -12,35 +12,43 @@ namespace clibridge4unity
 {
     public static class UICommands
     {
+        private static readonly string[] DiscoverFlags = { "sprites", "prefabs", "scenes", "fonts" };
+        private static readonly string[] DiscoverOptions = { "sprites" };
+
         [BridgeCommand("UI_DISCOVER", "Discover UI assets: sprites, fonts, UI prefabs, and scenes",
             Category = "UI",
-            Usage = "UI_DISCOVER\n" +
-                    "  UI_DISCOVER sprites           - List sprite folders with counts\n" +
-                    "  UI_DISCOVER prefabs           - List prefabs (Canvas screens + RectTransform elements)\n" +
-                    "  UI_DISCOVER scenes            - List scenes containing UI\n" +
-                    "  UI_DISCOVER fonts             - List available fonts\n" +
-                    "  UI_DISCOVER sprites:Icons/128  - List sprites in a specific folder",
+            Usage = "UI_DISCOVER [type]\n" +
+                    "  UI_DISCOVER                   - All UI assets\n" +
+                    "  UI_DISCOVER sprites            - Sprite folders with counts\n" +
+                    "  UI_DISCOVER sprites:Icons/128  - Sprites in specific folder\n" +
+                    "  UI_DISCOVER prefabs            - UI prefabs\n" +
+                    "  UI_DISCOVER scenes             - Scenes with UI\n" +
+                    "  UI_DISCOVER fonts              - Available fonts",
             RequiresMainThread = true)]
         public static string Discover(string data)
         {
             try
             {
-                string filter = data?.Trim().ToLowerInvariant() ?? "";
+                var args = CommandArgs.Parse(data, DiscoverFlags, DiscoverOptions);
 
-                if (string.IsNullOrEmpty(filter))
-                    return DiscoverAll();
-                if (filter == "sprites")
-                    return DiscoverSprites(null);
-                if (filter.StartsWith("sprites:"))
-                    return DiscoverSprites(filter.Substring("sprites:".Length).Trim());
-                if (filter == "prefabs")
-                    return DiscoverUIPrefabs();
-                if (filter == "scenes")
-                    return DiscoverUIScenes();
-                if (filter == "fonts")
-                    return DiscoverFonts();
+                // sprites:folder option
+                string spritesFolder = args.Get("sprites");
+                if (spritesFolder != null)
+                    return args.WarningPrefix() + DiscoverSprites(spritesFolder);
 
-                return Response.Error($"Unknown filter: {data}. Use: sprites, prefabs, scenes, fonts, or sprites:<folder>");
+                if (args.Has("sprites"))
+                    return args.WarningPrefix() + DiscoverSprites(null);
+                if (args.Has("prefabs"))
+                    return args.WarningPrefix() + DiscoverUIPrefabs();
+                if (args.Has("scenes"))
+                    return args.WarningPrefix() + DiscoverUIScenes();
+                if (args.Has("fonts"))
+                    return args.WarningPrefix() + DiscoverFonts();
+
+                if (args.Warnings.Count > 0)
+                    return args.WarningPrefix() + DiscoverAll();
+
+                return DiscoverAll();
             }
             catch (Exception ex)
             {

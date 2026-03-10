@@ -29,9 +29,10 @@ namespace clibridge4unity
             string projectHash = Application.dataPath.GetHashCode().ToString("X8");
             _logFilePath = Path.Combine(Path.GetTempPath(), $"clibridge4unity_logs_{projectHash}.log");
 
-            // Register log capture hooks with CommandRegistry (avoids circular asmdef dependency)
+            // Register hooks with CommandRegistry (avoids circular asmdef dependency)
             CommandRegistry.GetLastLogId = GetLastLogId;
             CommandRegistry.GetLogsSinceFormatted = GetLogsSinceFormatted;
+            CommandRegistry.ShortenResponsePaths = StackTraceMinimizer.ShortenPaths;
 
             Application.logMessageReceived += OnLogMessage;
             UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += () =>
@@ -101,6 +102,7 @@ namespace clibridge4unity
 
         /// <summary>
         /// Returns formatted log entries since the given ID (for appending to command responses).
+        /// Uses compact format to minimize output tokens.
         /// </summary>
         public static string GetLogsSinceFormatted(long sinceId, int maxLines = 20)
         {
@@ -113,86 +115,87 @@ namespace clibridge4unity
                 entries = entries.Skip(entries.Count - maxLines).ToList();
 
             var sb = new StringBuilder();
-            sb.AppendLine($"--- Logs ({entries.Count} entries) ---");
-            foreach (var entry in entries)
-            {
-                string typeTag = LogTypeToTag(entry.Type);
-                sb.AppendLine($"[{entry.Id}] [{entry.Timestamp:HH:mm:ss.fff}] [{typeTag}] {entry.Message}");
-
-                if ((entry.Type == LogType.Error || entry.Type == LogType.Exception || entry.Type == LogType.Assert)
-                    && !string.IsNullOrWhiteSpace(entry.StackTrace))
-                {
-                    foreach (var line in entry.StackTrace.Split('\n'))
-                    {
-                        var trimmed = line.TrimEnd();
-                        if (!string.IsNullOrEmpty(trimmed))
-                            sb.AppendLine($"    {trimmed}");
-                    }
-                }
-            }
+            sb.AppendLine($"--- Logs ({entries.Count}) ---");
+            FormatEntriesCompact(entries, sb, includeTimestamp: false);
             return sb.ToString().TrimEnd();
         }
 
+        private const int DefaultLogCount = 20;
+
+        private static readonly string[] LogFlags = { "errors", "warnings", "verbose", "raw", "all", "clear" };
+        private static readonly string[] LogOptions = { "last", "since" };
+
         [BridgeCommand("LOG", "Get Unity console logs",
             Category = "Core",
-            Usage = "LOG [filter]\n" +
-                    "  LOG                - All logs since last query\n" +
-                    "  LOG all            - All buffered logs\n" +
-                    "  LOG errors         - Only errors and exceptions\n" +
-                    "  LOG warnings       - Warnings, errors, and exceptions\n" +
-                    "  LOG last:N         - Last N log entries\n" +
-                    "  LOG since:ID       - Logs since a specific log ID\n" +
-                    "  LOG clear          - Clear the log buffer")]
+            Usage = "LOG [type] [format] [count]\n" +
+                    "  LOG                    - Last 20 entries (compact)\n" +
+                    "  LOG errors             - Errors/exceptions (last 20)\n" +
+                    "  LOG errors verbose     - Errors with full stack traces\n" +
+                    "  LOG raw                - Full traces, no path shortening\n" +
+                    "  LOG last:N             - Exact N entries\n" +
+                    "  LOG since:ID           - Since ID\n" +
+                    "  LOG all                - All entries (no cap)\n" +
+                    "  LOG clear              - Clear buffer\n" +
+                    "  Combinable in any order: errors|warnings + verbose|raw + last:N|since:ID|all")]
         public static string GetLogs(string data)
         {
-            // Flush any pending writes first
             FlushPendingWrites();
 
-            string filter = string.IsNullOrWhiteSpace(data) ? "" : data.Trim().ToLowerInvariant();
+            var args = CommandArgs.Parse(data, LogFlags, LogOptions);
 
-            if (filter == "clear")
+            if (args.Has("clear"))
             {
                 try { File.Delete(_logFilePath); }
                 catch { }
                 return Response.Success("Log buffer cleared");
             }
 
-            // Read all entries from file
             var entries = ReadLogFile();
 
-            // Apply filters
-            if (filter.StartsWith("since:"))
+            // Type filter
+            if (args.Has("errors"))
+                entries = entries.Where(e => e.Type == LogType.Error || e.Type == LogType.Exception || e.Type == LogType.Assert).ToList();
+            else if (args.Has("warnings"))
+                entries = entries.Where(e => e.Type != LogType.Log).ToList();
+
+            // Range filter
+            if (args.Options.ContainsKey("since"))
             {
-                if (long.TryParse(filter.Substring(6), out long sinceId))
+                long sinceId = args.GetLong("since", -1);
+                if (sinceId >= 0)
                     entries = entries.Where(e => e.Id > sinceId).ToList();
                 else
-                    return Response.Error("Invalid ID in since:N filter");
-            }
-            else if (filter.StartsWith("last:"))
-            {
-                if (int.TryParse(filter.Substring(5), out int lastN) && lastN > 0)
-                    entries = entries.Skip(Math.Max(0, entries.Count - lastN)).ToList();
-                else
-                    return Response.Error("Invalid count in last:N filter");
-            }
-            else if (filter == "errors")
-            {
-                entries = entries.Where(e => e.Type == LogType.Error || e.Type == LogType.Exception || e.Type == LogType.Assert).ToList();
-            }
-            else if (filter == "warnings")
-            {
-                entries = entries.Where(e => e.Type != LogType.Log).ToList();
-            }
-            else if (filter == "all" || filter == "")
-            {
-                // No filtering
-            }
-            else
-            {
-                return Response.Error($"Unknown filter: {filter}. Use: all, errors, warnings, last:N, since:ID, clear");
+                    return Response.Error("Invalid ID in since:N");
             }
 
-            return FormatLogResponse(entries);
+            // Count: last:N or all bypass default cap
+            if (args.Options.ContainsKey("last"))
+            {
+                int lastN = args.GetInt("last", -1);
+                if (lastN > 0)
+                    entries = entries.Skip(Math.Max(0, entries.Count - lastN)).ToList();
+                else
+                    return Response.Error("Invalid count in last:N");
+            }
+            else if (!args.Has("all"))
+            {
+                if (entries.Count > DefaultLogCount)
+                    entries = entries.Skip(entries.Count - DefaultLogCount).ToList();
+            }
+
+            // Format
+            string prefix = args.WarningPrefix();
+
+            if (args.Has("raw"))
+            {
+                CommandRegistry.SkipPathShortening = true;
+                return prefix + FormatLogResponseVerbose(entries);
+            }
+
+            if (args.Has("verbose"))
+                return prefix + FormatLogResponseVerbose(entries);
+
+            return prefix + FormatLogResponse(entries);
         }
 
         private static List<LogEntry> ReadLogFile()
@@ -239,6 +242,12 @@ namespace clibridge4unity
         private static string FormatLogResponse(List<LogEntry> entries)
         {
             var sb = new StringBuilder();
+
+            // Path legend so $WORKSPACE references are resolvable
+            string legend = StackTraceMinimizer.GetPathLegend();
+            if (legend != null)
+                sb.AppendLine(legend);
+
             sb.AppendLine($"logCount: {entries.Count}");
 
             if (entries.Count > 0)
@@ -260,6 +269,32 @@ namespace clibridge4unity
                 sb.AppendLine($"info: {logs}");
                 sb.AppendLine("---");
 
+                FormatEntriesCompact(entries, sb, includeTimestamp: true);
+            }
+            else
+            {
+                sb.AppendLine("lastId: 0");
+                sb.AppendLine("errors: 0");
+                sb.AppendLine("warnings: 0");
+                sb.AppendLine("info: 0");
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>
+        /// Full verbose format (LOG verbose). Shows IDs, timestamps, full stack traces.
+        /// </summary>
+        private static string FormatLogResponseVerbose(List<LogEntry> entries)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"logCount: {entries.Count}");
+
+            if (entries.Count > 0)
+            {
+                sb.AppendLine($"lastId: {entries[entries.Count - 1].Id}");
+                sb.AppendLine("---");
+
                 foreach (var entry in entries)
                 {
                     string typeTag = LogTypeToTag(entry.Type);
@@ -277,15 +312,64 @@ namespace clibridge4unity
                     }
                 }
             }
-            else
-            {
-                sb.AppendLine("lastId: 0");
-                sb.AppendLine("errors: 0");
-                sb.AppendLine("warnings: 0");
-                sb.AppendLine("info: 0");
-            }
 
             return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>
+        /// Compact entry formatting shared by LOG command and appended logs.
+        /// Collapses consecutive duplicates, minimizes stack traces.
+        /// </summary>
+        private static void FormatEntriesCompact(List<LogEntry> entries, StringBuilder sb, bool includeTimestamp)
+        {
+            // Group consecutive duplicate messages
+            var collapsed = new List<(LogEntry entry, int count)>();
+            foreach (var entry in entries)
+            {
+                if (collapsed.Count > 0 && entry.Message == collapsed[collapsed.Count - 1].entry.Message
+                    && entry.Type == collapsed[collapsed.Count - 1].entry.Type)
+                {
+                    var last = collapsed[collapsed.Count - 1];
+                    collapsed[collapsed.Count - 1] = (last.entry, last.count + 1);
+                }
+                else
+                {
+                    collapsed.Add((entry, 1));
+                }
+            }
+
+            foreach (var (entry, count) in collapsed)
+            {
+                string tag = ShortTag(entry.Type);
+                string countSuffix = count > 1 ? $" (x{count})" : "";
+                string timestamp = includeTimestamp ? $" [{entry.Timestamp:HH:mm:ss}]" : "";
+
+                string msg = StackTraceMinimizer.ShortenPaths(entry.Message);
+                sb.Append($"[{tag}]{timestamp} {msg}{countSuffix}");
+
+                // For errors, append minimized stack trace
+                if ((entry.Type == LogType.Error || entry.Type == LogType.Exception || entry.Type == LogType.Assert)
+                    && !string.IsNullOrWhiteSpace(entry.StackTrace))
+                {
+                    string minimized = StackTraceMinimizer.Minimize(entry.StackTrace);
+                    if (!string.IsNullOrEmpty(minimized))
+                        sb.Append($"\n{minimized}");
+                }
+
+                sb.AppendLine();
+            }
+        }
+
+        private static string ShortTag(LogType type)
+        {
+            return type switch
+            {
+                LogType.Error => "E",
+                LogType.Exception => "X",
+                LogType.Assert => "A",
+                LogType.Warning => "W",
+                _ => "I"
+            };
         }
 
         private static string LogTypeToTag(LogType type)

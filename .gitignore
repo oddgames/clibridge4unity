@@ -1,12 +1,14 @@
 # Everything excluded by default
 *
 
-# Repo structure: cli/ + Package/ + root files
-!cli/
-!cli/**
+# Repo structure: clibridge4unity/ + Package/ + root files
+!clibridge4unity/
+!clibridge4unity/**
 !Package/
 !Package/**
 !README.md
+!CLAUDE.md
+!SUMMARY.md
 !LICENSE
 !install.ps1
 !deploy.ps1
@@ -15,9 +17,9 @@
 !.claude/**
 .claude/settings.local.json
 
-# Build outputs inside cli/
-cli/bin/
-cli/obj/
+# Build outputs
+clibridge4unity/bin/
+clibridge4unity/obj/
 
 # Unity generated
 Library/

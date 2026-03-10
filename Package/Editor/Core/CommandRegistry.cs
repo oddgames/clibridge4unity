@@ -44,6 +44,12 @@ namespace clibridge4unity
         public static Func<long> GetLastLogId;
         public static Func<long, int, string> GetLogsSinceFormatted;
 
+        // Path shortening hook - set by StackTraceMinimizer to shorten paths in all responses
+        public static Func<string, string> ShortenResponsePaths;
+
+        // Per-request flag to skip path shortening (e.g. LOG raw)
+        [ThreadStatic] public static bool SkipPathShortening;
+
         // Lock-free main thread work queue
         private static readonly ConcurrentQueue<MainThreadWork> _mainThreadQueue = new ConcurrentQueue<MainThreadWork>();
         private static volatile bool _isRunning = true;
@@ -278,7 +284,7 @@ namespace clibridge4unity
         /// Get the HWND, re-discovering if needed (it can be zero at init time when backgrounded).
         /// NOTE: Do NOT call SessionState from here — this is called from background threads.
         /// </summary>
-        private static IntPtr GetUnityHwnd()
+        public static IntPtr GetUnityHwnd()
         {
             if (_unityWindowHandle == IntPtr.Zero)
             {
@@ -446,7 +452,7 @@ namespace clibridge4unity
 
             // Capture log position before command execution (skip for LOG command itself)
             long logIdBefore = 0;
-            bool captureLogs = name != "LOG" && name != "PING" && GetLastLogId != null;
+            bool captureLogs = name != "LOG" && name != "PING" && name != "HELP" && name != "PROBE" && name != "DIAG" && GetLastLogId != null;
             if (captureLogs)
             {
                 try { logIdBefore = GetLastLogId(); }
@@ -476,12 +482,45 @@ namespace clibridge4unity
                 catch { }
             }
 
+            // Shorten all absolute paths in the response ($WORKSPACE, $UNITY, [pkg])
+            if (response != null && ShortenResponsePaths != null && !SkipPathShortening)
+            {
+                try { response = ShortenResponsePaths(response); }
+                catch { }
+            }
+            SkipPathShortening = false;
+
             return response;
         }
 
-        public static string GetHelp()
+        public static string GetHelp(string filter = null)
         {
             EnsureInitialized();
+            filter = string.IsNullOrWhiteSpace(filter) ? null : filter.Trim();
+
+            // HELP <COMMAND> — show detailed help for a single command
+            if (filter != null && !filter.Equals("verbose", System.StringComparison.OrdinalIgnoreCase))
+            {
+                string key = filter.ToUpperInvariant();
+                if (_commands.TryGetValue(key, out var cmd))
+                {
+                    var sb2 = new StringBuilder();
+                    sb2.AppendLine($"{cmd.Name} — {cmd.Description}");
+                    sb2.AppendLine($"Category: {cmd.Category}");
+                    if (cmd.RequiresMainThread) sb2.AppendLine("Requires main thread: yes");
+                    if (!string.IsNullOrEmpty(cmd.Usage))
+                    {
+                        sb2.AppendLine();
+                        sb2.AppendLine("Usage:");
+                        foreach (var line in cmd.Usage.Split('\n'))
+                            sb2.AppendLine($"  {line.TrimEnd()}");
+                    }
+                    return sb2.ToString().TrimEnd();
+                }
+                return $"Unknown command: {filter}";
+            }
+
+            bool verbose = filter != null && filter.Equals("verbose", System.StringComparison.OrdinalIgnoreCase);
             var sb = new StringBuilder();
             sb.AppendLine("Unity Bridge Commands");
             sb.AppendLine("=====================");
@@ -497,19 +536,18 @@ namespace clibridge4unity
                 sb.AppendLine($"[{group.Key}]");
                 foreach (var cmd in group)
                 {
-                    sb.AppendLine($"  {cmd.Name,-15} {cmd.Description}");
-                    if (!string.IsNullOrEmpty(cmd.Usage) && cmd.Usage != cmd.Name)
-                        sb.AppendLine($"  {"",-15} Usage: {cmd.Usage}");
+                    sb.AppendLine($"  {cmd.Name,-20} {cmd.Description}");
+                    if (verbose && !string.IsNullOrEmpty(cmd.Usage) && cmd.Usage != cmd.Name)
+                    {
+                        foreach (var line in cmd.Usage.Split('\n'))
+                            sb.AppendLine($"  {"",-20} {line.TrimEnd()}");
+                    }
                 }
                 sb.AppendLine();
             }
 
-            sb.AppendLine("[UI Workflow]");
-            sb.AppendLine("  1. UI_DISCOVER           Find sprites, fonts, prefabs, scenes");
-            sb.AppendLine("  2. INSPECTOR             Examine component fields on a GameObject");
-            sb.AppendLine("  3. COMPONENT_SET         Set sprites, colors, fonts, anchors");
-            sb.AppendLine("  4. CONVERT_UXML          Convert uGUI prefab to UXML + USS");
-            sb.AppendLine("  5. RENDER                Preview prefab/UXML as PNG (multi = grid)");
+            if (!verbose)
+                sb.AppendLine("Use HELP verbose for detailed usage, or HELP <COMMAND> for a specific command.");
 
             return sb.ToString().TrimEnd();
         }
