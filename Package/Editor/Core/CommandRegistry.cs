@@ -647,6 +647,10 @@ namespace clibridge4unity
 
         private static async Task<T> InvokeOnMainThread<T>(Func<T> action, string description = null)
         {
+            // Fast-fail if the main thread hasn't ticked in >5s (stuck or frozen)
+            if (_timerTickCount > 0 && (DateTime.Now - _lastTimerTick).TotalSeconds > 5)
+                throw new TimeoutException($"Main thread unresponsive (last heartbeat {(DateTime.Now - _lastTimerTick).TotalSeconds:F1}s ago). Unity may be frozen or showing a modal dialog. Try DISMISS or foreground Unity.");
+
             var work = new MainThreadWork
             {
                 Action = () => action(),

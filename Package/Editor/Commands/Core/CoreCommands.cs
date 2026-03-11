@@ -106,6 +106,9 @@ namespace clibridge4unity
             TimeoutSeconds = 90)]
         public static string Compile()
         {
+            if (EditorApplication.isPlaying)
+                return Response.Error("Cannot compile during play mode. Use STOP first.");
+
             // Write lock file BEFORE triggering compilation so the CLI knows to wait
             // even if Unity hasn't started compiling yet (compilation is queued, not immediate)
             // Lock file removed - CLI uses pipe reconnection to detect compilation("compile_requested");
