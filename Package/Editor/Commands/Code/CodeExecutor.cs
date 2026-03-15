@@ -319,11 +319,29 @@ namespace clibridge4unity
 
         private static object RunAssembly(Assembly assembly)
         {
+            // Try the generated wrapper class first (from WrapCode)
             var type = assembly.GetType("clibridge4unity.Generated.Runner");
             var method = type?.GetMethod("Run", BindingFlags.Public | BindingFlags.Static);
 
+            // For user-provided classes: search all types for Run() or Main() entry points
             if (method == null)
-                throw new InvalidOperationException("Could not find Run method in compiled code");
+            {
+                foreach (var t in assembly.GetExportedTypes())
+                {
+                    method = t.GetMethod("Run", BindingFlags.Public | BindingFlags.Static)
+                          ?? t.GetMethod("Main", BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
+                    if (method != null) { type = t; break; }
+                }
+            }
+
+            if (method == null)
+                throw new InvalidOperationException(
+                    "No entry point found. For full class code, add: public static void Run() or static void Main()");
+
+            // Support Main(string[] args) signature
+            var parameters = method.GetParameters();
+            if (parameters.Length == 1 && parameters[0].ParameterType == typeof(string[]))
+                return method.Invoke(null, new object[] { Array.Empty<string>() });
 
             return method.Invoke(null, null);
         }
