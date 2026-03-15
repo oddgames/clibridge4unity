@@ -613,22 +613,43 @@ class Program
     {
         try
         {
-            // For CODE_EXEC commands, fix shell mangling and write code to temp file
+            // For CODE_EXEC commands, resolve file paths and fix shell mangling
             if (!string.IsNullOrEmpty(data) &&
                 (command == "CODE_EXEC" || command == "CODE_EXEC_RETURN"))
             {
-                // Fix common shell mangling (Git Bash on Windows escapes quotes in args)
-                // $\" → $" (mangled C# string interpolation, never valid C#)
-                // Also fix standalone \" that appear outside of string literals
-                if (data.Contains("\\\""))
-                {
-                    data = data.Replace("$\\\"", "$\"");   // $\" → $"  (interpolated strings)
-                    data = data.Replace("\\\"", "\"");     // \" → "    (remaining escaped quotes)
-                }
+                // Detect file path input:
+                //   @script.cs           — explicit @ prefix
+                //   script.cs            — bare filename
+                //   ./script.cs          — relative path
+                //   C:\path\script.cs    — absolute path
+                string fileCandidate = data.StartsWith("@") ? data.Substring(1).Trim() : data.Trim();
+                bool looksLikeFile = data.StartsWith("@")
+                    || (fileCandidate.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
+                        && !fileCandidate.Contains("\n")
+                        && fileCandidate.Length < 260);
 
-                string tempFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_code_{Guid.NewGuid():N}.cs");
-                File.WriteAllText(tempFile, data);
-                data = $"@{tempFile}";
+                if (looksLikeFile && File.Exists(Path.GetFullPath(fileCandidate)))
+                {
+                    data = $"@{Path.GetFullPath(fileCandidate)}";
+                }
+                else if (data.StartsWith("@"))
+                {
+                    Console.Error.WriteLine($"Error: File not found: {Path.GetFullPath(fileCandidate)}");
+                    return 1;
+                }
+                else
+                {
+                    // Inline code — fix shell mangling and write to temp file
+                    if (data.Contains("\\\""))
+                    {
+                        data = data.Replace("$\\\"", "$\"");   // $\" → $"  (interpolated strings)
+                        data = data.Replace("\\\"", "\"");     // \" → "    (remaining escaped quotes)
+                    }
+
+                    string tempFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_code_{Guid.NewGuid():N}.cs");
+                    File.WriteAllText(tempFile, data);
+                    data = $"@{tempFile}";
+                }
             }
 
             using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
