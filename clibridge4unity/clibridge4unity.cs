@@ -613,10 +613,19 @@ class Program
     {
         try
         {
-            // For CODE_EXEC commands, write code to temp file to avoid shell escaping issues
+            // For CODE_EXEC commands, fix shell mangling and write code to temp file
             if (!string.IsNullOrEmpty(data) &&
                 (command == "CODE_EXEC" || command == "CODE_EXEC_RETURN"))
             {
+                // Fix common shell mangling (Git Bash on Windows escapes quotes in args)
+                // $\" → $" (mangled C# string interpolation, never valid C#)
+                // Also fix standalone \" that appear outside of string literals
+                if (data.Contains("\\\""))
+                {
+                    data = data.Replace("$\\\"", "$\"");   // $\" → $"  (interpolated strings)
+                    data = data.Replace("\\\"", "\"");     // \" → "    (remaining escaped quotes)
+                }
+
                 string tempFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_code_{Guid.NewGuid():N}.cs");
                 File.WriteAllText(tempFile, data);
                 data = $"@{tempFile}";

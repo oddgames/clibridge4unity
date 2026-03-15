@@ -645,11 +645,154 @@ namespace clibridge4unity
             return await InvokeOnMainThread(action, description ?? "RunOnMainThreadAsync");
         }
 
+        /// <summary>
+        /// Detect visible windows belonging to Unity's process (excluding the main editor window).
+        /// These are typically dialogs, popups, or floating panels that may block the main thread.
+        /// Safe to call from any thread.
+        /// </summary>
+        public static List<string> DetectOpenDialogs()
+        {
+            var dialogs = new List<string>();
+            var hwnd = GetUnityHwnd();
+            if (hwnd == IntPtr.Zero) return dialogs;
+
+            GetWindowThreadProcessId(hwnd, out uint unityPid);
+            if (unityPid == 0) return dialogs;
+
+            var titleBuf = new StringBuilder(256);
+            EnumWindows((wnd, _) =>
+            {
+                if (wnd == hwnd) return true;
+                if (!IsWindowVisible(wnd)) return true;
+
+                GetWindowThreadProcessId(wnd, out uint pid);
+                if (pid != unityPid) return true;
+
+                titleBuf.Clear();
+                GetWindowText(wnd, titleBuf, 256);
+                string title = titleBuf.ToString();
+                if (!string.IsNullOrEmpty(title))
+                    dialogs.Add(title);
+
+                return true;
+            }, IntPtr.Zero);
+            return dialogs;
+        }
+
+        /// <summary>
+        /// Build a detailed status report about why the main thread is unavailable.
+        /// Includes heartbeat, open windows, queue state, and recommendations.
+        /// Safe to call from any thread.
+        /// </summary>
+        private static string BuildBusyReport(double staleness, string commandDescription = null)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"Error: Unity main thread is busy (last heartbeat {staleness:F1}s ago).");
+
+            // Queue state — is another command already running?
+            var snapshot = _mainThreadQueue.ToArray();
+            var pending = snapshot.Where(w => !w.CompletionSource.Task.IsCanceled && !w.CompletionSource.Task.IsCompleted).ToArray();
+            if (pending.Length > 0)
+            {
+                sb.AppendLine($"Commands waiting on main thread ({pending.Length}):");
+                foreach (var item in pending)
+                    sb.AppendLine($"  - {item.Description} (waiting {(DateTime.Now - item.EnqueuedAt).TotalSeconds:F1}s)");
+            }
+            else
+            {
+                sb.AppendLine("No commands were running — main thread is blocked by Unity itself.");
+            }
+
+            // Open windows — detect dialogs
+            bool hasDialogs = false;
+            try
+            {
+                var dialogs = DetectOpenDialogs();
+                hasDialogs = dialogs.Count > 0;
+                if (hasDialogs)
+                {
+                    sb.AppendLine($"Open windows ({dialogs.Count}):");
+                    foreach (var title in dialogs)
+                    {
+                        sb.Append($"  - \"{title}\"");
+                        // Classify common dialog types
+                        var lower = title.ToLowerInvariant();
+                        if (lower.Contains("import")) sb.Append(" [asset import]");
+                        else if (lower.Contains("package manager")) sb.Append(" [package manager]");
+                        else if (lower.Contains("save")) sb.Append(" [save dialog]");
+                        else if (lower.Contains("build")) sb.Append(" [build dialog]");
+                        else if (lower.Contains("error") || lower.Contains("exception")) sb.Append(" [error dialog]");
+                        else if (lower.Contains("progress")) sb.Append(" [progress bar]");
+                        else if (lower.Contains("compil")) sb.Append(" [compilation]");
+                        sb.AppendLine();
+                    }
+                }
+                else
+                {
+                    sb.AppendLine("No dialog windows detected — Unity is likely busy with a background operation (asset import, shader compile, etc).");
+                }
+            }
+            catch { sb.AppendLine("Could not enumerate windows."); }
+
+            // Recommendations
+            sb.AppendLine("Recommendations:");
+            if (hasDialogs)
+                sb.AppendLine("  - Run DISMISS to close dialog windows, then retry.");
+            if (staleness > 10)
+                sb.AppendLine("  - Unity may be frozen. Ask user to check Unity Editor.");
+            else
+                sb.AppendLine("  - Wait a few seconds and retry the command.");
+            sb.Append("  - Run DIAG for full diagnostics (works even when main thread is blocked).");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Returns heartbeat diagnostics. Safe to call from any thread.
+        /// </summary>
+        public static string GetHeartbeatInfo()
+        {
+            var sb = new StringBuilder();
+            if (_timerTickCount == 0)
+            {
+                sb.AppendLine("heartbeat: no ticks yet (Unity may still be initializing)");
+            }
+            else
+            {
+                var staleness = (DateTime.Now - _lastTimerTick).TotalSeconds;
+                sb.AppendLine($"heartbeat: {staleness:F1}s since last main thread tick");
+                sb.AppendLine($"mainThreadResponsive: {(staleness < 0.5 ? "yes" : staleness < 5 ? "slow" : "no")}");
+            }
+            sb.AppendLine($"timerTicks: {_timerTickCount}");
+            sb.AppendLine($"lastTimerTick: {_lastTimerTick:HH:mm:ss.fff}");
+            var snapshot = _mainThreadQueue.ToArray();
+            int pendingCount = snapshot.Count(w => !w.CompletionSource.Task.IsCanceled && !w.CompletionSource.Task.IsCompleted);
+            if (pendingCount > 0)
+                sb.AppendLine($"pendingMainThreadWork: {pendingCount}");
+
+            try
+            {
+                var dialogs = DetectOpenDialogs();
+                if (dialogs.Count > 0)
+                {
+                    sb.AppendLine($"openDialogs: {dialogs.Count}");
+                    foreach (var title in dialogs)
+                        sb.AppendLine($"  - {title}");
+                }
+            }
+            catch { }
+
+            return sb.ToString().TrimEnd();
+        }
+
         private static async Task<T> InvokeOnMainThread<T>(Func<T> action, string description = null)
         {
-            // Fast-fail if the main thread hasn't ticked in >5s (stuck or frozen)
-            if (_timerTickCount > 0 && (DateTime.Now - _lastTimerTick).TotalSeconds > 5)
-                throw new TimeoutException($"Main thread unresponsive (last heartbeat {(DateTime.Now - _lastTimerTick).TotalSeconds:F1}s ago). Unity may be frozen or showing a modal dialog. Try DISMISS or foreground Unity.");
+            // Instant fail if main thread is not ticking — return detailed busy report
+            if (_timerTickCount > 0)
+            {
+                var staleness = (DateTime.Now - _lastTimerTick).TotalSeconds;
+                if (staleness > 0.5)
+                    throw new TimeoutException(BuildBusyReport(staleness, description));
+            }
 
             var work = new MainThreadWork
             {
@@ -661,37 +804,14 @@ namespace clibridge4unity
 
             _mainThreadQueue.Enqueue(work);
 
-            var completedTask = await Task.WhenAny(
-                work.CompletionSource.Task,
-                Task.Delay(25000)
-            );
+            var completedTask = await Task.WhenAny(work.CompletionSource.Task, Task.Delay(25000));
+            if (completedTask == work.CompletionSource.Task)
+                return (T)(await work.CompletionSource.Task);
 
-            if (completedTask != work.CompletionSource.Task)
-            {
-                work.CompletionSource.TrySetCanceled();
-                var sb = new StringBuilder();
-                sb.AppendLine($"Main thread timed out (25s).");
-                sb.AppendLine($"Timed-out command: {work.Description} (queued {(DateTime.Now - work.EnqueuedAt).TotalSeconds:F1}s ago)");
-
-                var snapshot = _mainThreadQueue.ToArray();
-                var pending = snapshot.Where(w => !w.CompletionSource.Task.IsCanceled).ToArray();
-                if (pending.Length > 0)
-                {
-                    sb.AppendLine($"Pending queue ({pending.Length} items):");
-                    foreach (var item in pending)
-                        sb.AppendLine($"  - {item.Description} (waiting {(DateTime.Now - item.EnqueuedAt).TotalSeconds:F1}s)");
-                }
-                else
-                {
-                    sb.AppendLine("Queue is empty (main thread may be stuck executing a previous command).");
-                }
-                sb.AppendLine($"HWND: {_unityWindowHandle}");
-                sb.Append("Try: DISMISS (close dialogs), COMPILE (force assembly reload to clear stuck state), or ask user to foreground Unity.");
-                throw new TimeoutException(sb.ToString());
-            }
-
-            var result = await work.CompletionSource.Task;
-            return (T)result;
+            // Timed out after 25s — build report with current state
+            work.CompletionSource.TrySetCanceled();
+            var currentStaleness = _timerTickCount > 0 ? (DateTime.Now - _lastTimerTick).TotalSeconds : 25;
+            throw new TimeoutException(BuildBusyReport(currentStaleness, work.Description));
         }
 
         private static readonly Dictionary<Type, object> _instances = new Dictionary<Type, object>();
