@@ -18,21 +18,20 @@ This installs the UPM package and generates a `CLAUDE.md` for AI-assisted develo
 
 ## What AI Assistants Can Do
 
-### Compile, Execute & Analyze
+### Execute C# (built-in Roslyn compiler — no COMPILE needed)
 ```bash
-clibridge4unity COMPILE --wait                  # Recompile, wait, report errors (exit code 1 on failure)
 clibridge4unity CODE_EXEC "Debug.Log(42)"       # Run C# in Unity (fire-and-forget)
 clibridge4unity CODE_EXEC_RETURN "return 1+1"   # Run C# and get the result back
-clibridge4unity CODE_EXEC @script.cs            # Run a file (no command-line length limit)
+clibridge4unity CODE_EXEC @script.cs            # Run from file (no size limit)
 ```
+CODE_EXEC runs on a background thread — works even when Unity's main thread is busy.
 
 ### Search & Navigate Code
 ```bash
-clibridge4unity CODE_SEARCH "class:PlayerController"        # Find types, methods, fields, properties
-clibridge4unity CODE_SEARCH "inherits:MonoBehaviour"         # Inheritance search
-clibridge4unity CODE_SEARCH "refs:TakeDamage"                # Find usages across source files
-clibridge4unity CODE_ANALYZE PlayerController                # Class overview: members, source, inheritance
-clibridge4unity CODE_ANALYZE "PlayerController.TakeDamage"   # Member details, XML docs, callers
+clibridge4unity CODE_SEARCH class:PlayerController          # Find types, methods, fields
+clibridge4unity CODE_SEARCH inherits:MonoBehaviour           # Inheritance search
+clibridge4unity CODE_ANALYZE PlayerController                # Class overview
+clibridge4unity CODE_ANALYZE PlayerController.TakeDamage     # Member details
 ```
 
 ### Inspect & Modify the Scene
@@ -42,6 +41,12 @@ clibridge4unity COMPONENT_SET Player Transform position "(1,2,3)"
 clibridge4unity SCENE                                       # Full hierarchy
 clibridge4unity SCREENSHOT scene                            # Capture editor windows
 ```
+
+### AI Setup
+```bash
+clibridge4unity SETUP       # Generates CLAUDE.md with tool reference for AI assistants
+```
+Run `SETUP` again after updates to regenerate the docs. The generated `CLAUDE.md` tells AI assistants which commands are available, when to use COMPILE vs CODE_EXEC, and how to handle busy/timeout errors.
 
 ## All Commands
 
