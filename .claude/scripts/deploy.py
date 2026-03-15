@@ -52,10 +52,10 @@ def main():
     shutil.copy2(exe_path, tools_path)
     print(f"  Copied exe to {tools_path}")
 
-    # Create zip
-    r = run(f'powershell -Command \'Compress-Archive -Path "{exe_path}" -DestinationPath "$env:TEMP/clibridge4unity-win-x64.zip" -Force; Write-Host $env:TEMP\'', capture=True)
-    temp_dir = r.stdout.strip().split('\n')[-1]
-    zip_path = os.path.join(temp_dir, "clibridge4unity-win-x64.zip")
+    # Create zip (use Python tempdir to avoid $env:TEMP bash/powershell escaping issues)
+    import tempfile
+    zip_path = os.path.join(tempfile.gettempdir(), "clibridge4unity-win-x64.zip")
+    run(f'powershell -NoProfile -Command "Compress-Archive -Path \'{exe_path}\' -DestinationPath \'{zip_path}\' -Force"')
     print(f"  Created: {zip_path}")
 
     # Step 4: Git commit and push
