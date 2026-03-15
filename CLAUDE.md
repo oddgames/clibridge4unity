@@ -97,7 +97,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # UI_DISCOVER, UI_RENDER
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.0.7)
+│   └── package.json           # UPM manifest (v1.0.8)
 └── UnityTestProject/          # Test Unity project
 ```
 
