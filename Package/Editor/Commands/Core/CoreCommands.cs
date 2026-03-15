@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using UnityEditor;
 using UnityEditor.Compilation;
 using UnityEngine;
@@ -10,6 +12,26 @@ namespace clibridge4unity
     /// </summary>
     public static class CoreCommands
     {
+        /// <summary>
+        /// Check if any .cs files under Assets/ or Packages/ have been modified since last compile.
+        /// Uses Directory.EnumerateFiles for lazy evaluation — stops early if possible.
+        /// </summary>
+        private static bool ScriptsModifiedSinceCompile()
+        {
+            if (!long.TryParse(SessionState.GetString(SessionKeys.LastCompileTime, "0"), out var ticks) || ticks <= 0)
+                return true; // No compile recorded, assume modified
+
+            var lastCompile = new System.DateTime(ticks);
+            var assetsPath = Application.dataPath; // .../Assets
+
+            try
+            {
+                return Directory.EnumerateFiles(assetsPath, "*.cs", SearchOption.AllDirectories)
+                    .Any(f => File.GetLastWriteTime(f) > lastCompile);
+            }
+            catch { return true; } // If scan fails, assume modified
+        }
+
         [BridgeCommand("PING", "Test connection",
             Category = "Core",
             Usage = "PING")]
@@ -35,12 +57,15 @@ namespace clibridge4unity
             return Response.Success("OK");
         }
 
-        [BridgeCommand("DIAG", "Diagnostic info (no main thread needed)",
+        [BridgeCommand("DIAG", "Diagnostic info including heartbeat (no main thread needed)",
             Category = "Core",
             Usage = "DIAG")]
         public static string Diag()
         {
             var sb = new System.Text.StringBuilder();
+            sb.AppendLine("--- heartbeat ---");
+            sb.AppendLine(CommandRegistry.GetHeartbeatInfo());
+            sb.AppendLine("--- thread ---");
             sb.AppendLine($"thread: {System.Threading.Thread.CurrentThread.ManagedThreadId} ({System.Threading.Thread.CurrentThread.Name})");
             sb.AppendLine($"syncCtx: {System.Threading.SynchronizationContext.Current?.GetType().Name ?? "null"}");
             sb.AppendLine(CommandRegistry.GetQueueDiagnostics());
@@ -90,6 +115,7 @@ namespace clibridge4unity
                 isCompiling = EditorApplication.isCompiling,
                 isPlaying = EditorApplication.isPlaying,
                 isPaused = EditorApplication.isPaused,
+                scriptsModified = ScriptsModifiedSinceCompile(),
                 lastCompileRequest = lastCompileRequestStr,
                 lastCompileFinished = lastCompileStr,
                 projectPath = Application.dataPath,
@@ -104,14 +130,25 @@ namespace clibridge4unity
             Streaming = false,
             RequiresMainThread = true,
             TimeoutSeconds = 90)]
-        public static string Compile()
+        public static string Compile(string data)
         {
             if (EditorApplication.isPlaying)
                 return Response.Error("Cannot compile during play mode. Use STOP first.");
 
-            // Write lock file BEFORE triggering compilation so the CLI knows to wait
-            // even if Unity hasn't started compiling yet (compilation is queued, not immediate)
-            // Lock file removed - CLI uses pipe reconnection to detect compilation("compile_requested");
+            // Skip if no scripts have changed (unless forced with "force")
+            bool force = !string.IsNullOrEmpty(data) && data.Trim().Equals("force", System.StringComparison.OrdinalIgnoreCase);
+            if (!force && !ScriptsModifiedSinceCompile())
+            {
+                string lastCompileStr = "unknown";
+                if (long.TryParse(SessionState.GetString(SessionKeys.LastCompileTime, "0"), out var ticks) && ticks > 0)
+                    lastCompileStr = new System.DateTime(ticks).ToString("yyyy-MM-dd HH:mm:ss");
+                return Response.SuccessWithData(new
+                {
+                    message = "No scripts modified since last compile. Use COMPILE force to override.",
+                    skipped = true,
+                    lastCompileFinished = lastCompileStr
+                });
+            }
 
             // Trigger compilation - this will cause Unity to recompile and reload assemblies
             // The connection will be lost during assembly reload, but that's expected
