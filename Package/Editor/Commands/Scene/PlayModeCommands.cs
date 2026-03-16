@@ -174,8 +174,8 @@ namespace clibridge4unity
                     "  SCREENSHOT Player              - Find GameObject, render from multiple angles\n" +
                     "  SCREENSHOT Assets/Prefabs/X.prefab - Render prefab asset\n" +
                     "  SCREENSHOT Assets/UI/X.uxml    - Render UXML at 1280x720",
-            RequiresMainThread = true)]
-        public static string Screenshot(string data)
+            RequiresMainThread = false)]
+        public static async Task<string> Screenshot(string data)
         {
             try
             {
@@ -202,19 +202,21 @@ namespace clibridge4unity
                 string outputDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "clibridge4unity_screenshots");
                 System.IO.Directory.CreateDirectory(outputDir);
 
-                // Camera render
+                // Camera render (needs main thread)
                 if (target.Equals("camera", StringComparison.OrdinalIgnoreCase))
-                    return RenderCamera(width, height, outputDir);
+                    return await CommandRegistry.RunOnMainThreadAsync(() =>
+                        RenderCamera(width, height, outputDir));
 
-                // Asset path: delegate to asset renderer
+                // Asset path: delegate to SCREENSHOT_ASSET (handles its own main thread)
                 if (target.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) ||
                     target.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
                 {
-                    return CommandRegistry.ExecuteCommand("SCREENSHOT_ASSET", target, null, default).Result;
+                    return await CommandRegistry.ExecuteCommand("SCREENSHOT_ASSET", target, null, default);
                 }
 
-                // GameObject by name — find it, render from multiple angles
-                return RenderGameObject(target, width, height, outputDir);
+                // GameObject by name (needs main thread)
+                return await CommandRegistry.RunOnMainThreadAsync(() =>
+                    RenderGameObject(target, width, height, outputDir));
             }
             catch (Exception ex)
             {
