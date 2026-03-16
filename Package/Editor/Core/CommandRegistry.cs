@@ -663,9 +663,16 @@ namespace clibridge4unity
 
         /// <summary>
         /// Public utility for commands to invoke work on the Unity main thread.
+        /// If already on the main thread, runs directly (prevents deadlock).
         /// </summary>
         public static async Task<T> RunOnMainThreadAsync<T>(Func<T> action, string description = null)
         {
+            // Deadlock guard: if we're already on the main thread, just run it
+            if (_mainThreadContext != null &&
+                SynchronizationContext.Current == _mainThreadContext)
+            {
+                return action();
+            }
             return await InvokeOnMainThread(action, description ?? "RunOnMainThreadAsync");
         }
 
