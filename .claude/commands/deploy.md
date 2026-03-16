@@ -20,9 +20,10 @@ Do NOT stop to ask for confirmation — run the entire pipeline automatically.
 Use the Edit tool to update the old version → new version in each file:
 1. `clibridge4unity/clibridge4unity.csproj` — `<Version>X.Y.Z</Version>`
 2. `Package/package.json` — `"version": "X.Y.Z"`
-3. `CLAUDE.md` — `# UPM manifest (vX.Y.Z)`
-4. `Package/CLAUDE.md` — `# UPM manifest (vX.Y.Z)`
-5. `SUMMARY.md` — `Current: X.Y.Z`
+3. `Package/Editor/Core/BridgeServer.cs` — `public const string Version = "X.Y.Z";`
+4. `CLAUDE.md` — `# UPM manifest (vX.Y.Z)`
+5. `Package/CLAUDE.md` — `# UPM manifest (vX.Y.Z)`
+6. `SUMMARY.md` — `Current: X.Y.Z`
 6. `install.ps1` — `.\install.ps1 -Version X.Y.Z`
 
 ### 3. Quick doc check
