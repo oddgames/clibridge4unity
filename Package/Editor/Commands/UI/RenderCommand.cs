@@ -84,6 +84,12 @@ namespace clibridge4unity
                     () => RenderPrefab(path, width, height));
             }
 
+            if (path.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase))
+            {
+                return await CommandRegistry.RunOnMainThreadAsync(
+                    () => RenderUxml(path, width > 0 ? width : 1280, height > 0 ? height : 720));
+            }
+
             // Auto-detect asset type
             var detected = await CommandRegistry.RunOnMainThreadAsync(() =>
             {
@@ -96,6 +102,90 @@ namespace clibridge4unity
                 return await CommandRegistry.RunOnMainThreadAsync(() => RenderPrefab(path, width, height));
 
             return await RenderGameObjectAsync(path, width, height);
+        }
+
+        static string RenderUxml(string uxmlPath, int width, int height)
+        {
+            var uxml = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.VisualTreeAsset>(uxmlPath);
+            if (uxml == null)
+                return Response.Error($"UXML not found: {uxmlPath}");
+
+            // Create a temporary UIDocument to render the UXML
+            var go = new GameObject("__uxml_render__");
+            var rt = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32);
+            try
+            {
+                rt.Create();
+
+                // Create a runtime panel and render to texture
+                var doc = go.AddComponent<UnityEngine.UIElements.UIDocument>();
+
+                // Find or create PanelSettings
+                var panelGuids = AssetDatabase.FindAssets("t:PanelSettings");
+                if (panelGuids.Length > 0)
+                {
+                    doc.panelSettings = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.PanelSettings>(
+                        AssetDatabase.GUIDToAssetPath(panelGuids[0]));
+                }
+                else
+                {
+                    // Create temp PanelSettings
+                    var ps = ScriptableObject.CreateInstance<UnityEngine.UIElements.PanelSettings>();
+                    ps.targetTexture = rt;
+                    ps.scaleMode = UnityEngine.UIElements.PanelScaleMode.ConstantPixelSize;
+                    doc.panelSettings = ps;
+                }
+
+                doc.visualTreeAsset = uxml;
+
+                // Also load any USS referenced in the same directory
+                string dir = Path.GetDirectoryName(uxmlPath);
+                string ussPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(uxmlPath) + ".uss");
+                if (File.Exists(Path.GetFullPath(ussPath)))
+                {
+                    var uss = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.StyleSheet>(ussPath);
+                    if (uss != null && doc.rootVisualElement != null)
+                        doc.rootVisualElement.styleSheets.Add(uss);
+                }
+
+                // Force a layout pass
+                if (doc.rootVisualElement != null)
+                {
+                    doc.rootVisualElement.style.width = width;
+                    doc.rootVisualElement.style.height = height;
+                }
+
+                // Render via a camera pointed at nothing (just to capture the UI overlay)
+                var camGo = new GameObject("__uxml_cam__");
+                var cam = camGo.AddComponent<Camera>();
+                cam.clearFlags = CameraClearFlags.SolidColor;
+                cam.backgroundColor = new Color(0.12f, 0.12f, 0.14f);
+                cam.cullingMask = 0; // render nothing except UI
+                cam.targetTexture = rt;
+                cam.Render();
+
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                var tex = new Texture2D(width, height, TextureFormat.RGB24, false);
+                tex.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+                tex.Apply();
+                RenderTexture.active = prev;
+
+                string outputPath = Path.Combine(OutputDir, Path.GetFileNameWithoutExtension(uxmlPath) + ".png");
+                File.WriteAllBytes(outputPath, tex.EncodeToPNG());
+
+                UnityEngine.Object.DestroyImmediate(tex);
+                UnityEngine.Object.DestroyImmediate(camGo);
+
+                return Response.Success($"UXML rendered ({width}x{height})\noutput: {outputPath}");
+            }
+            finally
+            {
+                RenderTexture.active = null;
+                rt.Release();
+                UnityEngine.Object.DestroyImmediate(go);
+                UnityEngine.Object.DestroyImmediate(rt);
+            }
         }
 
         // ───────────────────── Multi-path parsing ─────────────────────

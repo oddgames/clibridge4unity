@@ -510,11 +510,12 @@ class Program
         // Everything else → server-side render, with CLI fallback if pipe fails
         if (command.Equals("SCREENSHOT", StringComparison.OrdinalIgnoreCase))
         {
-            string view = data?.Trim().ToLowerInvariant() ?? "";
+            string view = data?.Trim() ?? "";
+            string viewLower = view.ToLowerInvariant();
             // "game" routes to server (can create the tab + render camera)
             // Other known views use fast CLI-side Win32 capture
             string[] cliViews = { "", "editor", "scene", "inspector", "hierarchy", "console", "project", "profiler" };
-            if (Array.Exists(cliViews, v => v == view))
+            if (Array.Exists(cliViews, v => v == viewLower))
             {
                 return HandleScreenshot(projectPath);
             }
@@ -747,26 +748,20 @@ class Program
                 return WaitForCompilationAndReconnect(pipeName, projectPath, timeoutSeconds);
             }
 
+            // Show notification for screenshots with image paths
+            if (response.Contains(".png"))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(response,
+                    @"([A-Za-z]:\\[^\s\n]+\.png|/[^\s\n]+\.png)");
+                if (match.Success && File.Exists(match.Value))
+                    ShowNotification("Screenshot", Path.GetFileName(match.Value), match.Value);
+            }
+
             // Detect main thread timeout for auto-retry
             if (response.Contains("Main thread timed out"))
             {
                 _lastResponseContainedMainThreadTimeout = true;
                 return 1;
-            }
-
-            // Auto-open rendered PNGs in VS Code
-            if (command == "SCREENSHOT")
-            {
-                foreach (var line in response.Split('\n'))
-                {
-                    var trimmed = line.Trim();
-                    if (trimmed.StartsWith("output:", StringComparison.OrdinalIgnoreCase))
-                    {
-                        string path = trimmed.Substring("output:".Length).Trim();
-                        if (path.EndsWith(".png", StringComparison.OrdinalIgnoreCase) && File.Exists(path))
-                            OpenInVsCode(path);
-                    }
-                }
             }
 
             return 0;
@@ -1858,8 +1853,48 @@ class Program
         Console.WriteLine($"size: {width}x{height}");
         Console.WriteLine($"output: {outputPath}");
 
-        OpenInVsCode(outputPath);
+        ShowNotification("Screenshot", $"Captured {width}x{height}", outputPath);
         return 0;
+    }
+
+    static void ShowNotification(string title, string message, string imagePath = null)
+    {
+        try
+        {
+            // Windows toast notification with optional image
+            string imageXml = imagePath != null
+                ? $"<image placement=\"hero\" src=\"file:///{imagePath.Replace('\\', '/')}\"/>"
+                : "";
+            string toastXml = $@"
+<toast duration=""short"">
+  <visual>
+    <binding template=""ToastGeneric"">
+      <text>{System.Security.SecurityElement.Escape(title)}</text>
+      <text>{System.Security.SecurityElement.Escape(message)}</text>
+      {imageXml}
+    </binding>
+  </visual>
+</toast>";
+
+            string psScript = $@"
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml('{toastXml.Replace("'", "''").Replace("\r", "").Replace("\n", "")}')
+$toast = New-Object Windows.UI.Notifications.ToastNotification $xml
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('clibridge4unity').Show($toast)
+";
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell",
+                Arguments = $"-NoProfile -NonInteractive -Command \"{psScript.Replace("\"", "\\\"")}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true
+            };
+            Process.Start(psi);
+        }
+        catch { }
     }
 
     static void OpenInVsCode(string filePath)
