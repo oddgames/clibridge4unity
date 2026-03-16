@@ -21,7 +21,7 @@ tool_claude_unity_bridge/
 │   │       ├── Component/         # Component inspection & modification
 │   │       ├── Code/              # CODE_SEARCH, CODE_ANALYZE, CODE_EXEC, TEST
 │   │       ├── Asset/             # Asset search
-│   │       └── UI/                # UI_DISCOVER, UI_RENDER
+│   │       └── UI/                # UI_DISCOVER, SCREENSHOT
 │   └── Tools/                     # Pre-built CLI executables (win/osx/linux)
 └── UnityTestProject/              # Test Unity project
 ```
@@ -41,7 +41,7 @@ tool_claude_unity_bridge/
 - **Prefab**: PREFAB_CREATE, PREFAB_INSTANTIATE, PREFAB_HIERARCHY, PREFAB_SAVE
 - **Component**: COMPONENT_SET, COMPONENT_ADD, COMPONENT_REMOVE, INSPECTOR
 - **Asset**: ASSET_SEARCH
-- **UI**: UI_DISCOVER, UI_RENDER
+- **UI**: UI_DISCOVER, SCREENSHOT
 
 ### CLI Workflow
 ```bash

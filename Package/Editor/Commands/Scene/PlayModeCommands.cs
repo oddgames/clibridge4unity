@@ -206,11 +206,11 @@ namespace clibridge4unity
                 if (target.Equals("camera", StringComparison.OrdinalIgnoreCase))
                     return RenderCamera(width, height, outputDir);
 
-                // Asset path: delegate to UI_RENDER command
+                // Asset path: delegate to asset renderer
                 if (target.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) ||
                     target.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
                 {
-                    return CommandRegistry.ExecuteCommand("UI_RENDER", target, null, default).Result;
+                    return CommandRegistry.ExecuteCommand("SCREENSHOT_ASSET", target, null, default).Result;
                 }
 
                 // GameObject by name — find it, render from multiple angles
@@ -272,7 +272,7 @@ namespace clibridge4unity
             if (rectTransform != null && go.GetComponentInParent<Canvas>() != null)
             {
                 // UI element — render the canvas it belongs to
-                return Response.Error("UI element rendering: use UI_RENDER on the prefab/UXML asset");
+                return Response.Error("UI element rendering: use SCREENSHOT with the asset path");
             }
 
             // 3D object — get bounds, render from front + right + top (3-view grid)
@@ -300,45 +300,50 @@ namespace clibridge4unity
             var atlas = new Texture2D(cellW * 3, cellH, TextureFormat.RGB24, false);
 
             var camGO = new GameObject("__screenshot_cam__");
-            var cam = camGO.AddComponent<Camera>();
-            cam.clearFlags = CameraClearFlags.SolidColor;
-            cam.backgroundColor = new Color(0.2f, 0.2f, 0.2f);
-            cam.orthographic = true;
-            cam.orthographicSize = maxDim * 0.6f;
-            cam.nearClipPlane = 0.01f;
-            cam.farClipPlane = dist * 3f;
-
             var rt = new RenderTexture(cellW, cellH, 24, RenderTextureFormat.ARGB32);
-            rt.Create();
-            cam.targetTexture = rt;
-
-            for (int i = 0; i < angles.Length; i++)
+            try
             {
-                var (label, pos, rot) = angles[i];
-                camGO.transform.position = pos;
-                camGO.transform.rotation = rot;
-                cam.Render();
+                var cam = camGO.AddComponent<Camera>();
+                cam.clearFlags = CameraClearFlags.SolidColor;
+                cam.backgroundColor = new Color(0.2f, 0.2f, 0.2f);
+                cam.orthographic = true;
+                cam.orthographicSize = maxDim * 0.6f;
+                cam.nearClipPlane = 0.01f;
+                cam.farClipPlane = dist * 3f;
 
-                RenderTexture.active = rt;
-                var cell = new Texture2D(cellW, cellH, TextureFormat.RGB24, false);
-                cell.ReadPixels(new Rect(0, 0, cellW, cellH), 0, 0);
-                cell.Apply();
-                RenderTexture.active = null;
+                rt.Create();
+                cam.targetTexture = rt;
 
-                atlas.SetPixels(i * cellW, 0, cellW, cellH, cell.GetPixels());
-                UnityEngine.Object.DestroyImmediate(cell);
+                for (int i = 0; i < angles.Length; i++)
+                {
+                    var (label, pos, rot) = angles[i];
+                    camGO.transform.position = pos;
+                    camGO.transform.rotation = rot;
+                    cam.Render();
+
+                    RenderTexture.active = rt;
+                    var cell = new Texture2D(cellW, cellH, TextureFormat.RGB24, false);
+                    cell.ReadPixels(new Rect(0, 0, cellW, cellH), 0, 0);
+                    cell.Apply();
+                    RenderTexture.active = null;
+
+                    atlas.SetPixels(i * cellW, 0, cellW, cellH, cell.GetPixels());
+                    UnityEngine.Object.DestroyImmediate(cell);
+                }
+
+                atlas.Apply();
+                string path = System.IO.Path.Combine(outputDir, $"{name.Replace("/", "_")}.png");
+                System.IO.File.WriteAllBytes(path, atlas.EncodeToPNG());
+                return Response.Success($"3D render of '{name}' (front|right|top, {cellW}x{cellH} each): {path}");
             }
-
-            atlas.Apply();
-            rt.Release();
-            UnityEngine.Object.DestroyImmediate(camGO);
-
-            string path = System.IO.Path.Combine(outputDir, $"{name.Replace("/", "_")}.png");
-            System.IO.File.WriteAllBytes(path, atlas.EncodeToPNG());
-            UnityEngine.Object.DestroyImmediate(atlas);
-            UnityEngine.Object.DestroyImmediate(rt);
-
-            return Response.Success($"3D render of '{name}' (front|right|top, {cellW}x{cellH} each): {path}");
+            finally
+            {
+                RenderTexture.active = null;
+                rt.Release();
+                UnityEngine.Object.DestroyImmediate(camGO);
+                UnityEngine.Object.DestroyImmediate(atlas);
+                UnityEngine.Object.DestroyImmediate(rt);
+            }
         }
 
         private static EditorWindow GetGameView()

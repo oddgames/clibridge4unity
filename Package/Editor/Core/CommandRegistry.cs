@@ -95,6 +95,7 @@ namespace clibridge4unity
             public TaskCompletionSource<object> CompletionSource;
             public string Description;
             public DateTime EnqueuedAt;
+            public volatile bool IsExecuting; // true once dequeued and running
         }
 
         // Captured on main thread for SynchronizationContext.Post
@@ -191,6 +192,7 @@ namespace clibridge4unity
                 if (work.CompletionSource.Task.IsCanceled)
                     continue;
 
+                work.IsExecuting = true;
                 try
                 {
                     var result = work.Action();
@@ -827,15 +829,17 @@ namespace clibridge4unity
 
             _mainThreadQueue.Enqueue(work);
 
-            // Poll: check completion every 500ms, bail if heartbeat goes stale
-            for (int elapsed = 0; elapsed < 10000; elapsed += 500)
+            // Poll: check completion every 500ms
+            // If work is queued and heartbeat stale >3s → bail (Unity is stuck before our work)
+            // If work is executing → wait patiently (heartbeat is stale because WE are blocking main thread)
+            for (int elapsed = 0; elapsed < 30000; elapsed += 500)
             {
                 var done = await Task.WhenAny(work.CompletionSource.Task, Task.Delay(500));
                 if (done == work.CompletionSource.Task)
                     return (T)(await work.CompletionSource.Task);
 
-                // If heartbeat went stale while waiting (>3s), fail
-                if (_timerTickCount > 0 && (DateTime.Now - _lastTimerTick).TotalSeconds > 3.0)
+                // Only bail on stale heartbeat if work hasn't started executing yet
+                if (!work.IsExecuting && _timerTickCount > 0 && (DateTime.Now - _lastTimerTick).TotalSeconds > 3.0)
                 {
                     work.CompletionSource.TrySetCanceled();
                     throw new TimeoutException(BuildBusyReport(
@@ -843,10 +847,10 @@ namespace clibridge4unity
                 }
             }
 
-            // 10s with active heartbeat but no result — command is stuck
+            // 30s hard limit — something is genuinely stuck
             work.CompletionSource.TrySetCanceled();
             throw new TimeoutException(BuildBusyReport(
-                _timerTickCount > 0 ? (DateTime.Now - _lastTimerTick).TotalSeconds : 10, work.Description));
+                _timerTickCount > 0 ? (DateTime.Now - _lastTimerTick).TotalSeconds : 30, work.Description));
         }
 
         private static readonly Dictionary<Type, object> _instances = new Dictionary<Type, object>();

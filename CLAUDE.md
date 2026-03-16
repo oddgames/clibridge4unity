@@ -108,7 +108,7 @@ tool_claude_unity_bridge/
 │   │       ├── Component/     # Component inspection & modification
 │   │       ├── Asset/         # Asset search
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
-│   │       └── UI/            # UI_DISCOVER, UI_RENDER
+│   │       └── UI/            # UI_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
 │   └── package.json           # UPM manifest (v1.0.9)
 └── UnityTestProject/          # Test Unity project
@@ -268,7 +268,7 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 
 ### UI
 - `UI_DISCOVER [filter]` - Discover sprites, fonts, prefabs, scenes
-- `UI_RENDER path [path2 ...]` - Render prefab/UXML to PNG (multiple = labeled grid)
+- `SCREENSHOT Assets/path  - Render prefab/UXML to PNG
 
 ### CLI-side (no Unity connection needed)
 - `SETUP` - Install UPM package + verify Unity + generate CLAUDE.md (alias: `INSTALL`)

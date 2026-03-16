@@ -510,11 +510,6 @@ class Program
                 return HandleScreenshot(projectPath);
             }
         }
-        // UI_RENDER is now an alias for SCREENSHOT with asset paths
-        if (command.Equals("UI_RENDER", StringComparison.OrdinalIgnoreCase))
-        {
-            command = "SCREENSHOT";
-        }
 
         // --wait flag: send command, wait for reconnection, then fetch logs
         if (waitForLogs)
@@ -693,7 +688,7 @@ class Program
             string cmdUpper2 = command.ToUpperInvariant();
             if (cmdUpper2 == "COMPILE" || cmdUpper2 == "REFRESH" || cmdUpper2 == "TEST" ||
                 cmdUpper2 == "CODE_EXEC" || cmdUpper2 == "CODE_EXEC_RETURN" ||
-                cmdUpper2 == "SCREENSHOT" || cmdUpper2 == "UI_RENDER")
+                cmdUpper2 == "SCREENSHOT")
                 readTimeoutMs = 15000;
 
             using var cts = new CancellationTokenSource(readTimeoutMs);
@@ -740,7 +735,7 @@ class Program
             }
 
             // Auto-open rendered PNGs in VS Code
-            if (command == "UI_RENDER")
+            if (command == "SCREENSHOT")
             {
                 foreach (var line in response.Split('\n'))
                 {
@@ -1559,7 +1554,7 @@ class Program
         md.AppendLine("clibridge4unity SCREENSHOT camera               # Render main camera to PNG");
         md.AppendLine("clibridge4unity SCREENSHOT camera 1920x1080     # Render at specific resolution");
         md.AppendLine("clibridge4unity SCREENSHOT Player               # 3D object — front/right/top grid");
-        md.AppendLine("clibridge4unity SCREENSHOT Assets/Prefabs/X.prefab  # Render prefab via UI_RENDER");
+        md.AppendLine("clibridge4unity SCREENSHOT Assets/Prefabs/X.prefab  # Render prefab to PNG");
         md.AppendLine("```");
         md.AppendLine();
         md.AppendLine("SCREENSHOT auto-detects the target: known views use fast CLI-side capture,");

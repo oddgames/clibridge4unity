@@ -57,8 +57,8 @@ Run `SETUP` again after updates to regenerate the docs. The generated `CLAUDE.md
 | **Scene** | `SCENE` `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `SCENEVIEW` `GAMEVIEW` `WINDOWS` |
 | **Prefab** | `PREFAB_CREATE` `PREFAB_INSTANTIATE` `PREFAB_HIERARCHY` `PREFAB_SAVE` |
 | **Component** | `INSPECTOR` `COMPONENT_SET` `COMPONENT_ADD` `COMPONENT_REMOVE` |
-| **Asset & UI** | `ASSET_SEARCH` `UI_DISCOVER` `UI_RENDER` |
-| **CLI-side** | `SETUP` `SCREENSHOT` `WAKEUP` `DISMISS` |
+| **Asset & UI** | `ASSET_SEARCH` `UI_DISCOVER` |
+| **CLI-side** | `SETUP` `SCREENSHOT` `DISMISS` |
 
 Run `clibridge4unity HELP` for full usage details.
 

@@ -18,13 +18,11 @@ namespace clibridge4unity
             Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(),
             "clibridge4unity_screenshots");
 
-        [BridgeCommand("UI_RENDER",
-            "Render prefabs or GameObjects to PNG. Multiple paths = labeled grid.",
-            Category = "UI",
-            Usage = "UI_RENDER Assets/Prefabs/MyPrefab.prefab   (auto-sizes to content)\n" +
-                    "  UI_RENDER path1.prefab path2.prefab path3.prefab   (grid)\n" +
-                    "  UI_RENDER {\"items\":[\"a.prefab\",\"b.prefab\"],\"cols\":3,\"cellWidth\":640,\"cellHeight\":480}\n" +
-                    "  UI_RENDER {\"prefab\":\"X.prefab\",\"width\":800,\"height\":600}   (explicit size)\n" +
+        [BridgeCommand("SCREENSHOT_ASSET",
+            "Render prefabs, UXML, or GameObjects to PNG (called internally by SCREENSHOT)",
+            Category = "Scene",
+            Usage = "SCREENSHOT_ASSET Assets/Prefabs/MyPrefab.prefab\n" +
+                    "  SCREENSHOT_ASSET path1.prefab path2.prefab   (grid)\n" +
                     "  Output: %TEMP%/clibridge4unity_screenshots/render_*.png",
             RequiresMainThread = false)]
         public static async Task<string> Render(string data)
