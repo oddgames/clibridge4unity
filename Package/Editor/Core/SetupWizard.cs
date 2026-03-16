@@ -22,6 +22,8 @@ namespace clibridge4unity
         private static bool cliInPath;
         private Vector2 scrollPosition;
 
+        private static readonly string PREF_MISMATCH_DISMISSED = "CliBridge_MismatchDismissed";
+
         static SetupWizard()
         {
             EditorApplication.delayCall += CheckSetup;
@@ -31,12 +33,17 @@ namespace clibridge4unity
         {
             // Don't show if already set up or dismissed
             if (EditorPrefs.GetBool(PREF_KEY, false) || EditorPrefs.GetBool(PREF_DISMISSED, false))
+            {
+                // Still check for version mismatch even if setup is complete
+                CheckVersionMismatch();
                 return;
+            }
 
             // Check if CLI is in PATH
             if (IsCliInPath())
             {
                 EditorPrefs.SetBool(PREF_KEY, true);
+                CheckVersionMismatch();
                 return;
             }
 
@@ -45,6 +52,151 @@ namespace clibridge4unity
             {
                 GetWindow<SetupWizard>("CLI Bridge Setup", true);
             };
+        }
+
+        static void CheckVersionMismatch()
+        {
+            // Run on background thread to not block editor
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    string cliVersion = GetCliVersionString();
+                    if (string.IsNullOrEmpty(cliVersion)) return;
+
+                    string packageVersion = GetPackageVersion();
+                    if (string.IsNullOrEmpty(packageVersion)) return;
+
+                    if (cliVersion != packageVersion)
+                    {
+                        // Check if user already dismissed this specific mismatch
+                        string dismissedPair = SessionState.GetString(PREF_MISMATCH_DISMISSED, "");
+                        string currentPair = $"{cliVersion}|{packageVersion}";
+                        if (dismissedPair == currentPair) return;
+
+                        // Show dialog on main thread
+                        EditorApplication.delayCall += () =>
+                        {
+                            bool update = EditorUtility.DisplayDialog(
+                                "CLI Bridge Version Mismatch",
+                                $"The CLI tool on PATH is v{cliVersion} but the Unity package is v{packageVersion}.\n\n" +
+                                "This can cause compatibility issues.\n\n" +
+                                "Click 'Update CLI' to copy the matching version from the package.",
+                                "Update CLI",
+                                "Ignore");
+
+                            if (update)
+                            {
+                                InstallCliSilent();
+                            }
+                            else
+                            {
+                                SessionState.SetString(PREF_MISMATCH_DISMISSED, currentPair);
+                            }
+                        };
+                    }
+                }
+                catch { }
+            });
+        }
+
+        /// <summary>
+        /// Returns just the version number string (e.g. "1.0.8") from the CLI.
+        /// </summary>
+        static string GetCliVersionString()
+        {
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = CLI_NAME,
+                    Arguments = "--version",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using (var process = Process.Start(startInfo))
+                {
+                    string output = process.StandardOutput.ReadToEnd();
+                    process.WaitForExit(2000);
+                    // Output is "clibridge4unity version X.Y.Z" — extract version
+                    var parts = output.Trim().Split(' ');
+                    return parts.Length >= 3 ? parts[2].Trim() : null;
+                }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Reads the package version from package.json.
+        /// </summary>
+        static string GetPackageVersion()
+        {
+            try
+            {
+                string packagePath = Path.GetFullPath("Packages/au.com.oddgames.clibridge4unity/package.json");
+                if (!File.Exists(packagePath)) return null;
+                string json = File.ReadAllText(packagePath);
+                // Simple parse: find "version": "X.Y.Z"
+                var match = System.Text.RegularExpressions.Regex.Match(json, "\"version\"\\s*:\\s*\"([^\"]+)\"");
+                return match.Success ? match.Groups[1].Value : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Silently installs the CLI from the package (no wizard UI).
+        /// </summary>
+        static void InstallCliSilent()
+        {
+            try
+            {
+                string packagePath = Path.GetFullPath("Packages/au.com.oddgames.clibridge4unity");
+                string destDir = GetDefaultInstallPath();
+
+#if UNITY_EDITOR_WIN
+                string sourceExe = Path.Combine(packagePath, "Tools", "win-x64", "clibridge4unity.exe");
+                string destExe = Path.Combine(destDir, "clibridge4unity.exe");
+#elif UNITY_EDITOR_OSX
+                string sourceExe = Path.Combine(packagePath, "Tools", "osx-x64", "clibridge4unity");
+                string destExe = Path.Combine(destDir, "clibridge4unity");
+#else
+                string sourceExe = Path.Combine(packagePath, "Tools", "linux-x64", "clibridge4unity");
+                string destExe = Path.Combine(destDir, "clibridge4unity");
+#endif
+
+                if (!File.Exists(sourceExe))
+                {
+                    Debug.LogWarning($"[Bridge] CLI exe not found in package: {sourceExe}");
+                    return;
+                }
+
+                Directory.CreateDirectory(destDir);
+
+                // Rename-swap to handle locked exe
+                string oldExe = destExe + ".old";
+                if (File.Exists(destExe))
+                {
+                    if (File.Exists(oldExe)) File.Delete(oldExe);
+                    File.Move(destExe, oldExe);
+                }
+                File.Copy(sourceExe, destExe, true);
+                if (File.Exists(oldExe)) try { File.Delete(oldExe); } catch { }
+
+                string newVersion = GetCliVersionString();
+                Debug.Log($"[Bridge] CLI updated to v{newVersion}");
+                EditorUtility.DisplayDialog("CLI Bridge Updated",
+                    $"CLI tool updated to v{newVersion}.\n\nLocation: {destExe}",
+                    "OK");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[Bridge] CLI update failed: {ex.Message}");
+                EditorUtility.DisplayDialog("Update Failed",
+                    $"Could not update CLI tool:\n{ex.Message}",
+                    "OK");
+            }
         }
 
         [MenuItem("Tools/CLI Bridge for Unity/Setup Wizard")]

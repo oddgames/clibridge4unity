@@ -44,6 +44,9 @@ namespace clibridge4unity
         public static Func<long> GetLastLogId;
         public static Func<long, int, string> GetLogsSinceFormatted;
 
+        // Compile error hook - set by LogCommands to check for active compiler errors
+        public static Func<string> GetCompileErrors;
+
         // Path shortening hook - set by StackTraceMinimizer to shorten paths in all responses
         public static Func<string, string> ShortenResponsePaths;
 
@@ -444,11 +447,30 @@ namespace clibridge4unity
             return _commands.TryGetValue(name, out var cmd) ? cmd : null;
         }
 
+        // Commands that work even with compile errors (diagnostics, non-Unity-code commands)
+        private static readonly HashSet<string> CompileErrorBypassCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "PING", "HELP", "DIAG", "LOG", "STATUS", "COMPILE", "REFRESH", "DISMISS",
+            "PROBE", "STACK_MINIMIZE", "CODE_EXEC", "CODE_EXEC_RETURN"
+        };
+
         public static async Task<string> ExecuteCommand(string name, string data, NamedPipeServerStream pipe, CancellationToken ct)
         {
             var cmd = GetCommand(name);
             if (cmd == null)
                 return Response.Error($"Unknown command: {name}. Use HELP for available commands.");
+
+            // Block commands when there are compile errors (except diagnostic/fix commands)
+            if (GetCompileErrors != null && !CompileErrorBypassCommands.Contains(name))
+            {
+                try
+                {
+                    string compileErrors = GetCompileErrors();
+                    if (compileErrors != null)
+                        return Response.Error(compileErrors + "\nFix the errors above, then run COMPILE.");
+                }
+                catch { }
+            }
 
             // Capture log position before command execution (skip for LOG command itself)
             long logIdBefore = 0;

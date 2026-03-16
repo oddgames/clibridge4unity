@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using UnityEditor.Compilation;
 using UnityEngine;
 
 namespace clibridge4unity
@@ -20,6 +21,10 @@ namespace clibridge4unity
         private static long _nextId;
         private static volatile bool _isRunning = true;
 
+        // Compile errors persist across log clears — tracked separately
+        private static readonly List<CompilerMessage> _compileErrors = new List<CompilerMessage>();
+        private static readonly object _compileErrorLock = new object();
+
         static LogCommands()
         {
             // Restore log ID counter across domain reloads
@@ -32,13 +37,22 @@ namespace clibridge4unity
             // Register hooks with CommandRegistry (avoids circular asmdef dependency)
             CommandRegistry.GetLastLogId = GetLastLogId;
             CommandRegistry.GetLogsSinceFormatted = GetLogsSinceFormatted;
+            CommandRegistry.GetCompileErrors = GetCompileErrorsSummary;
             CommandRegistry.ShortenResponsePaths = StackTraceMinimizer.ShortenPaths;
+
+            // Track compile errors via CompilationPipeline (persists until fixed)
+            CompilationPipeline.assemblyCompilationFinished += OnAssemblyCompilationFinished;
+            CompilationPipeline.compilationStarted += _ =>
+            {
+                lock (_compileErrorLock) _compileErrors.Clear();
+            };
 
             Application.logMessageReceived += OnLogMessage;
             UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += () =>
             {
                 _isRunning = false;
                 Application.logMessageReceived -= OnLogMessage;
+                CompilationPipeline.assemblyCompilationFinished -= OnAssemblyCompilationFinished;
                 UnityEditor.SessionState.SetInt(SessionKeys.LogNextId, (int)_nextId);
                 FlushPendingWrites();
             };
@@ -53,6 +67,37 @@ namespace clibridge4unity
                     TrimLogFile(500);
             }
             catch { }
+        }
+
+        private static void OnAssemblyCompilationFinished(string assemblyPath, CompilerMessage[] messages)
+        {
+            lock (_compileErrorLock)
+            {
+                foreach (var msg in messages)
+                {
+                    if (msg.type == CompilerMessageType.Error)
+                        _compileErrors.Add(msg);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Returns a formatted compile error summary, or null if no errors.
+        /// </summary>
+        public static string GetCompileErrorsSummary()
+        {
+            lock (_compileErrorLock)
+            {
+                if (_compileErrors.Count == 0) return null;
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"COMPILE ERRORS ({_compileErrors.Count}) — fix these before running commands:");
+                foreach (var err in _compileErrors.Take(10))
+                    sb.AppendLine($"  {err.message}");
+                if (_compileErrors.Count > 10)
+                    sb.AppendLine($"  ... and {_compileErrors.Count - 10} more");
+                return sb.ToString().TrimEnd();
+            }
         }
 
         private static void OnLogMessage(string message, string stackTrace, LogType type)
