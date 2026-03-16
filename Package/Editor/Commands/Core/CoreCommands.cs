@@ -63,6 +63,16 @@ namespace clibridge4unity
         public static string Diag()
         {
             var sb = new System.Text.StringBuilder();
+            // Read package version from package.json
+            try
+            {
+                string pkgJson = System.IO.File.ReadAllText(
+                    System.IO.Path.GetFullPath("Packages/au.com.oddgames.clibridge4unity/package.json"));
+                var match = System.Text.RegularExpressions.Regex.Match(pkgJson, "\"version\"\\s*:\\s*\"([^\"]+)\"");
+                if (match.Success)
+                    sb.AppendLine($"packageVersion: {match.Groups[1].Value}");
+            }
+            catch { }
             sb.AppendLine("--- heartbeat ---");
             sb.AppendLine(CommandRegistry.GetHeartbeatInfo());
             sb.AppendLine("--- thread ---");
@@ -110,8 +120,20 @@ namespace clibridge4unity
             if (long.TryParse(SessionState.GetString(SessionKeys.LastCompileRequest, "0"), out var requestTicks) && requestTicks > 0)
                 lastCompileRequestStr = new System.DateTime(requestTicks).ToString("yyyy-MM-dd HH:mm:ss");
 
+            // Read package version
+            string packageVersion = "unknown";
+            try
+            {
+                string pkgJson = System.IO.File.ReadAllText(
+                    System.IO.Path.GetFullPath("Packages/au.com.oddgames.clibridge4unity/package.json"));
+                var match = System.Text.RegularExpressions.Regex.Match(pkgJson, "\"version\"\\s*:\\s*\"([^\"]+)\"");
+                if (match.Success) packageVersion = match.Groups[1].Value;
+            }
+            catch { }
+
             return Response.SuccessWithData(new
             {
+                bridgeVersion = packageVersion,
                 isCompiling = EditorApplication.isCompiling,
                 isPlaying = EditorApplication.isPlaying,
                 isPaused = EditorApplication.isPaused,
