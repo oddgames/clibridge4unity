@@ -433,15 +433,30 @@ class Program
             Console.Error.WriteLine($"       Expected project: {Path.GetFileName(Path.GetFullPath(projectPath))}");
             foreach (var title in unityInfo.OpenProjects)
                 Console.Error.WriteLine($"       Unity has open: {title}");
+            if (!string.IsNullOrEmpty(unityInfo.ImportStatus))
+                Console.Error.WriteLine($"       Status: {unityInfo.ImportStatus}");
             Console.Error.WriteLine($"       Open this project in Unity or use -d to specify the correct path.");
             return 1;
         }
         if (unityInfo.State == UnityProcessState.Importing)
         {
-            Console.Error.WriteLine($"Error: Unity is busy importing assets.");
-            Console.Error.WriteLine($"       {unityInfo.ImportStatus}");
-            Console.Error.WriteLine("       Wait for import to finish, then retry.");
+            Console.Error.WriteLine($"Error: Unity is busy — {unityInfo.ImportStatus}");
+            if (unityInfo.RecentErrors.Count > 0)
+            {
+                Console.Error.WriteLine("       Recent compile errors (from Editor.log):");
+                foreach (var err in unityInfo.RecentErrors)
+                    Console.Error.WriteLine($"         {err}");
+            }
+            Console.Error.WriteLine("       Wait for it to finish, then retry the command.");
             return 1;
+        }
+        // Show recent compile errors even when running (before pipe connect)
+        if (unityInfo.RecentErrors.Count > 0)
+        {
+            Console.Error.WriteLine($"Warning: Recent compile errors detected (from Editor.log):");
+            foreach (var err in unityInfo.RecentErrors)
+                Console.Error.WriteLine($"  {err}");
+            Console.Error.WriteLine();
         }
 
         // Wake Unity's message pump before any command (ensures responsiveness in background)
@@ -1110,6 +1125,7 @@ class Program
         public UnityProcessState State;
         public string ImportStatus;       // e.g. "Importing - Compress 50% (busy for 02:04)..."
         public List<string> OpenProjects = new List<string>();
+        public List<string> RecentErrors = new List<string>();  // from Editor.log
     }
 
     static UnityProcessInfo DetectUnityProcess(string projectPath)
@@ -1132,10 +1148,10 @@ class Program
             catch (UnauthorizedAccessException) { lockfileHeld = true; }
         }
 
-        // Enumerate Unity processes and their windows
-        bool anyUnity = false;
+        // Collect ALL Unity PIDs and enumerate windows across all of them
+        // (Unity 6 uses separate processes for UI and scripting runtime)
+        var unityPids = new HashSet<uint>();
         bool foundProject = false;
-        uint matchedPid = 0;
 
         try
         {
@@ -1143,15 +1159,12 @@ class Program
             {
                 try
                 {
-                    anyUnity = true;
+                    unityPids.Add((uint)proc.Id);
                     if (proc.MainWindowHandle != IntPtr.Zero && !string.IsNullOrEmpty(proc.MainWindowTitle))
                     {
                         info.OpenProjects.Add(proc.MainWindowTitle);
                         if (proc.MainWindowTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase))
-                        {
                             foundProject = true;
-                            matchedPid = (uint)proc.Id;
-                        }
                     }
                 }
                 catch { }
@@ -1162,61 +1175,81 @@ class Program
         // Determine state: lockfile is most reliable, window title as fallback
         if (!lockfileHeld && !foundProject)
         {
-            info.State = anyUnity ? UnityProcessState.DifferentProject : UnityProcessState.NotRunning;
+            info.State = unityPids.Count > 0 ? UnityProcessState.DifferentProject : UnityProcessState.NotRunning;
             return info;
         }
 
-        // Unity has this project open — check for import/progress windows
+        // Unity has this project open — scan ALL Unity windows for import/progress
         info.State = UnityProcessState.Running;
 
-        if (matchedPid != 0 || lockfileHeld)
+        if (unityPids.Count > 0)
         {
-            // Enumerate ALL windows for the matched Unity PID to find import dialogs
-            uint searchPid = matchedPid;
-            // If we only have lockfile (no window title match), find any Unity PID
-            if (searchPid == 0)
+            var titleBuf = new StringBuilder(512);
+            EnumWindows((hwnd, _) =>
             {
-                try
+                if (!IsWindowVisible(hwnd)) return true;
+                GetWindowThreadProcessId(hwnd, out uint pid);
+                if (!unityPids.Contains(pid)) return true;
+
+                titleBuf.Clear();
+                GetWindowText(hwnd, titleBuf, 512);
+                string title = titleBuf.ToString();
+
+                if (!string.IsNullOrEmpty(title) &&
+                    (title.StartsWith("Import", StringComparison.OrdinalIgnoreCase) ||
+                     title.Contains("Progress", StringComparison.OrdinalIgnoreCase) ||
+                     title.Contains("Compiling", StringComparison.OrdinalIgnoreCase) ||
+                     title.Contains("Loading", StringComparison.OrdinalIgnoreCase) ||
+                     title.Contains("Building", StringComparison.OrdinalIgnoreCase)))
                 {
-                    foreach (var proc in Process.GetProcessesByName("Unity"))
-                    {
-                        searchPid = (uint)proc.Id;
-                        break;
-                    }
+                    info.State = UnityProcessState.Importing;
+                    info.ImportStatus = title;
+                    return false;
                 }
-                catch { }
-            }
-
-            if (searchPid != 0)
-            {
-                var titleBuf = new StringBuilder(512);
-                EnumWindows((hwnd, _) =>
-                {
-                    if (!IsWindowVisible(hwnd)) return true;
-                    GetWindowThreadProcessId(hwnd, out uint pid);
-                    if (pid != searchPid) return true;
-
-                    titleBuf.Clear();
-                    GetWindowText(hwnd, titleBuf, 512);
-                    string title = titleBuf.ToString();
-
-                    if (!string.IsNullOrEmpty(title) &&
-                        (title.Contains("Import", StringComparison.OrdinalIgnoreCase) ||
-                         title.Contains("Progress", StringComparison.OrdinalIgnoreCase) ||
-                         title.Contains("Compiling", StringComparison.OrdinalIgnoreCase) ||
-                         title.Contains("Loading", StringComparison.OrdinalIgnoreCase) ||
-                         title.Contains("Building", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        info.State = UnityProcessState.Importing;
-                        info.ImportStatus = title;
-                        return false; // stop enumerating
-                    }
-                    return true;
-                }, IntPtr.Zero);
-            }
+                return true;
+            }, IntPtr.Zero);
         }
 
+        // Tail Editor.log for recent compile errors (no pipe needed)
+        TailEditorLogErrors(info);
+
         return info;
+    }
+
+    /// <summary>
+    /// Read the last ~50 lines of Unity's Editor.log and extract compile errors.
+    /// Works without any pipe connection — reads the file directly.
+    /// </summary>
+    static void TailEditorLogErrors(UnityProcessInfo info)
+    {
+        try
+        {
+            string logPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Unity", "Editor", "Editor.log");
+            if (!File.Exists(logPath)) return;
+
+            // Read last ~8KB of the log file (shared read, Unity is writing it)
+            using var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            long tailSize = Math.Min(8192, fs.Length);
+            fs.Seek(-tailSize, SeekOrigin.End);
+            var buffer = new byte[tailSize];
+            int read = fs.Read(buffer, 0, buffer.Length);
+            string tail = Encoding.UTF8.GetString(buffer, 0, read);
+
+            // Find compile errors: lines containing "error CS" or "error:"
+            foreach (var line in tail.Split('\n'))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.Contains("error CS") ||
+                    (trimmed.Contains("): error") && trimmed.Contains(".cs(")))
+                {
+                    if (info.RecentErrors.Count < 5)
+                        info.RecentErrors.Add(trimmed);
+                }
+            }
+        }
+        catch { }
     }
 
     static List<(IntPtr hwnd, string title, RECT rect)> FindFloatingUnityWindows(string projectPath)
