@@ -808,11 +808,12 @@ namespace clibridge4unity
 
         private static async Task<T> InvokeOnMainThread<T>(Func<T> action, string description = null)
         {
-            // Instant fail if main thread is not ticking — return detailed busy report
+            // Instant fail if main thread is clearly stuck (>3s stale)
+            // Brief stalls (1-2s) are normal during play mode transitions, rendering, etc.
             if (_timerTickCount > 0)
             {
                 var staleness = (DateTime.Now - _lastTimerTick).TotalSeconds;
-                if (staleness > 0.5)
+                if (staleness > 3.0)
                     throw new TimeoutException(BuildBusyReport(staleness, description));
             }
 
@@ -833,8 +834,8 @@ namespace clibridge4unity
                 if (done == work.CompletionSource.Task)
                     return (T)(await work.CompletionSource.Task);
 
-                // If heartbeat went stale while waiting, fail immediately
-                if (_timerTickCount > 0 && (DateTime.Now - _lastTimerTick).TotalSeconds > 1.0)
+                // If heartbeat went stale while waiting (>3s), fail
+                if (_timerTickCount > 0 && (DateTime.Now - _lastTimerTick).TotalSeconds > 3.0)
                 {
                     work.CompletionSource.TrySetCanceled();
                     throw new TimeoutException(BuildBusyReport(

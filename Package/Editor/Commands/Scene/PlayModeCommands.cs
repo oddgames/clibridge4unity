@@ -206,15 +206,11 @@ namespace clibridge4unity
                 if (target.Equals("camera", StringComparison.OrdinalIgnoreCase))
                     return RenderCamera(width, height, outputDir);
 
-                // Asset path: prefab or UXML
+                // Asset path: delegate to UI_RENDER command
                 if (target.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) ||
                     target.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (target.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase))
-                        return Response.Error("UXML rendering: use UI_RENDER " + target);
-                    if (target.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
-                        return Response.Error("Prefab rendering: use UI_RENDER " + target);
-                    return Response.Error($"Unsupported asset type: {target}");
+                    return CommandRegistry.ExecuteCommand("UI_RENDER", target, null, default).Result;
                 }
 
                 // GameObject by name — find it, render from multiple angles

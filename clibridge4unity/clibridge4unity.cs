@@ -81,7 +81,7 @@ class Program
     private const string GITHUB_REPO = "oddgames/clibridge4unity";
     private const string UPM_PACKAGE_NAME = "au.com.oddgames.clibridge4unity";
 
-    // Track if last response indicated main thread timeout (for auto-retry with WAKEUP)
+    // Track if last response indicated main thread timeout
     private static bool _lastResponseContainedMainThreadTimeout;
     private static long _preCompileLogId;
 
@@ -112,6 +112,11 @@ class Program
     /// <summary>
     /// Wakes Unity Editor's message pump by sending WM_NULL to its main window.
     /// </summary>
+    /// <summary>
+    /// Nudge Unity's message pump without stealing focus.
+    /// Server-side Win32 timer handles the main thread processing.
+    /// This just ensures the message pump is awake.
+    /// </summary>
     static void WakeUnityEditor(string projectPath)
     {
         try
@@ -129,45 +134,10 @@ class Program
                 }
             }
 
-            if (hwnd == IntPtr.Zero)
-            {
-                foreach (var proc in Process.GetProcessesByName("Unity"))
-                {
-                    if (proc.MainWindowHandle != IntPtr.Zero)
-                    {
-                        hwnd = proc.MainWindowHandle;
-                        break;
-                    }
-                }
-            }
-
             if (hwnd != IntPtr.Zero)
             {
-                // Strategy: barrage of messages to force Unity's editor loop to tick
-                // even when in the background. None of these steal focus.
-
-                // ShowWindow SW_SHOWNA (8) = show window without activating it
-                // This can force a redraw cycle which triggers Unity's update loop
-                ShowWindow(hwnd, 8);
-
-                // FlashWindow briefly flashes the taskbar icon, which triggers
-                // window activity processing without stealing focus
-                FlashWindow(hwnd, true);
-                FlashWindow(hwnd, false); // un-flash immediately
-
-                for (int i = 0; i < 5; i++)
-                {
-                    PostMessage(hwnd, WM_NULL, IntPtr.Zero, IntPtr.Zero);
-                    PostMessage(hwnd, WM_ACTIVATEAPP, (IntPtr)1, IntPtr.Zero);
-                    PostMessage(hwnd, WM_TIMER, IntPtr.Zero, IntPtr.Zero);
-                    InvalidateRect(hwnd, IntPtr.Zero, false);
-                    PostMessage(hwnd, WM_PAINT, IntPtr.Zero, IntPtr.Zero);
-                    Thread.Sleep(30);
-                }
-
-                // Synchronous send to block until Unity processes at least one message
-                SendMessageTimeout(hwnd, WM_NULL, IntPtr.Zero, IntPtr.Zero,
-                    SMTO_ABORTIFHUNG, 2000, out _);
+                // WM_NULL wakes the message pump without any visible side effects
+                PostMessage(hwnd, WM_NULL, IntPtr.Zero, IntPtr.Zero);
             }
         }
         catch { }
@@ -181,7 +151,7 @@ class Program
     //   - If CLI exits before fetch completes, the task just aborts — no big deal,
     //     it'll succeed on a longer-running command eventually
     //   - --version calls FetchAndShowUpdate() synchronously (allowed to block)
-    //   - Skipped for fast commands: PING, PROBE, DIAG, WAKEUP, DISMISS, SCREENSHOT
+    //   - Skipped for fast commands: PING, PROBE, DIAG, DISMISS, SCREENSHOT
 
     static string UpdateCacheDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".clibridge4unity");
@@ -377,18 +347,12 @@ class Program
         }
 
         // Background update check — only for commands that take long enough for it to matter
-        // Skip for fast commands: PING, PROBE, DIAG, WAKEUP, DISMISS, SCREENSHOT
+        // Skip for fast commands: PING, PROBE, DIAG, DISMISS, SCREENSHOT
         string cmdUpper = command.ToUpperInvariant();
         if (cmdUpper != "PING" && cmdUpper != "PROBE" && cmdUpper != "DIAG" &&
-            cmdUpper != "WAKEUP" && cmdUpper != "DISMISS" && cmdUpper != "SCREENSHOT")
+            cmdUpper != "DISMISS" && cmdUpper != "SCREENSHOT")
         {
             CheckForUpdateInBackground();
-        }
-
-        // WAKEUP is purely CLI-side, doesn't need a project path - wakes all Unity windows
-        if (command.Equals("WAKEUP", StringComparison.OrdinalIgnoreCase))
-        {
-            return HandleWakeup();
         }
 
         // Auto-detect project path if not specified
@@ -546,10 +510,10 @@ class Program
                 return HandleScreenshot(projectPath);
             }
         }
-        if (command.Equals("UI_RENDER", StringComparison.OrdinalIgnoreCase) &&
-             !string.IsNullOrEmpty(data) && data.TrimStart().StartsWith("@", StringComparison.Ordinal))
+        // UI_RENDER is now an alias for SCREENSHOT with asset paths
+        if (command.Equals("UI_RENDER", StringComparison.OrdinalIgnoreCase))
         {
-            return HandleScreenshot(projectPath);
+            command = "SCREENSHOT";
         }
 
         // --wait flag: send command, wait for reconnection, then fetch logs
@@ -580,13 +544,11 @@ class Program
 
         int result = SendCommand(pipeName, projectPath, command, data);
 
-        // Auto-retry with WAKEUP if main thread timed out (Unity likely backgrounded)
+        // If main thread timed out, just nudge — don't steal focus
         if (result == 1 && _lastResponseContainedMainThreadTimeout)
         {
-            Console.Error.WriteLine("[CLI] Main thread timeout detected. Waking Unity and retrying...");
-            HandleWakeup();
             _lastResponseContainedMainThreadTimeout = false;
-            result = SendCommand(pipeName, projectPath, command, data);
+            WakeUnityEditor(projectPath);
         }
 
         return result;
@@ -1226,7 +1188,7 @@ class Program
         else if (info.State == UnityProcessState.Importing)
             sb.AppendLine("action: Wait for import to finish, then retry.");
         else
-            sb.AppendLine("action: Try DISMISS, WAKEUP, or ask user to check Unity.");
+            sb.AppendLine("action: Try DISMISS, or ask user to check Unity.");
 
         return sb.ToString();
     }
