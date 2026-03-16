@@ -203,10 +203,15 @@ namespace clibridge4unity
                 string outputDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "clibridge4unity_screenshots");
                 System.IO.Directory.CreateDirectory(outputDir);
 
-                // Camera render (needs main thread)
-                if (target.Equals("camera", StringComparison.OrdinalIgnoreCase))
+                // Camera / game render (needs main thread)
+                if (target.Equals("camera", StringComparison.OrdinalIgnoreCase) ||
+                    target.Equals("game", StringComparison.OrdinalIgnoreCase))
                     return await CommandRegistry.RunOnMainThreadAsync(() =>
-                        RenderCamera(width, height, outputDir));
+                    {
+                        // Ensure Game view exists
+                        GetGameView(create: true);
+                        return RenderCamera(width, height, outputDir);
+                    });
 
                 // Asset path: delegate to SCREENSHOT_ASSET (handles its own main thread)
                 if (target.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) ||
@@ -349,14 +354,21 @@ namespace clibridge4unity
             }
         }
 
-        private static EditorWindow GetGameView()
+        private static EditorWindow GetGameView(bool create = true)
         {
             var assembly = typeof(EditorWindow).Assembly;
             var gameViewType = assembly.GetType("UnityEditor.GameView");
             if (gameViewType == null) return null;
 
+            // Try existing first
             var windows = Resources.FindObjectsOfTypeAll(gameViewType);
-            return windows.Length > 0 ? (EditorWindow)windows[0] : null;
+            if (windows.Length > 0) return (EditorWindow)windows[0];
+
+            // Create if requested
+            if (create)
+                return EditorWindow.GetWindow(gameViewType, false, "Game", false);
+
+            return null;
         }
     }
 }

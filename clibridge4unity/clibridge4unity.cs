@@ -493,7 +493,9 @@ class Program
         if (command.Equals("SCREENSHOT", StringComparison.OrdinalIgnoreCase))
         {
             string view = data?.Trim().ToLowerInvariant() ?? "";
-            string[] cliViews = { "", "editor", "scene", "game", "inspector", "hierarchy", "console", "project", "profiler" };
+            // "game" routes to server (can create the tab + render camera)
+            // Other known views use fast CLI-side Win32 capture
+            string[] cliViews = { "", "editor", "scene", "inspector", "hierarchy", "console", "project", "profiler" };
             if (Array.Exists(cliViews, v => v == view))
             {
                 return HandleScreenshot(projectPath);
