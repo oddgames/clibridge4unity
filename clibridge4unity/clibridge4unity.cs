@@ -458,8 +458,36 @@ class Program
             return 0;
         }
 
-        // Pre-flight: detect modal/floating dialogs that block Unity's main thread
+        // Pre-flight: detect modal dialogs — auto-dismiss safe ones, block on others
         var floatingWindows = FindFloatingUnityWindows(projectPath);
+        if (floatingWindows.Count > 0)
+        {
+            // Auto-dismiss safe dialogs (save prompts, etc.)
+            bool allDismissed = true;
+            foreach (var (hwnd, title, rect) in floatingWindows)
+            {
+                bool safe = title.Contains("Scene(s) Have Been Modified", StringComparison.OrdinalIgnoreCase)
+                    || title.Contains("Save", StringComparison.OrdinalIgnoreCase);
+                if (safe)
+                {
+                    Console.Error.WriteLine($"[CLI] Auto-dismissing: \"{title}\"");
+                    PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                }
+                else
+                {
+                    allDismissed = false;
+                }
+            }
+
+            if (allDismissed)
+            {
+                // Give Unity a moment to process the dismiss
+                Thread.Sleep(500);
+                // Re-check
+                floatingWindows = FindFloatingUnityWindows(projectPath);
+            }
+        }
+
         if (floatingWindows.Count > 0)
         {
             Console.Error.WriteLine($"Error: Unity has {floatingWindows.Count} modal dialog(s) open — commands cannot execute until closed.");
@@ -470,18 +498,6 @@ class Program
                 int h = rect.Bottom - rect.Top;
                 Console.Error.WriteLine($"  [{floatingWindows.IndexOf((hwnd, title, rect)) + 1}] \"{title}\"");
                 Console.Error.WriteLine($"      Size: {w}x{h}, Position: ({rect.Left}, {rect.Top})");
-
-                // Provide context about common dialog types
-                if (title.Contains("Package Manager"))
-                    Console.Error.WriteLine("      → Package Manager window. May appear after adding/removing packages or asmdefs.");
-                else if (title.Contains("Import"))
-                    Console.Error.WriteLine("      → Import dialog. Unity wants confirmation before importing assets.");
-                else if (title.Contains("Save"))
-                    Console.Error.WriteLine("      → Save dialog. Unity is asking to save changes before proceeding.");
-                else if (title.Contains("Compil") || title.Contains("Build"))
-                    Console.Error.WriteLine("      → Build/compilation dialog. Wait for it to finish or cancel.");
-                else if (title.Contains("Error") || title.Contains("Warning"))
-                    Console.Error.WriteLine("      → Error/warning dialog. May need user attention before dismissing.");
             }
             Console.Error.WriteLine();
             Console.Error.WriteLine("Fix: Run 'clibridge4unity DISMISS' to close all dialogs via WM_CLOSE.");
@@ -1269,12 +1285,13 @@ class Program
                 GetWindowText(hwnd, titleBuf, 512);
                 string title = titleBuf.ToString();
 
+                // Detect long-running operations by window title
+                // "Importing" = asset import, "Compiling" = shader/script compile
+                // Skip transient states: "Reloading Domain", "Hold on...", "Loading"
                 if (!string.IsNullOrEmpty(title) &&
-                    (title.StartsWith("Import", StringComparison.OrdinalIgnoreCase) ||
-                     title.Contains("Progress", StringComparison.OrdinalIgnoreCase) ||
-                     title.Contains("Compiling", StringComparison.OrdinalIgnoreCase) ||
-                     title.Contains("Loading", StringComparison.OrdinalIgnoreCase) ||
-                     title.Contains("Building", StringComparison.OrdinalIgnoreCase)))
+                    (title.StartsWith("Importing", StringComparison.OrdinalIgnoreCase) ||
+                     title.StartsWith("Building", StringComparison.OrdinalIgnoreCase) ||
+                     title.StartsWith("Compiling", StringComparison.OrdinalIgnoreCase)))
                 {
                     info.State = UnityProcessState.Importing;
                     info.ImportStatus = title;
@@ -1356,8 +1373,10 @@ class Program
 
     static bool IsCompileError(string line)
     {
-        return line.Contains("error CS")
-            || (line.Contains("): error") && line.Contains(".cs("));
+        // Real Unity compile errors have a file path: "Assets/Foo.cs(10,5): error CS0103: ..."
+        // CODE_EXEC errors are just "(13,20): error CS1002:" with no path — skip those
+        return (line.Contains("error CS") && line.Contains("Assets"))
+            || (line.Contains("): error") && line.Contains(".cs(") && line.Contains("Assets"));
     }
 
     /// <summary>

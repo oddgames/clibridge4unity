@@ -207,11 +207,7 @@ namespace clibridge4unity
                 if (target.Equals("camera", StringComparison.OrdinalIgnoreCase) ||
                     target.Equals("game", StringComparison.OrdinalIgnoreCase))
                     return await CommandRegistry.RunOnMainThreadAsync(() =>
-                    {
-                        // Ensure Game view exists
-                        GetGameView(create: true);
-                        return RenderCamera(width, height, outputDir);
-                    });
+                        RenderCamera(width, height, outputDir));
 
                 // Asset path: delegate to SCREENSHOT_ASSET (handles its own main thread)
                 if (target.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) ||
