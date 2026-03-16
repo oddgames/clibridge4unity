@@ -418,6 +418,34 @@ class Program
             }
         }
 
+        // Pre-flight: check if Unity is running for this project (instant, no pipe needed)
+        var unityState = DetectUnityProcess(projectPath);
+        if (unityState == UnityProcessState.NotRunning)
+        {
+            Console.Error.WriteLine("Error: Unity is not running.");
+            Console.Error.WriteLine($"       No Unity process found for project: {Path.GetFileName(Path.GetFullPath(projectPath))}");
+            Console.Error.WriteLine("       Open Unity Editor with this project first.");
+            return 1;
+        }
+        if (unityState == UnityProcessState.DifferentProject)
+        {
+            string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
+            Console.Error.WriteLine($"Error: Unity is running but not with this project.");
+            Console.Error.WriteLine($"       Expected project: {projectName}");
+            var unityProcs = Process.GetProcessesByName("Unity");
+            foreach (var proc in unityProcs)
+            {
+                try
+                {
+                    if (proc.MainWindowHandle != IntPtr.Zero && !string.IsNullOrEmpty(proc.MainWindowTitle))
+                        Console.Error.WriteLine($"       Unity has open: {proc.MainWindowTitle}");
+                }
+                catch { }
+            }
+            Console.Error.WriteLine($"       Open this project in Unity or use -d to specify the correct path.");
+            return 1;
+        }
+
         // Wake Unity's message pump before any command (ensures responsiveness in background)
         WakeUnityEditor(projectPath);
 
@@ -1075,6 +1103,32 @@ class Program
         // If isCompiling is false and lastCompileFinished is "never" or missing,
         // Unity didn't need to recompile (no code changes). That's still success.
         return true;
+    }
+
+    enum UnityProcessState { Running, NotRunning, DifferentProject }
+
+    static UnityProcessState DetectUnityProcess(string projectPath)
+    {
+        string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
+        bool anyUnity = false;
+
+        try
+        {
+            foreach (var proc in Process.GetProcessesByName("Unity"))
+            {
+                try
+                {
+                    anyUnity = true;
+                    if (proc.MainWindowHandle != IntPtr.Zero &&
+                        proc.MainWindowTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase))
+                        return UnityProcessState.Running;
+                }
+                catch { }
+            }
+        }
+        catch { }
+
+        return anyUnity ? UnityProcessState.DifferentProject : UnityProcessState.NotRunning;
     }
 
     static List<(IntPtr hwnd, string title, RECT rect)> FindFloatingUnityWindows(string projectPath)
