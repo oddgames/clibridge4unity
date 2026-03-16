@@ -419,30 +419,28 @@ class Program
         }
 
         // Pre-flight: check if Unity is running for this project (instant, no pipe needed)
-        var unityState = DetectUnityProcess(projectPath);
-        if (unityState == UnityProcessState.NotRunning)
+        var unityInfo = DetectUnityProcess(projectPath);
+        if (unityInfo.State == UnityProcessState.NotRunning)
         {
             Console.Error.WriteLine("Error: Unity is not running.");
             Console.Error.WriteLine($"       No Unity process found for project: {Path.GetFileName(Path.GetFullPath(projectPath))}");
             Console.Error.WriteLine("       Open Unity Editor with this project first.");
             return 1;
         }
-        if (unityState == UnityProcessState.DifferentProject)
+        if (unityInfo.State == UnityProcessState.DifferentProject)
         {
-            string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
             Console.Error.WriteLine($"Error: Unity is running but not with this project.");
-            Console.Error.WriteLine($"       Expected project: {projectName}");
-            var unityProcs = Process.GetProcessesByName("Unity");
-            foreach (var proc in unityProcs)
-            {
-                try
-                {
-                    if (proc.MainWindowHandle != IntPtr.Zero && !string.IsNullOrEmpty(proc.MainWindowTitle))
-                        Console.Error.WriteLine($"       Unity has open: {proc.MainWindowTitle}");
-                }
-                catch { }
-            }
+            Console.Error.WriteLine($"       Expected project: {Path.GetFileName(Path.GetFullPath(projectPath))}");
+            foreach (var title in unityInfo.OpenProjects)
+                Console.Error.WriteLine($"       Unity has open: {title}");
             Console.Error.WriteLine($"       Open this project in Unity or use -d to specify the correct path.");
+            return 1;
+        }
+        if (unityInfo.State == UnityProcessState.Importing)
+        {
+            Console.Error.WriteLine($"Error: Unity is busy importing assets.");
+            Console.Error.WriteLine($"       {unityInfo.ImportStatus}");
+            Console.Error.WriteLine("       Wait for import to finish, then retry.");
             return 1;
         }
 
@@ -1105,12 +1103,39 @@ class Program
         return true;
     }
 
-    enum UnityProcessState { Running, NotRunning, DifferentProject }
+    enum UnityProcessState { Running, NotRunning, DifferentProject, Importing }
 
-    static UnityProcessState DetectUnityProcess(string projectPath)
+    class UnityProcessInfo
     {
+        public UnityProcessState State;
+        public string ImportStatus;       // e.g. "Importing - Compress 50% (busy for 02:04)..."
+        public List<string> OpenProjects = new List<string>();
+    }
+
+    static UnityProcessInfo DetectUnityProcess(string projectPath)
+    {
+        var info = new UnityProcessInfo { State = UnityProcessState.NotRunning };
         string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
+        string lockfilePath = Path.Combine(Path.GetFullPath(projectPath), "Temp", "UnityLockfile");
+
+        // Check lockfile — Unity creates this while project is open
+        bool lockfileExists = File.Exists(lockfilePath);
+        bool lockfileHeld = false;
+        if (lockfileExists)
+        {
+            try
+            {
+                using var fs = new FileStream(lockfilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                // If we can open exclusively, Unity doesn't hold it
+            }
+            catch (IOException) { lockfileHeld = true; }
+            catch (UnauthorizedAccessException) { lockfileHeld = true; }
+        }
+
+        // Enumerate Unity processes and their windows
         bool anyUnity = false;
+        bool foundProject = false;
+        uint matchedPid = 0;
 
         try
         {
@@ -1119,16 +1144,79 @@ class Program
                 try
                 {
                     anyUnity = true;
-                    if (proc.MainWindowHandle != IntPtr.Zero &&
-                        proc.MainWindowTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase))
-                        return UnityProcessState.Running;
+                    if (proc.MainWindowHandle != IntPtr.Zero && !string.IsNullOrEmpty(proc.MainWindowTitle))
+                    {
+                        info.OpenProjects.Add(proc.MainWindowTitle);
+                        if (proc.MainWindowTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            foundProject = true;
+                            matchedPid = (uint)proc.Id;
+                        }
+                    }
                 }
                 catch { }
             }
         }
         catch { }
 
-        return anyUnity ? UnityProcessState.DifferentProject : UnityProcessState.NotRunning;
+        // Determine state: lockfile is most reliable, window title as fallback
+        if (!lockfileHeld && !foundProject)
+        {
+            info.State = anyUnity ? UnityProcessState.DifferentProject : UnityProcessState.NotRunning;
+            return info;
+        }
+
+        // Unity has this project open — check for import/progress windows
+        info.State = UnityProcessState.Running;
+
+        if (matchedPid != 0 || lockfileHeld)
+        {
+            // Enumerate ALL windows for the matched Unity PID to find import dialogs
+            uint searchPid = matchedPid;
+            // If we only have lockfile (no window title match), find any Unity PID
+            if (searchPid == 0)
+            {
+                try
+                {
+                    foreach (var proc in Process.GetProcessesByName("Unity"))
+                    {
+                        searchPid = (uint)proc.Id;
+                        break;
+                    }
+                }
+                catch { }
+            }
+
+            if (searchPid != 0)
+            {
+                var titleBuf = new StringBuilder(512);
+                EnumWindows((hwnd, _) =>
+                {
+                    if (!IsWindowVisible(hwnd)) return true;
+                    GetWindowThreadProcessId(hwnd, out uint pid);
+                    if (pid != searchPid) return true;
+
+                    titleBuf.Clear();
+                    GetWindowText(hwnd, titleBuf, 512);
+                    string title = titleBuf.ToString();
+
+                    if (!string.IsNullOrEmpty(title) &&
+                        (title.Contains("Import", StringComparison.OrdinalIgnoreCase) ||
+                         title.Contains("Progress", StringComparison.OrdinalIgnoreCase) ||
+                         title.Contains("Compiling", StringComparison.OrdinalIgnoreCase) ||
+                         title.Contains("Loading", StringComparison.OrdinalIgnoreCase) ||
+                         title.Contains("Building", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        info.State = UnityProcessState.Importing;
+                        info.ImportStatus = title;
+                        return false; // stop enumerating
+                    }
+                    return true;
+                }, IntPtr.Zero);
+            }
+        }
+
+        return info;
     }
 
     static List<(IntPtr hwnd, string title, RECT rect)> FindFloatingUnityWindows(string projectPath)
