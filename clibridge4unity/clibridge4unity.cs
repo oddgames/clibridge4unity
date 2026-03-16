@@ -25,6 +25,8 @@ class Program
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
     [DllImport("user32.dll")]
+    private static extern long GetWindowLong(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll")]
     private static extern IntPtr GetDC(IntPtr hWnd);
     [DllImport("user32.dll")]
     private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
@@ -1420,6 +1422,16 @@ class Program
 
             if (mainHwnd == IntPtr.Zero) return floating;
 
+            // Known Unity editor window titles — these are NOT modal dialogs
+            var editorWindows = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "Game", "Scene", "Inspector", "Hierarchy", "Console", "Project",
+                "Profiler", "Animation", "Animator", "Audio Mixer", "Frame Debugger",
+                "Lighting", "Navigation", "Occlusion", "Package Manager",
+                "Rendering Debugger", "Sprite Editor", "Tile Palette",
+                "Timeline", "UI Builder", "Version Control", "Test Runner"
+            };
+
             EnumWindows((hwnd, _) =>
             {
                 if (hwnd == mainHwnd) return true;
@@ -1433,8 +1445,27 @@ class Program
                 string title = sb.ToString();
                 if (string.IsNullOrEmpty(title)) return true;
 
-                GetWindowRect(hwnd, out RECT rect);
-                floating.Add((hwnd, title, rect));
+                // Skip known Unity editor windows — they're not modal dialogs
+                if (editorWindows.Contains(title)) return true;
+
+                // Check window style: modal dialogs typically have WS_POPUP or WS_EX_DLGMODALFRAME
+                long style = GetWindowLong(hwnd, -16); // GWL_STYLE
+                long exStyle = GetWindowLong(hwnd, -20); // GWL_EXSTYLE
+                bool isPopup = (style & 0x80000000L) != 0; // WS_POPUP
+                bool isDialog = (exStyle & 0x00000001L) != 0; // WS_EX_DLGMODALFRAME
+                // Also treat windows with title containing common dialog keywords as dialogs
+                bool hasDialogTitle = title.Contains("Save", StringComparison.OrdinalIgnoreCase)
+                    || title.Contains("Import", StringComparison.OrdinalIgnoreCase)
+                    || title.Contains("Error", StringComparison.OrdinalIgnoreCase)
+                    || title.Contains("Warning", StringComparison.OrdinalIgnoreCase)
+                    || title.Contains("Build", StringComparison.OrdinalIgnoreCase)
+                    || title.Contains("Progress", StringComparison.OrdinalIgnoreCase);
+
+                if (isPopup || isDialog || hasDialogTitle)
+                {
+                    GetWindowRect(hwnd, out RECT rect);
+                    floating.Add((hwnd, title, rect));
+                }
                 return true;
             }, IntPtr.Zero);
         }

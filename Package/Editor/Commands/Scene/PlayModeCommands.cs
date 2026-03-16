@@ -364,7 +364,6 @@ namespace clibridge4unity
             var windows = Resources.FindObjectsOfTypeAll(gameViewType);
             if (windows.Length > 0) return (EditorWindow)windows[0];
 
-            // Create if requested
             if (create)
                 return EditorWindow.GetWindow(gameViewType, false, "Game", false);
 
