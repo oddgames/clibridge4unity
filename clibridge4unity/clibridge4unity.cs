@@ -15,6 +15,7 @@ using System.Text;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using clibridge4unity;
 
 class Program
 {
@@ -399,6 +400,9 @@ class Program
             return 1;
         }
 
+        // Initialize path shortening for Editor.log parsing and error output
+        StackTraceMinimizer.SetPaths(Path.GetFullPath(projectPath));
+
         string pipeName = GeneratePipeName(projectPath);
 
         // Quick manifest check: warn if UPM package not installed (skip for SETUP/PREFLIGHT)
@@ -450,13 +454,12 @@ class Program
             Console.Error.WriteLine("       Wait for it to finish, then retry the command.");
             return 1;
         }
-        // Show recent compile errors even when running (before pipe connect)
+        // When importing, show any compile errors found in logs
         if (unityInfo.RecentErrors.Count > 0)
         {
-            Console.Error.WriteLine($"Warning: Recent compile errors detected (from Editor.log):");
+            Console.Error.WriteLine($"       Compile errors found in logs:");
             foreach (var err in unityInfo.RecentErrors)
-                Console.Error.WriteLine($"  {err}");
-            Console.Error.WriteLine();
+                Console.Error.WriteLine($"         {err}");
         }
 
         // Wake Unity's message pump before any command (ensures responsiveness in background)
@@ -520,10 +523,31 @@ class Program
             return 1;
         }
 
-        // SCREENSHOT / RENDER @editor → CLI-side PrintWindow capture (no Unity connection needed)
-        if (command.Equals("SCREENSHOT", StringComparison.OrdinalIgnoreCase) ||
-            (command.Equals("UI_RENDER", StringComparison.OrdinalIgnoreCase) &&
-             !string.IsNullOrEmpty(data) && data.TrimStart().StartsWith("@", StringComparison.Ordinal)))
+        // SCREENSHOT: smart routing
+        // Known view keywords → CLI-side PrintWindow (fast, no pipe)
+        // Everything else → server-side render, with CLI fallback if pipe fails
+        if (command.Equals("SCREENSHOT", StringComparison.OrdinalIgnoreCase))
+        {
+            string view = data?.Trim().ToLowerInvariant() ?? "";
+            string[] cliViews = { "", "editor", "scene", "game", "inspector", "hierarchy", "console", "project", "profiler" };
+            if (Array.Exists(cliViews, v => v == view))
+            {
+                return HandleScreenshot(projectPath);
+            }
+
+            // Server-side render — try pipe, fallback to CLI capture
+            try
+            {
+                return SendCommand(pipeName, projectPath, "SCREENSHOT", data);
+            }
+            catch
+            {
+                Console.Error.WriteLine("Warning: Could not connect to Unity for server-side render. Falling back to window capture.");
+                return HandleScreenshot(projectPath);
+            }
+        }
+        if (command.Equals("UI_RENDER", StringComparison.OrdinalIgnoreCase) &&
+             !string.IsNullOrEmpty(data) && data.TrimStart().StartsWith("@", StringComparison.Ordinal))
         {
             return HandleScreenshot(projectPath);
         }
@@ -694,16 +718,23 @@ class Program
             }
 
             using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
-            pipe.Connect(5000);
+            pipe.Connect(1000);
 
-            // Send command in plain text format: COMMAND|data
+            // Send command
             string message = string.IsNullOrEmpty(data) ? command : $"{command}|{data}";
             byte[] msgBytes = Encoding.UTF8.GetBytes(message + "\n");
             pipe.Write(msgBytes, 0, msgBytes.Length);
             pipe.Flush();
 
-            // Read response with timeout (60s)
-            using var cts = new CancellationTokenSource(60000);
+            // Read response — 5s default, 15s for known slow commands
+            int readTimeoutMs = 5000;
+            string cmdUpper2 = command.ToUpperInvariant();
+            if (cmdUpper2 == "COMPILE" || cmdUpper2 == "REFRESH" || cmdUpper2 == "TEST" ||
+                cmdUpper2 == "CODE_EXEC" || cmdUpper2 == "CODE_EXEC_RETURN" ||
+                cmdUpper2 == "SCREENSHOT" || cmdUpper2 == "UI_RENDER")
+                readTimeoutMs = 15000;
+
+            using var cts = new CancellationTokenSource(readTimeoutMs);
             var responseBuilder = new StringBuilder();
             byte[] buffer = new byte[4096];
             try
@@ -721,12 +752,14 @@ class Program
             }
             catch (OperationCanceledException)
             {
-                Console.Error.WriteLine("\nError: Command timed out after 60 seconds");
+                Console.Error.WriteLine($"\nError: Command '{command}' timed out after {readTimeoutMs / 1000}s.");
+                Console.Error.Write(BuildDiagnosticReport(projectPath));
                 return 1;
             }
             catch (AggregateException ex) when (ex.InnerException is OperationCanceledException)
             {
-                Console.Error.WriteLine("\nError: Command timed out after 60 seconds");
+                Console.Error.WriteLine($"\nError: Command '{command}' timed out after {readTimeoutMs / 1000}s.");
+                Console.Error.Write(BuildDiagnosticReport(projectPath));
                 return 1;
             }
 
@@ -763,18 +796,26 @@ class Program
         }
         catch (TimeoutException)
         {
-            Console.Error.WriteLine($"Error: Connection timeout. Is Unity running with the CLI Bridge package installed?");
-            Console.Error.WriteLine($"       Pipe: {pipeName}");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Make sure:");
-            Console.Error.WriteLine("  1. Unity Editor is running with your project open");
-            Console.Error.WriteLine("  2. CLI Bridge for Unity package is installed in your project");
-            Console.Error.WriteLine("  3. Check Unity Console for '[Bridge] Server started' message");
+            Console.Error.WriteLine($"Error: Pipe connection timed out for command '{command}'.");
+            Console.Error.Write(BuildDiagnosticReport(projectPath));
+            return 1;
+        }
+        catch (OperationCanceledException)
+        {
+            Console.Error.WriteLine($"Error: Command '{command}' timed out.");
+            Console.Error.Write(BuildDiagnosticReport(projectPath));
+            return 1;
+        }
+        catch (IOException ex)
+        {
+            Console.Error.WriteLine($"Error: Pipe broken during '{command}': {ex.Message}");
+            Console.Error.Write(BuildDiagnosticReport(projectPath));
             return 1;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error: {ex.Message}");
+            Console.Error.Write(BuildDiagnosticReport(projectPath));
             return 1;
         }
     }
@@ -850,7 +891,7 @@ class Program
     static string SendCommandGetResponse(string pipeName, string command, string data, int timeoutMs = 15000)
     {
         using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
-        pipe.Connect(5000);
+        pipe.Connect(1000);
 
         string message = string.IsNullOrEmpty(data) ? command : $"{command}|{data}";
         byte[] msgBytes = Encoding.UTF8.GetBytes(message + "\n");
@@ -1118,6 +1159,78 @@ class Program
         return true;
     }
 
+    /// <summary>
+    /// Build a diagnostic report when a command fails. Returns everything the LLM needs
+    /// to understand Unity's state without a pipe connection: process info, open windows,
+    /// import status, compile errors, lockfile state.
+    /// </summary>
+    static string BuildDiagnosticReport(string projectPath)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine();
+        sb.AppendLine("--- Unity Diagnostics ---");
+
+        var info = DetectUnityProcess(projectPath);
+
+        // Process state
+        sb.AppendLine($"state: {info.State}");
+        if (info.OpenProjects.Count > 0)
+        {
+            sb.AppendLine($"unityWindows ({info.OpenProjects.Count}):");
+            foreach (var title in info.OpenProjects)
+                sb.AppendLine($"  - {title}");
+        }
+
+        // Import/busy status
+        if (!string.IsNullOrEmpty(info.ImportStatus))
+            sb.AppendLine($"busy: {info.ImportStatus}");
+
+        // Floating dialogs
+        try
+        {
+            var dialogs = FindFloatingUnityWindows(projectPath);
+            if (dialogs.Count > 0)
+            {
+                sb.AppendLine($"dialogs ({dialogs.Count}):");
+                foreach (var (_, title, _) in dialogs)
+                    sb.AppendLine($"  - {title}");
+                sb.AppendLine("action: Run DISMISS to close dialogs, then retry.");
+            }
+        }
+        catch { }
+
+        // Compile errors
+        if (info.RecentErrors.Count > 0)
+        {
+            sb.AppendLine($"compileErrors ({info.RecentErrors.Count}):");
+            foreach (var err in info.RecentErrors)
+                sb.AppendLine($"  - {err}");
+            sb.AppendLine("action: Fix compile errors first, then COMPILE.");
+        }
+
+        // Assembly build time
+        var lastBuild = GetLastAssemblyBuildTime(projectPath);
+        if (lastBuild > DateTime.MinValue)
+            sb.AppendLine($"lastAssemblyBuild: {lastBuild:yyyy-MM-dd HH:mm:ss}");
+
+        // Lockfile
+        string lockfile = Path.Combine(Path.GetFullPath(projectPath), "Temp", "UnityLockfile");
+        sb.AppendLine($"lockfile: {(File.Exists(lockfile) ? "exists" : "missing")}");
+
+        // Recommendations
+        sb.AppendLine("---");
+        if (info.State == UnityProcessState.NotRunning)
+            sb.AppendLine("action: Open Unity Editor with this project.");
+        else if (info.State == UnityProcessState.DifferentProject)
+            sb.AppendLine("action: Open the correct project in Unity or use -d <path>.");
+        else if (info.State == UnityProcessState.Importing)
+            sb.AppendLine("action: Wait for import to finish, then retry.");
+        else
+            sb.AppendLine("action: Try DISMISS, WAKEUP, or ask user to check Unity.");
+
+        return sb.ToString();
+    }
+
     enum UnityProcessState { Running, NotRunning, DifferentProject, Importing }
 
     class UnityProcessInfo
@@ -1210,46 +1323,120 @@ class Program
             }, IntPtr.Zero);
         }
 
-        // Tail Editor.log for recent compile errors (no pipe needed)
-        TailEditorLogErrors(info);
+        // Only check log files for errors when Unity is busy (can't use pipe)
+        // When Unity is responsive, the server handles compile error reporting
+        if (info.State == UnityProcessState.Importing)
+            TailProjectErrors(info, projectPath);
 
         return info;
     }
 
     /// <summary>
-    /// Read the last ~50 lines of Unity's Editor.log and extract compile errors.
-    /// Works without any pipe connection — reads the file directly.
+    /// Read recent errors from two sources (no pipe needed):
+    /// 1. Bridge's own log file (per-project, in %TEMP%)
+    /// 2. Global Unity Editor.log (fallback, filtered by project path)
     /// </summary>
-    static void TailEditorLogErrors(UnityProcessInfo info)
+    static void TailProjectErrors(UnityProcessInfo info, string projectPath)
     {
+        // Source 1: Bridge log (per-project, tab-separated)
+        // Only show errors newer than the last successful Assembly-CSharp build
+        var lastBuild = GetLastAssemblyBuildTime(projectPath);
         try
         {
-            string logPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Unity", "Editor", "Editor.log");
-            if (!File.Exists(logPath)) return;
-
-            // Read last ~8KB of the log file (shared read, Unity is writing it)
-            using var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            long tailSize = Math.Min(8192, fs.Length);
-            fs.Seek(-tailSize, SeekOrigin.End);
-            var buffer = new byte[tailSize];
-            int read = fs.Read(buffer, 0, buffer.Length);
-            string tail = Encoding.UTF8.GetString(buffer, 0, read);
-
-            // Find compile errors: lines containing "error CS" or "error:"
-            foreach (var line in tail.Split('\n'))
+            string normalizedPath = Path.GetFullPath(projectPath).ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
+            int hash = GetDeterministicHashCode(normalizedPath);
+            string bridgeLog = Path.Combine(Path.GetTempPath(), $"clibridge4unity_logs_{hash:X8}.log");
+            if (File.Exists(bridgeLog))
             {
-                var trimmed = line.Trim();
-                if (trimmed.Contains("error CS") ||
-                    (trimmed.Contains("): error") && trimmed.Contains(".cs(")))
+                string tail = TailFile(bridgeLog, 16384);
+                foreach (var line in tail.Split('\n'))
                 {
-                    if (info.RecentErrors.Count < 5)
-                        info.RecentErrors.Add(trimmed);
+                    var parts = line.Split('\t');
+                    if (parts.Length < 4) continue;
+                    if (parts[2] != "ERROR" && parts[2] != "EXCEPTION") continue;
+                    // Skip errors older than the last successful build
+                    if (DateTime.TryParse(parts[1], out var ts) && ts < lastBuild) continue;
+                    string message = parts[3].Replace("\\n", "\n").Split('\n')[0];
+                    if (IsCompileError(message) && info.RecentErrors.Count < 10)
+                        info.RecentErrors.Add(message);
                 }
             }
         }
         catch { }
+
+        // Source 2: Global Editor.log — only if bridge log had nothing and project matches
+        if (info.RecentErrors.Count == 0)
+        {
+            try
+            {
+                string editorLog = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "Unity", "Editor", "Editor.log");
+                if (!File.Exists(editorLog)) return;
+
+                // Verify this log is for our project (check header for -projectPath)
+                string header = ReadFileHead(editorLog, 4096);
+                string absProject = Path.GetFullPath(projectPath).Replace("/", "\\").TrimEnd('\\');
+                if (!header.Contains(absProject, StringComparison.OrdinalIgnoreCase))
+                    return; // Log is for a different project
+
+                // Tail last ~256KB and scan for compile errors
+                string tail = TailFile(editorLog, 256 * 1024);
+                foreach (var line in tail.Split('\n'))
+                {
+                    var trimmed = line.Trim();
+                    if (IsCompileError(trimmed) && info.RecentErrors.Count < 10)
+                        info.RecentErrors.Add(trimmed);
+                }
+            }
+            catch { }
+        }
+    }
+
+    static bool IsCompileError(string line)
+    {
+        return line.Contains("error CS")
+            || (line.Contains("): error") && line.Contains(".cs("));
+    }
+
+    /// <summary>
+    /// Returns the last write time of the newest Assembly-CSharp DLL in Library/ScriptAssemblies.
+    /// If assemblies are newer than log errors, the errors are stale (fixed and recompiled).
+    /// </summary>
+    static DateTime GetLastAssemblyBuildTime(string projectPath)
+    {
+        try
+        {
+            string asmDir = Path.Combine(Path.GetFullPath(projectPath), "Library", "ScriptAssemblies");
+            if (!Directory.Exists(asmDir)) return DateTime.MinValue;
+            var newest = DateTime.MinValue;
+            foreach (var dll in Directory.EnumerateFiles(asmDir, "Assembly-CSharp*.dll"))
+            {
+                var t = File.GetLastWriteTime(dll);
+                if (t > newest) newest = t;
+            }
+            return newest;
+        }
+        catch { return DateTime.MinValue; }
+    }
+
+    static string TailFile(string path, int bytes)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        long tailSize = Math.Min(bytes, fs.Length);
+        fs.Seek(-tailSize, SeekOrigin.End);
+        var buffer = new byte[tailSize];
+        int read = fs.Read(buffer, 0, buffer.Length);
+        return Encoding.UTF8.GetString(buffer, 0, read);
+    }
+
+    static string ReadFileHead(string path, int bytes)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        int readSize = (int)Math.Min(bytes, fs.Length);
+        var buffer = new byte[readSize];
+        int read = fs.Read(buffer, 0, readSize);
+        return Encoding.UTF8.GetString(buffer, 0, read);
     }
 
     static List<(IntPtr hwnd, string title, RECT rect)> FindFloatingUnityWindows(string projectPath)
@@ -1308,7 +1495,7 @@ class Program
         try
         {
             using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
-            pipe.Connect(5000);
+            pipe.Connect(1000);
             byte[] msg = Encoding.UTF8.GetBytes("HELP\n");
             pipe.Write(msg, 0, msg.Length);
             pipe.Flush();
@@ -1404,10 +1591,17 @@ class Program
         md.AppendLine("## Screenshots & Rendering");
         md.AppendLine();
         md.AppendLine("```bash");
-        md.AppendLine("clibridge4unity SCREENSHOT              # Capture editor window");
-        md.AppendLine("clibridge4unity SCREENSHOT scene         # Specific view");
-        md.AppendLine("clibridge4unity UI_RENDER Assets/Prefabs/MyPrefab.prefab   # Render to PNG");
+        md.AppendLine("clibridge4unity SCREENSHOT                     # Editor window capture (instant)");
+        md.AppendLine("clibridge4unity SCREENSHOT scene                # Scene view tab");
+        md.AppendLine("clibridge4unity SCREENSHOT game                 # Game view tab");
+        md.AppendLine("clibridge4unity SCREENSHOT camera               # Render main camera to PNG");
+        md.AppendLine("clibridge4unity SCREENSHOT camera 1920x1080     # Render at specific resolution");
+        md.AppendLine("clibridge4unity SCREENSHOT Player               # 3D object — front/right/top grid");
+        md.AppendLine("clibridge4unity SCREENSHOT Assets/Prefabs/X.prefab  # Render prefab via UI_RENDER");
         md.AppendLine("```");
+        md.AppendLine();
+        md.AppendLine("SCREENSHOT auto-detects the target: known views use fast CLI-side capture,");
+        md.AppendLine("objects and assets use server-side rendering. Falls back to window capture if pipe fails.");
         md.AppendLine();
         md.AppendLine("## Handling \"Unity is busy\" Errors");
         md.AppendLine();
@@ -1836,7 +2030,7 @@ class Program
         try
         {
             using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
-            pipe.Connect(3000);
+            pipe.Connect(1000);
             byte[] msg = Encoding.UTF8.GetBytes("PING\n");
             pipe.Write(msg, 0, msg.Length);
             pipe.Flush();

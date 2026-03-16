@@ -44,6 +44,17 @@ namespace clibridge4unity
             // Force Unity to keep processing in background so commands work without focus
             Application.runInBackground = true;
 
+            // Enable console timestamps so log entries have time data
+            // LogEntries.SetConsoleFlag(ShowTimestamp = 1 << 10, true)
+            try
+            {
+                var logEntriesType = typeof(EditorWindow).Assembly.GetType("UnityEditor.LogEntries");
+                var setFlag = logEntriesType?.GetMethod("SetConsoleFlag",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                setFlag?.Invoke(null, new object[] { 1 << 10, true });
+            }
+            catch { }
+
             AssemblyReloadEvents.beforeAssemblyReload += StopServerImmediately;
             CompilationPipeline.compilationStarted += OnCompilationStarted;
             CompilationPipeline.compilationFinished += OnCompilationFinished;
@@ -97,7 +108,7 @@ namespace clibridge4unity
         /// Deterministic hash that works identically across .NET runtimes (Unity Mono and .NET 8).
         /// This MUST match the algorithm in ConsoleUnityBridge/UnityBridgeClient.cs exactly.
         /// </summary>
-        private static int GetDeterministicHashCode(string str)
+        public static int GetDeterministicHashCode(string str)
         {
             unchecked
             {
@@ -236,9 +247,9 @@ namespace clibridge4unity
                     }
                 }
 
-                // Process command with timeout - prevents hung main-thread commands
+                // Process command with timeout — fast fail, don't block
                 var cmdInfo = CommandRegistry.GetCommand(command);
-                int timeoutMs = cmdInfo?.RequiresMainThread == true ? 30000 : 60000;
+                int timeoutMs = cmdInfo?.RequiresMainThread == true ? 10000 : 25000;
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeoutCts.CancelAfter(timeoutMs);
 

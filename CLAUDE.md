@@ -9,11 +9,24 @@ A suite of tools for communicating with Unity Editor via Named Pipes using moder
 3. **Package** - Unity Editor package with the bridge server
 
 ### Architecture Goals
+- **Speed is the #1 goal** — every response must be as fast as possible
 - **Pure Async Architecture**: All methods are async Task<T> with no synchronous alternatives
 - **Non-Blocking Operations**: No synchronous waits that could freeze Unity Editor or console
 - **Concurrent Connections**: Support multiple simultaneous pipe connections (up to 10 instances)
 - **Auto-Detection**: Auto-detects Unity project from current working directory
 - **Attribute-Based Commands**: Commands use `[BridgeCommand]` attribute for automatic registration
+- **CLI-side intelligence**: The CLI should provide actionable, accurate, efficient information about Unity's state WITHOUT needing a pipe connection whenever possible (process detection, window enumeration, lockfile checks, Editor.log tailing)
+
+### CRITICAL: Speed and Diagnostics Mandate
+**Every response must be actionable, accurate, efficient, and fast.**
+
+- CLI detects Unity state instantly via process list, window titles, and lockfile — no pipe timeout
+- If Unity is busy (importing, compiling), return immediately with what it's doing (window title)
+- If main thread is blocked, return heartbeat staleness, open dialog windows, queue state, recommendations
+- Compile errors block commands and are returned immediately — the LLM must fix them first
+- `CODE_EXEC`/`CODE_EXEC_RETURN` have their own Roslyn compiler and do NOT need `COMPILE` — they work even when Unity's main thread is busy
+- `DIAG` always works (no main thread needed) — use it to check Unity state
+- Shared code (e.g., StackTraceMinimizer) is linked between CLI and Package via csproj `<Compile Include=".." Link=".."/>` — no duplication
 
 ### CRITICAL: Editor Performance Mandate
 **NEVER add code that slows down the Unity Editor.** This is non-negotiable.
@@ -97,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # UI_DISCOVER, UI_RENDER
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.0.8)
+│   └── package.json           # UPM manifest (v1.0.9)
 └── UnityTestProject/          # Test Unity project
 ```
 

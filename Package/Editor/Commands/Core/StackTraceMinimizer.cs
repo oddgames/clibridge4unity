@@ -1,7 +1,9 @@
 using System;
 using System.Text;
 using System.Text.RegularExpressions;
+#if UNITY_EDITOR
 using UnityEngine;
+#endif
 
 namespace clibridge4unity
 {
@@ -39,9 +41,21 @@ namespace clibridge4unity
         private static string _packageCacheRoot;
         private static bool _pathsInitialized;
 
+        /// <summary>
+        /// Set path roots from outside (for CLI-side usage without Unity APIs).
+        /// </summary>
+        public static void SetPaths(string projectRoot, string unityDataRoot = null)
+        {
+            _projectRoot = projectRoot?.Replace('\\', '/');
+            _unityDataRoot = unityDataRoot?.Replace('\\', '/');
+            _packageCacheRoot = _projectRoot != null ? _projectRoot + "/Library/PackageCache" : null;
+            _pathsInitialized = true;
+        }
+
         private static void EnsurePaths()
         {
             if (_pathsInitialized) return;
+#if UNITY_EDITOR
             try
             {
                 _projectRoot = Application.dataPath.Replace("/Assets", "").Replace('\\', '/');
@@ -49,6 +63,7 @@ namespace clibridge4unity
                 _packageCacheRoot = _projectRoot + "/Library/PackageCache";
             }
             catch { }
+#endif
             _pathsInitialized = true;
         }
 
@@ -158,6 +173,7 @@ namespace clibridge4unity
             return sb.ToString().TrimEnd();
         }
 
+#if UNITY_EDITOR
         [BridgeCommand("STACK_MINIMIZE", "Minimize a stack trace for AI (strips internal frames, shortens paths)",
             Category = "Core",
             Usage = "STACK_MINIMIZE <stack trace text>")]
@@ -169,6 +185,7 @@ namespace clibridge4unity
             string result = Minimize(data);
             return string.IsNullOrEmpty(result) ? "No frames found" : result;
         }
+#endif
 
         private static bool IsFrameLine(string line)
         {

@@ -826,14 +826,26 @@ namespace clibridge4unity
 
             _mainThreadQueue.Enqueue(work);
 
-            var completedTask = await Task.WhenAny(work.CompletionSource.Task, Task.Delay(25000));
-            if (completedTask == work.CompletionSource.Task)
-                return (T)(await work.CompletionSource.Task);
+            // Poll: check completion every 500ms, bail if heartbeat goes stale
+            for (int elapsed = 0; elapsed < 10000; elapsed += 500)
+            {
+                var done = await Task.WhenAny(work.CompletionSource.Task, Task.Delay(500));
+                if (done == work.CompletionSource.Task)
+                    return (T)(await work.CompletionSource.Task);
 
-            // Timed out after 25s — build report with current state
+                // If heartbeat went stale while waiting, fail immediately
+                if (_timerTickCount > 0 && (DateTime.Now - _lastTimerTick).TotalSeconds > 1.0)
+                {
+                    work.CompletionSource.TrySetCanceled();
+                    throw new TimeoutException(BuildBusyReport(
+                        (DateTime.Now - _lastTimerTick).TotalSeconds, work.Description));
+                }
+            }
+
+            // 10s with active heartbeat but no result — command is stuck
             work.CompletionSource.TrySetCanceled();
-            var currentStaleness = _timerTickCount > 0 ? (DateTime.Now - _lastTimerTick).TotalSeconds : 25;
-            throw new TimeoutException(BuildBusyReport(currentStaleness, work.Description));
+            throw new TimeoutException(BuildBusyReport(
+                _timerTickCount > 0 ? (DateTime.Now - _lastTimerTick).TotalSeconds : 10, work.Description));
         }
 
         private static readonly Dictionary<Type, object> _instances = new Dictionary<Type, object>();
