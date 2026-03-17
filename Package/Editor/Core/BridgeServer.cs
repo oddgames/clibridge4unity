@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.9";
+        public const string Version = "1.0.10";
 
         private static CancellationTokenSource serverCts;
         private static NamedPipeServerStream currentPipeServer;
@@ -266,10 +266,13 @@ namespace clibridge4unity
                 }
 
                 // Send final response (may be empty for streaming commands)
+                // Use a 5s per-write timeout so a stalled client can't freeze this handler
                 if (!string.IsNullOrEmpty(response))
                 {
                     byte[] responseBytes = Encoding.UTF8.GetBytes(response + "\n");
-                    await pipe.WriteAsync(responseBytes, 0, responseBytes.Length, ct);
+                    using var writeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    writeCts.CancelAfter(5000);
+                    await pipe.WriteAsync(responseBytes, 0, responseBytes.Length, writeCts.Token);
                     await pipe.FlushAsync();
                 }
                 pipe.Disconnect();

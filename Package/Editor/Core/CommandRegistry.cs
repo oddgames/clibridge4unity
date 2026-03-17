@@ -71,6 +71,8 @@ namespace clibridge4unity
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern bool IsWindow(IntPtr hWnd);
         private const uint WM_NULL = 0x0000;
         private const uint WM_TIMER = 0x0113;
         private const uint WM_PAINT = 0x000F;
@@ -110,17 +112,20 @@ namespace clibridge4unity
             _mainThreadContext = SynchronizationContext.Current;
 
             // Restore HWND from SessionState first (survives domain reloads)
-            // Note: Unity 6+ runs scripting in a separate process from the editor window,
-            // so we validate by checking if the window still exists and has the right class name.
+            // CRITICAL: GetClassName can hang if the saved HWND is stale/invalid (blocks domain reload).
+            // Use IsWindow to validate the handle exists before calling GetClassName.
             string rawSessionHwnd = SessionState.GetString(SessionKeys.UnityHwnd, "0");
             long savedHwnd = 0;
             if (long.TryParse(rawSessionHwnd, out savedHwnd) && savedHwnd != 0)
             {
                 var candidate = new IntPtr(savedHwnd);
-                var classBuf = new StringBuilder(256);
-                GetClassName(candidate, classBuf, 256);
-                if (classBuf.ToString() == "UnityContainerWndClass")
-                    _unityWindowHandle = candidate;
+                if (IsWindow(candidate))
+                {
+                    var classBuf = new StringBuilder(256);
+                    GetClassName(candidate, classBuf, 256);
+                    if (classBuf.ToString() == "UnityContainerWndClass")
+                        _unityWindowHandle = candidate;
+                }
             }
 
             // If no valid HWND, discover it by matching project name in window title
@@ -474,9 +479,10 @@ namespace clibridge4unity
                 catch { }
             }
 
-            // Capture log position before command execution (skip for LOG command itself)
+            // Capture log position before command execution
+            // Skip for: LOG itself, lightweight commands, and internal calls (pipe == null, e.g. SCREENSHOT→SCREENSHOT_ASSET)
             long logIdBefore = 0;
-            bool captureLogs = name != "LOG" && name != "PING" && name != "HELP" && name != "PROBE" && name != "DIAG" && GetLastLogId != null;
+            bool captureLogs = pipe != null && name != "LOG" && name != "PING" && name != "HELP" && name != "PROBE" && name != "DIAG" && GetLastLogId != null;
             if (captureLogs)
             {
                 try { logIdBefore = GetLastLogId(); }
@@ -499,7 +505,7 @@ namespace clibridge4unity
             {
                 try
                 {
-                    string recentLogs = GetLogsSinceFormatted(logIdBefore, 20);
+                    string recentLogs = GetLogsSinceFormatted(logIdBefore, 5);
                     if (recentLogs != null)
                         response = response + "\n" + recentLogs;
                 }

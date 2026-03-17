@@ -49,48 +49,56 @@ namespace clibridge4unity
                     path = parts.Length > 1 ? parts[1] : "Assets/Prefabs";
                 }
 
-                GameObject go;
+                GameObject go = null;
 
-                // Create from existing scene object or new
-                if (!string.IsNullOrEmpty(source))
+                try
                 {
-                    var sourceGo = GameObject.Find(source);
-                    if (sourceGo == null)
-                        return Response.Error($"Source object not found: {source}");
-                    go = UnityEngine.Object.Instantiate(sourceGo);
-                    go.name = name;
-                }
-                else
-                {
-                    go = new GameObject(name);
-                    foreach (var comp in components)
+                    // Create from existing scene object or new
+                    if (!string.IsNullOrEmpty(source))
                     {
-                        var type = FindComponentType(comp);
-                        if (type != null)
-                            go.AddComponent(type);
+                        var sourceGo = GameObject.Find(source);
+                        if (sourceGo == null)
+                            return Response.Error($"Source object not found: {source}");
+                        go = UnityEngine.Object.Instantiate(sourceGo);
+                        go.name = name;
                     }
-                }
+                    else
+                    {
+                        go = new GameObject(name);
+                        foreach (var comp in components)
+                        {
+                            var type = FindComponentType(comp);
+                            if (type != null)
+                                go.AddComponent(type);
+                        }
+                    }
 
-                // Ensure path ends with .prefab
-                if (!path.EndsWith(".prefab"))
-                    path = $"{path}/{name}.prefab";
+                    // Ensure path ends with .prefab
+                    if (!path.EndsWith(".prefab"))
+                        path = $"{path}/{name}.prefab";
 
-                EnsureDirectory(path);
-                var prefab = PrefabUtility.SaveAsPrefabAsset(go, path);
-                UnityEngine.Object.DestroyImmediate(go);
+                    EnsureDirectory(path);
+                    var prefab = PrefabUtility.SaveAsPrefabAsset(go, path);
+                    UnityEngine.Object.DestroyImmediate(go);
+                    go = null; // prevent double-destroy in finally
 
                 if (prefab == null)
                     return Response.Error($"Failed to create prefab at {path}");
 
-                AssetDatabase.Refresh();
-                await Task.Yield();
+                    AssetDatabase.Refresh();
+                    await Task.Yield();
 
-                return Response.SuccessWithData(new
+                    return Response.SuccessWithData(new
+                    {
+                        path = path,
+                        name = prefab.name,
+                        components = prefab.GetComponents<Component>().Select(c => c.GetType().Name).ToArray()
+                    });
+                }
+                finally
                 {
-                    path = path,
-                    name = prefab.name,
-                    components = prefab.GetComponents<Component>().Select(c => c.GetType().Name).ToArray()
-                });
+                    if (go != null) UnityEngine.Object.DestroyImmediate(go);
+                }
             }
             catch (Exception ex)
             {
@@ -311,50 +319,53 @@ namespace clibridge4unity
                 if (stage == null)
                     return Response.Error($"Failed to open prefab: {prefabPath}");
 
-                var root = stage.prefabContentsRoot;
-                var sb = new StringBuilder();
-                sb.AppendLine($"Prefab: {prefabPath}");
-                sb.AppendLine($"Root: {root.name}");
-                sb.AppendLine();
-
-                // Build hierarchy
-                if (string.IsNullOrEmpty(filterComponent))
+                try
                 {
-                    // Show full hierarchy
-                    sb.AppendLine("Full Hierarchy:");
-                    BuildHierarchy(root.transform, sb, 0, null);
-                }
-                else
-                {
-                    // Show only paths containing the filter component
-                    sb.AppendLine($"Objects with {filterComponent}:");
-                    var foundObjects = new List<GameObject>();
-                    FindObjectsWithComponent(root.transform, filterComponent, foundObjects);
+                    var root = stage.prefabContentsRoot;
+                    var sb = new StringBuilder();
+                    sb.AppendLine($"Prefab: {prefabPath}");
+                    sb.AppendLine($"Root: {root.name}");
+                    sb.AppendLine();
 
-                    if (foundObjects.Count == 0)
+                    // Build hierarchy
+                    if (string.IsNullOrEmpty(filterComponent))
                     {
-                        sb.AppendLine($"  (none found)");
+                        sb.AppendLine("Full Hierarchy:");
+                        BuildHierarchy(root.transform, sb, 0, null);
                     }
                     else
                     {
-                        foreach (var obj in foundObjects)
+                        sb.AppendLine($"Objects with {filterComponent}:");
+                        var foundObjects = new List<GameObject>();
+                        FindObjectsWithComponent(root.transform, filterComponent, foundObjects);
+
+                        if (foundObjects.Count == 0)
                         {
-                            sb.AppendLine();
-                            sb.AppendLine($"  Path: {GetPrefabPath(obj.transform, root.transform)}");
-                            sb.AppendLine($"  Components:");
-                            foreach (var comp in obj.GetComponents<Component>())
+                            sb.AppendLine($"  (none found)");
+                        }
+                        else
+                        {
+                            foreach (var obj in foundObjects)
                             {
-                                if (comp != null)
-                                    sb.AppendLine($"    - {comp.GetType().Name}");
+                                sb.AppendLine();
+                                sb.AppendLine($"  Path: {GetPrefabPath(obj.transform, root.transform)}");
+                                sb.AppendLine($"  Components:");
+                                foreach (var comp in obj.GetComponents<Component>())
+                                {
+                                    if (comp != null)
+                                        sb.AppendLine($"    - {comp.GetType().Name}");
+                                }
                             }
                         }
                     }
+
+                    return sb.ToString().TrimEnd();
                 }
-
-                // Close the prefab stage
-                UnityEditor.SceneManagement.StageUtility.GoToMainStage();
-
-                return sb.ToString().TrimEnd();
+                finally
+                {
+                    // Always close the prefab stage, even on exception
+                    UnityEditor.SceneManagement.StageUtility.GoToMainStage();
+                }
             }
             catch (Exception ex)
             {

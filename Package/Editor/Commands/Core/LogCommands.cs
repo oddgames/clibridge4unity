@@ -149,12 +149,15 @@ namespace clibridge4unity
 
         /// <summary>
         /// Returns formatted log entries since the given ID (for appending to command responses).
-        /// Uses compact format to minimize output tokens.
+        /// Only includes errors/exceptions — warnings and info are noise for LLM consumers.
         /// </summary>
-        public static string GetLogsSinceFormatted(long sinceId, int maxLines = 20)
+        public static string GetLogsSinceFormatted(long sinceId, int maxLines = 5)
         {
             FlushPendingWrites();
-            var entries = ReadLogFile().Where(e => e.Id > sinceId).ToList();
+            var entries = ReadLogFile()
+                .Where(e => e.Id > sinceId &&
+                       (e.Type == LogType.Error || e.Type == LogType.Exception || e.Type == LogType.Assert))
+                .ToList();
             if (entries.Count == 0) return null;
 
             // Limit to last N to avoid bloating responses
@@ -162,7 +165,7 @@ namespace clibridge4unity
                 entries = entries.Skip(entries.Count - maxLines).ToList();
 
             var sb = new StringBuilder();
-            sb.AppendLine($"--- Logs ({entries.Count}) ---");
+            sb.AppendLine($"--- Errors ({entries.Count}) ---");
             FormatEntriesCompact(entries, sb, includeTimestamp: false);
             return sb.ToString().TrimEnd();
         }

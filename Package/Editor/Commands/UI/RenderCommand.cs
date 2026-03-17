@@ -2,18 +2,117 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEditor;
 using UnityEditor.SceneManagement;
+using UnityEditorInternal;
+using UnityEngine.UIElements;
 using Newtonsoft.Json.Linq;
 
 namespace clibridge4unity
 {
     public static class RenderCommand
     {
+        // Win32 APIs for capturing popup window content via PrintWindow (no TOPMOST needed)
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+        [DllImport("user32.dll")]
+        static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+        [DllImport("gdi32.dll")]
+        static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+        [DllImport("gdi32.dll")]
+        static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int cx, int cy);
+        [DllImport("gdi32.dll")]
+        static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
+        [DllImport("gdi32.dll")]
+        static extern bool DeleteObject(IntPtr ho);
+        [DllImport("gdi32.dll")]
+        static extern bool DeleteDC(IntPtr hdc);
+        [DllImport("user32.dll")]
+        static extern IntPtr GetDC(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+        [DllImport("gdi32.dll")]
+        static extern int GetDIBits(IntPtr hdc, IntPtr hbmp, uint start, uint cLines,
+            [Out] byte[] lpvBits, ref BITMAPINFO lpbmi, uint usage);
+        const uint PW_RENDERFULLCONTENT = 2;
+        const uint PW_CLIENTONLY = 1;
+
+        [DllImport("user32.dll")]
+        static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+        [StructLayout(LayoutKind.Sequential)]
+        struct RECT { public int left, top, right, bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct BITMAPINFOHEADER
+        {
+            public int biSize, biWidth, biHeight;
+            public short biPlanes, biBitCount;
+            public int biCompression, biSizeImage, biXPelsPerMeter, biYPelsPerMeter, biClrUsed, biClrImportant;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct BITMAPINFO { public BITMAPINFOHEADER bmiHeader; }
+
+        /// <summary>
+        /// Captures a window's rendered content via PrintWindow — works even if occluded.
+        /// </summary>
+        static Texture2D CaptureWindowToTexture(IntPtr hwnd, int width, int height)
+        {
+            // Use client rect to exclude title bar/borders
+            if (GetClientRect(hwnd, out var clientRect))
+            {
+                int cw = clientRect.right - clientRect.left;
+                int ch = clientRect.bottom - clientRect.top;
+                if (cw > 0 && ch > 0) { width = cw; height = ch; }
+            }
+
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            IntPtr memDc = CreateCompatibleDC(screenDc);
+            IntPtr hBitmap = CreateCompatibleBitmap(screenDc, width, height);
+            IntPtr oldBitmap = SelectObject(memDc, hBitmap);
+
+            PrintWindow(hwnd, memDc, PW_RENDERFULLCONTENT | PW_CLIENTONLY);
+
+            var bmi = new BITMAPINFO();
+            bmi.bmiHeader.biSize = Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+            bmi.bmiHeader.biWidth = width;
+            bmi.bmiHeader.biHeight = -height; // negative = top-down
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+
+            byte[] pixels = new byte[width * height * 4];
+            GetDIBits(memDc, hBitmap, 0, (uint)height, pixels, ref bmi, 0);
+
+            SelectObject(memDc, oldBitmap);
+            DeleteObject(hBitmap);
+            DeleteDC(memDc);
+            ReleaseDC(IntPtr.Zero, screenDc);
+
+            // BGRA → RGBA with vertical flip:
+            // GetDIBits with biHeight=-height gives top-down rows (row 0 = top of image)
+            // Unity Texture2D is bottom-up (index 0 = bottom-left pixel)
+            var tex = new Texture2D(width, height, TextureFormat.RGBA32, false);
+            var colors = new Color32[width * height];
+            for (int y = 0; y < height; y++)
+            {
+                int srcRow = y;
+                int dstRow = height - 1 - y; // flip vertically
+                for (int x = 0; x < width; x++)
+                {
+                    int o = (srcRow * width + x) * 4;
+                    colors[dstRow * width + x] = new Color32(pixels[o + 2], pixels[o + 1], pixels[o], 255);
+                }
+            }
+            tex.SetPixels32(colors);
+            tex.Apply();
+            return tex;
+        }
+
         static readonly string OutputDir = Path.Combine(
             Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(),
             "clibridge4unity_screenshots");
@@ -86,8 +185,7 @@ namespace clibridge4unity
 
             if (path.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase))
             {
-                return await CommandRegistry.RunOnMainThreadAsync(
-                    () => RenderUxml(path, width > 0 ? width : 1280, height > 0 ? height : 720));
+                return await RenderUxmlAsync(path, width > 0 ? width : 1280, height > 0 ? height : 720);
             }
 
             // Auto-detect asset type
@@ -104,87 +202,116 @@ namespace clibridge4unity
             return await RenderGameObjectAsync(path, width, height);
         }
 
-        static string RenderUxml(string uxmlPath, int width, int height)
+        /// <summary>
+        /// Renders a UXML file to PNG using an EditorWindow + GrabPixels.
+        /// GrabPixels captures the window's internal backing buffer directly —
+        /// no screen capture, no TOPMOST, works even if the window is behind other apps.
+        /// </summary>
+        static async Task<string> RenderUxmlAsync(string uxmlPath, int width, int height)
         {
-            var uxml = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.VisualTreeAsset>(uxmlPath);
-            if (uxml == null)
-                return Response.Error($"UXML not found: {uxmlPath}");
+            var uxml = await CommandRegistry.RunOnMainThreadAsync(() =>
+                AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(uxmlPath));
 
-            // Create a temporary UIDocument to render the UXML
-            var go = new GameObject("__uxml_render__");
-            var rt = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32);
+            if (uxml == null)
+            {
+                var suggestions = await CommandRegistry.RunOnMainThreadAsync(() => FuzzyAssetSearch(uxmlPath));
+                return Response.Error($"UXML not found: {uxmlPath}{suggestions}");
+            }
+
+            EditorWindow window = null;
+
             try
             {
-                rt.Create();
-
-                // Create a runtime panel and render to texture
-                var doc = go.AddComponent<UnityEngine.UIElements.UIDocument>();
-
-                // Find or create PanelSettings
-                var panelGuids = AssetDatabase.FindAssets("t:PanelSettings");
-                if (panelGuids.Length > 0)
+                // Create a utility window hosting the UXML
+                await CommandRegistry.RunOnMainThreadAsync<int>(() =>
                 {
-                    doc.panelSettings = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.PanelSettings>(
-                        AssetDatabase.GUIDToAssetPath(panelGuids[0]));
-                }
-                else
+                    window = ScriptableObject.CreateInstance<EditorWindow>();
+                    window.ShowPopup();
+                    window.position = new Rect(-4000, -4000, width, height); // offscreen, borderless
+
+                    var root = uxml.Instantiate();
+                    root.style.flexGrow = 1;
+                    root.style.width = Length.Percent(100);
+                    root.style.height = Length.Percent(100);
+                    window.rootVisualElement.Add(root);
+                    window.Repaint();
+
+                    return 0;
+                });
+
+                // Wait for UI Toolkit to layout and paint
+                await Task.Delay(500);
+
+                // Use GrabPixels via reflection to capture the internal backing buffer
+                return await CommandRegistry.RunOnMainThreadAsync(() =>
                 {
-                    // Create temp PanelSettings
-                    var ps = ScriptableObject.CreateInstance<UnityEngine.UIElements.PanelSettings>();
-                    ps.targetTexture = rt;
-                    ps.scaleMode = UnityEngine.UIElements.PanelScaleMode.ConstantPixelSize;
-                    doc.panelSettings = ps;
-                }
+                    // Force repaint so content is current
+                    var parentField = typeof(EditorWindow).GetField("m_Parent",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    var parent = parentField?.GetValue(window);
+                    if (parent == null)
+                        return Response.Error("EditorWindow has no parent view");
 
-                doc.visualTreeAsset = uxml;
+                    // RepaintImmediately ensures the backing buffer is up to date
+                    var repaintImm = parent.GetType().GetMethod("RepaintImmediately",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    repaintImm?.Invoke(parent, null);
 
-                // Also load any USS referenced in the same directory
-                string dir = Path.GetDirectoryName(uxmlPath);
-                string ussPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(uxmlPath) + ".uss");
-                if (File.Exists(Path.GetFullPath(ussPath)))
-                {
-                    var uss = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.StyleSheet>(ussPath);
-                    if (uss != null && doc.rootVisualElement != null)
-                        doc.rootVisualElement.styleSheets.Add(uss);
-                }
+                    // GrabPixels(RenderTexture, Rect) captures the view's backing buffer
+                    var grabMethod = parent.GetType().GetMethod("GrabPixels",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
 
-                // Force a layout pass
-                if (doc.rootVisualElement != null)
-                {
-                    doc.rootVisualElement.style.width = width;
-                    doc.rootVisualElement.style.height = height;
-                }
+                    var rect = window.position;
+                    float dpi = EditorGUIUtility.pixelsPerPoint;
+                    int w = Mathf.RoundToInt(rect.width * dpi);
+                    int h = Mathf.RoundToInt(rect.height * dpi);
 
-                // Render via a camera pointed at nothing (just to capture the UI overlay)
-                var camGo = new GameObject("__uxml_cam__");
-                var cam = camGo.AddComponent<Camera>();
-                cam.clearFlags = CameraClearFlags.SolidColor;
-                cam.backgroundColor = new Color(0.12f, 0.12f, 0.14f);
-                cam.cullingMask = 0; // render nothing except UI
-                cam.targetTexture = rt;
-                cam.Render();
+                    var rt = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
+                    rt.Create();
+                    try
+                    {
+                        grabMethod?.Invoke(parent, new object[] { rt, new Rect(0, 0, w, h) });
 
-                var prev = RenderTexture.active;
-                RenderTexture.active = rt;
-                var tex = new Texture2D(width, height, TextureFormat.RGB24, false);
-                tex.ReadPixels(new Rect(0, 0, width, height), 0, 0);
-                tex.Apply();
-                RenderTexture.active = prev;
+                        // Read pixels and fix orientation (GrabPixels returns vertically flipped)
+                        var prev = RenderTexture.active;
+                        RenderTexture.active = rt;
+                        var tex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+                        tex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                        tex.Apply();
+                        RenderTexture.active = prev;
 
-                string outputPath = Path.Combine(OutputDir, Path.GetFileNameWithoutExtension(uxmlPath) + ".png");
-                File.WriteAllBytes(outputPath, tex.EncodeToPNG());
+                        // Flip vertically (GrabPixels is top-down, Texture2D is bottom-up)
+                        var pixels = tex.GetPixels32();
+                        var flipped = new Color32[pixels.Length];
+                        for (int y = 0; y < h; y++)
+                        {
+                            System.Array.Copy(pixels, y * w, flipped, (h - 1 - y) * w, w);
+                        }
+                        tex.SetPixels32(flipped);
+                        tex.Apply();
 
-                UnityEngine.Object.DestroyImmediate(tex);
-                UnityEngine.Object.DestroyImmediate(camGo);
+                        string outputPath = TimestampedPath(
+                            Path.GetFileNameWithoutExtension(uxmlPath));
+                        File.WriteAllBytes(outputPath, tex.EncodeToPNG());
+                        UnityEngine.Object.DestroyImmediate(tex);
 
-                return Response.Success($"UXML rendered ({width}x{height})\noutput: {outputPath}");
+                        return Response.Success($"UXML rendered ({w}x{h})\noutput: {outputPath}");
+                    }
+                    finally
+                    {
+                        rt.Release();
+                        UnityEngine.Object.DestroyImmediate(rt);
+                    }
+                });
             }
             finally
             {
-                RenderTexture.active = null;
-                rt.Release();
-                UnityEngine.Object.DestroyImmediate(go);
-                UnityEngine.Object.DestroyImmediate(rt);
+                var w = window;
+                if (w != null)
+                {
+                    try { await CommandRegistry.RunOnMainThreadAsync<int>(() => { w.Close(); return 0; }); }
+                    catch { }
+                }
             }
         }
 
@@ -310,7 +437,7 @@ namespace clibridge4unity
                 }
 
                 atlas.Apply();
-                string outputPath = Path.Combine(OutputDir, "render_grid.png");
+                string outputPath = TimestampedPath("render_grid");
                 File.WriteAllBytes(outputPath, atlas.EncodeToPNG());
                 UnityEngine.Object.DestroyImmediate(atlas);
 
@@ -430,7 +557,7 @@ namespace clibridge4unity
         {
             var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
             if (prefab == null)
-                return Response.Error($"Prefab not found: {prefabPath}");
+                return Response.Error($"Prefab not found: {prefabPath}{FuzzyAssetSearch(prefabPath)}");
 
             var canvas = prefab.GetComponentInChildren<Canvas>(true);
             if (canvas != null)
@@ -494,7 +621,7 @@ namespace clibridge4unity
             try
             {
                 cam.Render();
-                return ReadRtAndSave(rt, width, height, "render_ui.png",
+                return ReadRtAndSave(rt, width, height, "render_ui",
                     $"Rendered UI prefab: {prefabPath}");
             }
             finally
@@ -549,7 +676,7 @@ namespace clibridge4unity
                 // Force a layout rebuild so UI elements are positioned correctly
                 Canvas.ForceUpdateCanvases();
                 cam.Render();
-                return ReadRtAndSave(rt, width, height, "render_ui.png",
+                return ReadRtAndSave(rt, width, height, "render_ui",
                     $"Rendered UI prefab (auto-Canvas): {prefabPath}");
             }
             finally
@@ -615,7 +742,7 @@ namespace clibridge4unity
 
                     cam.Render();
 
-                    string path = Path.Combine(OutputDir, $"render_{angleNames[i]}.png");
+                    string path = TimestampedPath($"render_{angleNames[i]}");
                     ReadRtAndSaveToFile(rt, width, height, path);
                     outputPaths.AppendLine($"  {angleNames[i]}: {path}");
                 }
@@ -748,7 +875,7 @@ namespace clibridge4unity
             try
             {
                 cam.Render();
-                return ReadRtAndSave(rt, width, height, "render_ui.png",
+                return ReadRtAndSave(rt, width, height, "render_ui",
                     $"Rendered scene Canvas: {target.name}");
             }
             finally
@@ -796,7 +923,7 @@ namespace clibridge4unity
             try
             {
                 cam.Render();
-                return ReadRtAndSave(rt, width, height, "render_3d.png",
+                return ReadRtAndSave(rt, width, height, "render_3d",
                     $"Rendered 3D object: {target.name}");
             }
             finally
@@ -806,6 +933,86 @@ namespace clibridge4unity
                 rt.Release();
                 UnityEngine.Object.DestroyImmediate(rt);
             }
+        }
+
+        // ───────────────────── Fuzzy Asset Search ─────────────────────
+
+        /// <summary>
+        /// Searches for similar assets when an exact path isn't found.
+        /// Returns a formatted suggestion string with up to 10 matches.
+        /// </summary>
+        static string FuzzyAssetSearch(string path)
+        {
+            string filename = Path.GetFileNameWithoutExtension(path);
+            string ext = Path.GetExtension(path)?.TrimStart('.');
+
+            // Map extensions to Unity Search type filters
+            var typeFilter = ext?.ToLowerInvariant() switch
+            {
+                "prefab" => "t:Prefab",
+                "uxml" => "t:VisualTreeAsset",
+                "uss" => "t:StyleSheet",
+                "unity" => "t:Scene",
+                "mat" => "t:Material",
+                "shader" => "t:Shader",
+                "png" or "jpg" or "tga" or "psd" => "t:Texture2D",
+                "fbx" or "obj" => "t:Model",
+                "anim" => "t:AnimationClip",
+                "controller" => "t:AnimatorController",
+                "asset" => "t:ScriptableObject",
+                _ => null
+            };
+
+            var results = new List<string>();
+
+            // 1. Fuzzy search by filename
+            if (!string.IsNullOrEmpty(filename))
+            {
+                string query = typeFilter != null ? $"{filename} {typeFilter}" : filename;
+                var guids = AssetDatabase.FindAssets(query);
+                foreach (var guid in guids)
+                {
+                    var p = AssetDatabase.GUIDToAssetPath(guid);
+                    if (p.StartsWith("Assets/") && !results.Contains(p))
+                        results.Add(p);
+                    if (results.Count >= 10) break;
+                }
+            }
+
+            // 2. Fallback: search by type/extension only
+            if (results.Count == 0 && typeFilter != null)
+            {
+                var guids = AssetDatabase.FindAssets(typeFilter);
+                foreach (var guid in guids)
+                {
+                    var p = AssetDatabase.GUIDToAssetPath(guid);
+                    if (p.StartsWith("Assets/") && !results.Contains(p))
+                        results.Add(p);
+                    if (results.Count >= 10) break;
+                }
+            }
+
+            // 3. Last resort: search by extension in Assets/
+            if (results.Count == 0 && !string.IsNullOrEmpty(ext))
+            {
+                var guids = AssetDatabase.FindAssets("");
+                foreach (var guid in guids)
+                {
+                    var p = AssetDatabase.GUIDToAssetPath(guid);
+                    if (p.StartsWith("Assets/") && p.EndsWith($".{ext}", StringComparison.OrdinalIgnoreCase)
+                        && !results.Contains(p))
+                        results.Add(p);
+                    if (results.Count >= 10) break;
+                }
+            }
+
+            if (results.Count == 0) return "";
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"\nDid you mean:");
+            foreach (var r in results)
+                sb.AppendLine($"  {r}");
+            return sb.ToString().TrimEnd();
         }
 
         // ───────────────────── Helpers ─────────────────────
@@ -857,9 +1064,16 @@ namespace clibridge4unity
             return null;
         }
 
-        static string ReadRtAndSave(RenderTexture rt, int width, int height, string filename, string header)
+        /// <summary>Generates a timestamped filename: name_20260317_083500.png</summary>
+        static string TimestampedPath(string baseName)
         {
-            string outputPath = Path.Combine(OutputDir, filename);
+            string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            return Path.Combine(OutputDir, $"{baseName}_{stamp}.png");
+        }
+
+        static string ReadRtAndSave(RenderTexture rt, int width, int height, string baseName, string header)
+        {
+            string outputPath = TimestampedPath(baseName);
             ReadRtAndSaveToFile(rt, width, height, outputPath);
 
             var sb = new StringBuilder();

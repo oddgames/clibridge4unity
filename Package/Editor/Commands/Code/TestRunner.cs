@@ -14,6 +14,7 @@ namespace clibridge4unity
     public static class TestRunner
     {
         private static TestRunnerApi api;
+        private static ICallbacks currentCallbacks;
         private static TaskCompletionSource<string> testTcs;
         private static StringBuilder resultsBuilder;
         private static int totalTests;
@@ -41,7 +42,10 @@ namespace clibridge4unity
                 if (api == null)
                     api = ScriptableObject.CreateInstance<TestRunnerApi>();
 
-                // Reset state
+                // Reset state — unregister previous callbacks to prevent orphaned completions
+                if (currentCallbacks != null)
+                    api.UnregisterCallbacks(currentCallbacks);
+
                 testTcs = new TaskCompletionSource<string>();
                 resultsBuilder = new StringBuilder();
                 totalTests = 0;
@@ -50,8 +54,9 @@ namespace clibridge4unity
                 failedTests = 0;
                 startTime = DateTime.Now;
 
-                // Register callbacks
-                api.RegisterCallbacks(new TestCallbacks());
+                // Register fresh callbacks
+                currentCallbacks = new TestCallbacks();
+                api.RegisterCallbacks(currentCallbacks);
 
                 // Create filter
                 var testFilter = new Filter
