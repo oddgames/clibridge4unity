@@ -1,0 +1,10 @@
+easyocr
+opencv-python
+scikit-learn
+scikit-image
+scipy
+Pillow
+fonttools
+ultralytics
+html2image
+numpy

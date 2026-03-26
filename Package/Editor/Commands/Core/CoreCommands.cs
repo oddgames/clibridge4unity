@@ -175,8 +175,8 @@ namespace clibridge4unity
             TimeoutSeconds = 90)]
         public static string Refresh()
         {
-            // Write lock file before refresh in case it triggers compilation
-            // Lock file removed - CLI uses pipe reconnection to detect compilation("refresh_requested");
+            if (EditorApplication.isPlaying)
+                return Response.Error("Cannot refresh during play mode. Use STOP first.");
 
             // Trigger asset database refresh - may trigger compilation if assets change
             // If compilation is triggered, Unity will reload assemblies and connection will be lost

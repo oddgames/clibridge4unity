@@ -62,6 +62,99 @@ Run `SETUP` again after updates to regenerate the docs. The generated `CLAUDE.md
 
 Run `clibridge4unity HELP` for full usage details.
 
+## Development
+
+### Repository Structure
+
+```
+├── clibridge4unity/           # CLI tool (.NET 8, single-file publish)
+├── clibridge4unity.Tests/     # Integration tests (require running Unity)
+├── Package/                   # Unity Editor package (UPM)
+│   ├── Editor/Core/           # Pipe server, command registry
+│   ├── Editor/Commands/       # Command implementations (8 asmdefs)
+│   └── Tools/                 # Pre-built CLI binaries (win/osx/linux)
+├── ConsoleUnityBridge/        # Interactive REPL console
+└── UnityTestProject/          # Test Unity project
+```
+
+### Building
+
+```bash
+cd clibridge4unity
+dotnet publish -c Release
+# Output: bin/Release/net8.0/win-x64/publish/clibridge4unity.exe
+
+# Install locally
+cp bin/Release/net8.0/win-x64/publish/clibridge4unity.exe ~/.clibridge4unity/
+# Also update the bundled binary in the UPM package
+cp bin/Release/net8.0/win-x64/publish/clibridge4unity.exe Package/Tools/win-x64/
+```
+
+### Running Tests
+
+```bash
+cd clibridge4unity.Tests
+dotnet test
+```
+
+Tests require Unity Editor running with `UnityTestProject` open and the bridge package compiled.
+
+### Git Workflow
+
+The project uses a single `main` branch with version tags:
+
+```
+main ──●──●──●──●── (all development)
+       │     │
+     v1.0.8  v1.0.10
+```
+
+- All commits go directly to `main`
+- Each release is a git tag (`v1.0.10`, `v1.0.11`, etc.)
+- No feature branches or PRs required — this is a solo-dev workflow
+
+### Versioning
+
+Version is tracked in multiple files, all kept in sync:
+
+| File | Field |
+|------|-------|
+| `clibridge4unity/clibridge4unity.csproj` | `<Version>` **(source of truth)** |
+| `Package/package.json` | `"version"` |
+| `Package/Editor/Core/BridgeServer.cs` | `Version` const |
+
+The UPM package is installed via git URL with a version tag:
+```
+https://github.com/oddgames/clibridge4unity.git?path=Package#v1.0.10
+```
+
+### Releasing
+
+Releases are automated via the deploy script:
+
+```bash
+# Patch bump (1.0.10 → 1.0.11), build, tag, push, create GitHub release
+python .claude/scripts/deploy.py 1.0.11
+
+# Or use the Claude Code slash command which handles version bumping too:
+# /deploy        — patch bump
+# /deploy minor  — minor bump (1.0.10 → 1.1.0)
+# /deploy check  — dry run
+```
+
+The deploy script:
+1. Builds the CLI (`dotnet publish`)
+2. Verifies the version matches in all files
+3. Packages the binary into a zip
+4. Commits and pushes to `main`
+5. Creates a git tag (`v1.0.11`)
+6. Creates a GitHub Release with the zip attached
+7. Updates the local CLI installation
+
+### Update Mechanism
+
+The CLI checks GitHub Releases in the background and notifies users when a new version is available. Checks are throttled to once per 30 minutes and cached in `~/.clibridge4unity/.last_update_check`.
+
 ## Requirements
 
 - Unity 2021.3+
