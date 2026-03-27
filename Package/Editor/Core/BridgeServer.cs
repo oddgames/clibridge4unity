@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.16";
+        public const string Version = "1.0.17";
 
         private static CancellationTokenSource serverCts;
         private static NamedPipeServerStream currentPipeServer;
@@ -61,9 +61,22 @@ namespace clibridge4unity
             CompilationPipeline.compilationStarted += OnCompilationStarted;
             CompilationPipeline.compilationFinished += OnCompilationFinished;
 
-            // Restore from SessionState
-            if (long.TryParse(SessionState.GetString(SessionKeys.LastCompileTime, "0"), out var ticks) && ticks > 0)
-                lastCompileCompleteTime = new DateTime(ticks);
+            // Check if we just came back from a compilation (domain reload completed)
+            // lastCompileRequest > lastCompileFinished means compilation was in progress
+            long requestTicks = 0, finishedTicks = 0;
+            long.TryParse(SessionState.GetString(SessionKeys.LastCompileRequest, "0"), out requestTicks);
+            long.TryParse(SessionState.GetString(SessionKeys.LastCompileTime, "0"), out finishedTicks);
+
+            if (requestTicks > finishedTicks)
+            {
+                // Domain reload just completed — update the finish time NOW
+                lastCompileCompleteTime = DateTime.Now;
+                SessionState.SetString(SessionKeys.LastCompileTime, lastCompileCompleteTime.Ticks.ToString());
+            }
+            else if (finishedTicks > 0)
+            {
+                lastCompileCompleteTime = new DateTime(finishedTicks);
+            }
 
             pipeName = GeneratePipeName();
             StartServer();
@@ -163,8 +176,8 @@ namespace clibridge4unity
 
         private static void OnCompilationFinished(object ctx)
         {
-            lastCompileCompleteTime = DateTime.Now;
-            SessionState.SetString(SessionKeys.LastCompileTime, lastCompileCompleteTime.Ticks.ToString());
+            // Don't set lastCompileTime here — domain reload hasn't happened yet.
+            // The [InitializeOnLoad] constructor sets it after domain reload completes.
             compilationTcs?.TrySetResult(true);
         }
 

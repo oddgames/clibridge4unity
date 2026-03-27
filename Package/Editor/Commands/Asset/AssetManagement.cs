@@ -1,8 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using UnityEngine;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 
 namespace clibridge4unity
 {
@@ -23,17 +26,33 @@ namespace clibridge4unity
             return BatchMoveOrCopy(args, isCopy: false);
         }
 
-        [BridgeCommand("ASSET_COPY", "Copy assets (new GUIDs, preserves content)",
+        [BridgeCommand("ASSET_COPY", "Copy assets, extract GameObjects from prefabs/scenes as new prefabs",
             Category = "Asset",
-            Usage = "ASSET_COPY Assets/Source.prefab Assets/Dest.prefab        (single)\n" +
-                    "  ASSET_COPY Assets/A.prefab Assets/B.mat Assets/Dest/      (multi → folder)",
+            Usage = "ASSET_COPY Assets/A.prefab Assets/B.prefab                        (copy asset)\n" +
+                    "  ASSET_COPY Assets/A.prefab Assets/B.mat Assets/Dest/               (batch → folder)\n" +
+                    "  ASSET_COPY Assets/Big.prefab/ChildName Assets/Child.prefab          (extract from prefab)\n" +
+                    "  ASSET_COPY scene/Player Assets/Player.prefab                        (scene GO → prefab)\n" +
+                    "  ASSET_COPY scene/Player scene/PlayerCopy                            (clone in scene)\n" +
+                    "  ASSET_COPY Assets/Level.unity/Enemy Assets/Enemy.prefab             (from unopened scene)\n" +
+                    "  ASSET_COPY Assets/A.prefab/Child scene/Parent                       (prefab child → scene)",
             RequiresMainThread = true)]
         public static string Copy(string data)
         {
             var args = ParseArgs(data, 2);
             if (args == null)
-                return Response.Error("Usage: ASSET_COPY <source...> <destination>");
+                return Response.Error("Usage: ASSET_COPY <source> <destination>");
 
+            string src = args[0];
+            string dst = args[args.Length - 1];
+
+            // Detect GameObject copy (source contains / after .prefab, .unity, or starts with scene/)
+            bool srcIsGo = IsGameObjectPath(src);
+            bool dstIsGo = dst.StartsWith("scene/", StringComparison.OrdinalIgnoreCase);
+
+            if (srcIsGo || dstIsGo)
+                return GameObjectCopy(src, dst);
+
+            // Standard asset copy
             return BatchMoveOrCopy(args, isCopy: true);
         }
 
@@ -164,6 +183,220 @@ namespace clibridge4unity
             AssetDatabase.SetLabels(obj, current.ToArray());
             return Response.Success($"{path}: {string.Join(", ", current)}");
         }
+
+        #region GameObject Copy
+
+        static bool IsGameObjectPath(string path)
+        {
+            // scene/Player, Assets/X.prefab/Child, Assets/X.unity/Child
+            if (path.StartsWith("scene/", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // Check for child path after .prefab or .unity
+            int prefabIdx = path.IndexOf(".prefab/", StringComparison.OrdinalIgnoreCase);
+            if (prefabIdx >= 0) return true;
+            int unityIdx = path.IndexOf(".unity/", StringComparison.OrdinalIgnoreCase);
+            if (unityIdx >= 0) return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Parses a source like "Assets/X.prefab/ChildName" into (assetPath, childName)
+        /// or "scene/Player" into (null, "Player")
+        /// </summary>
+        static (string assetPath, string childPath) ParseGoPath(string path)
+        {
+            if (path.StartsWith("scene/", StringComparison.OrdinalIgnoreCase))
+                return (null, path.Substring("scene/".Length));
+
+            int idx = path.IndexOf(".prefab/", StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0)
+                return (path.Substring(0, idx + ".prefab".Length), path.Substring(idx + ".prefab/".Length));
+
+            idx = path.IndexOf(".unity/", StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0)
+                return (path.Substring(0, idx + ".unity".Length), path.Substring(idx + ".unity/".Length));
+
+            return (null, path);
+        }
+
+        static string GameObjectCopy(string src, string dst)
+        {
+            var (srcAsset, srcChild) = ParseGoPath(src);
+            bool dstIsScene = dst.StartsWith("scene/", StringComparison.OrdinalIgnoreCase);
+            string dstScenePath = dstIsScene ? dst.Substring("scene/".Length) : null;
+
+            // Resolve source GameObject
+            GameObject srcGo = null;
+            GameObject tempInstance = null;
+            UnityEngine.SceneManagement.Scene? tempScene = null;
+
+            try
+            {
+                if (srcAsset == null)
+                {
+                    // Source is in the open scene
+                    srcGo = GameObject.Find(srcChild);
+                    if (srcGo == null)
+                        return Response.Error($"GameObject not found in scene: {srcChild}");
+                }
+                else if (srcAsset.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+                {
+                    var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(srcAsset);
+                    if (prefab == null)
+                        return Response.Error($"Prefab not found: {srcAsset}");
+
+                    tempInstance = UnityEngine.Object.Instantiate(prefab);
+                    tempInstance.hideFlags = HideFlags.HideAndDontSave;
+
+                    if (string.IsNullOrEmpty(srcChild))
+                    {
+                        srcGo = tempInstance;
+                    }
+                    else
+                    {
+                        var child = FindChildRecursive(tempInstance.transform, srcChild);
+                        if (child == null)
+                            return Response.Error($"Child '{srcChild}' not found in {srcAsset}\n{ListChildren(tempInstance.transform)}");
+                        srcGo = child.gameObject;
+                    }
+                }
+                else if (srcAsset.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!AssetDatabase.AssetPathExists(srcAsset))
+                        return Response.Error($"Scene not found: {srcAsset}");
+
+                    var scene = EditorSceneManager.OpenScene(srcAsset, OpenSceneMode.Additive);
+                    tempScene = scene;
+
+                    foreach (var root in scene.GetRootGameObjects())
+                    {
+                        if (root.name.Equals(srcChild, StringComparison.OrdinalIgnoreCase))
+                        {
+                            srcGo = root;
+                            break;
+                        }
+                        var found = FindChildRecursive(root.transform, srcChild);
+                        if (found != null) { srcGo = found.gameObject; break; }
+                    }
+
+                    if (srcGo == null)
+                    {
+                        var roots = string.Join(", ", scene.GetRootGameObjects().Select(r => r.name));
+                        return Response.Error($"'{srcChild}' not found in {srcAsset}\nRoots: {roots}");
+                    }
+                }
+
+                // Clone source
+                var clone = UnityEngine.Object.Instantiate(srcGo);
+                clone.name = srcGo.name;
+                clone.hideFlags = HideFlags.HideAndDontSave;
+                clone.transform.SetParent(null);
+
+                // Move to active scene (in case source was from additive scene)
+                UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(clone,
+                    UnityEngine.SceneManagement.SceneManager.GetActiveScene());
+
+                try
+                {
+                    if (dstIsScene)
+                    {
+                        // Destination is in the open scene
+                        clone.hideFlags = HideFlags.None;
+                        clone.name = dstScenePath.Contains("/")
+                            ? dstScenePath.Substring(dstScenePath.LastIndexOf('/') + 1)
+                            : dstScenePath;
+
+                        // Parent under a scene object if path has a parent
+                        if (dstScenePath.Contains("/"))
+                        {
+                            string parentPath = dstScenePath.Substring(0, dstScenePath.LastIndexOf('/'));
+                            var parent = GameObject.Find(parentPath);
+                            if (parent != null)
+                                clone.transform.SetParent(parent.transform, false);
+                        }
+
+                        Undo.RegisterCreatedObjectUndo(clone, $"ASSET_COPY {src} → scene");
+
+                        return Response.SuccessWithData(new
+                        {
+                            message = $"Copied to scene: {clone.name}",
+                            source = src,
+                            destination = dst,
+                            childCount = clone.transform.childCount
+                        });
+                    }
+                    else
+                    {
+                        // Destination is a prefab asset
+                        if (!dst.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+                            dst += ".prefab";
+
+                        EnsureParentDirectory(dst);
+                        var saved = PrefabUtility.SaveAsPrefabAsset(clone, dst);
+                        if (saved == null)
+                            return Response.Error($"Failed to save prefab: {dst}");
+
+                        return Response.SuccessWithData(new
+                        {
+                            message = $"Copied: {src} → {dst}",
+                            source = src,
+                            path = dst,
+                            name = saved.name,
+                            childCount = saved.transform.childCount,
+                            components = saved.GetComponents<Component>()
+                                .Where(c => c != null).Select(c => c.GetType().Name).ToArray()
+                        });
+                    }
+                }
+                finally
+                {
+                    // Clean up clone if it was saved as prefab (not kept in scene)
+                    if (!dstIsScene && clone != null)
+                        UnityEngine.Object.DestroyImmediate(clone);
+                }
+            }
+            finally
+            {
+                if (tempInstance != null) UnityEngine.Object.DestroyImmediate(tempInstance);
+                if (tempScene.HasValue) EditorSceneManager.CloseScene(tempScene.Value, true);
+            }
+        }
+
+        static Transform FindChildRecursive(Transform parent, string name)
+        {
+            // Try path-based lookup first (e.g. "Canvas/Panel")
+            if (name.Contains("/"))
+            {
+                var found = parent.Find(name);
+                if (found != null) return found;
+            }
+
+            foreach (Transform child in parent)
+            {
+                if (child.name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                    return child;
+                var result = FindChildRecursive(child, name);
+                if (result != null) return result;
+            }
+            return null;
+        }
+
+        static string ListChildren(Transform parent, int maxDepth = 2, int depth = 0)
+        {
+            var sb = new StringBuilder();
+            string indent = new string(' ', depth * 2 + 2);
+            foreach (Transform child in parent)
+            {
+                sb.AppendLine($"{indent}{child.name}");
+                if (depth < maxDepth)
+                    sb.Append(ListChildren(child, maxDepth, depth + 1));
+            }
+            return sb.ToString();
+        }
+
+        #endregion
 
         #region Helpers
 

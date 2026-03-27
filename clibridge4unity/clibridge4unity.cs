@@ -158,6 +158,7 @@ class Program
     static string UpdateCacheDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".clibridge4unity");
     static string UpdateCacheFile => Path.Combine(UpdateCacheDir, ".last_update_check");
+    static string CompileTimesFile => Path.Combine(UpdateCacheDir, ".compile_times");
     static string UpdateNotifiedFile => Path.Combine(UpdateCacheDir, ".update_notified");
 
     static void CheckForUpdateInBackground()
@@ -261,6 +262,71 @@ class Program
         int end = json.IndexOf('"', start);
         if (end < 0) return null;
         return json.Substring(start, end - start);
+    }
+
+    // ───────────────────── Compile Time Tracking ─────────────────────
+
+    static void RecordCompileTime(string projectPath, int seconds)
+    {
+        try
+        {
+            string key = Path.GetFileName(Path.GetFullPath(projectPath));
+            Directory.CreateDirectory(UpdateCacheDir);
+
+            // Read existing times for this project (keep last 10)
+            var times = ReadCompileTimes(key);
+            times.Add(seconds);
+            if (times.Count > 10) times.RemoveAt(0);
+
+            // Write back all project entries
+            var allLines = new List<string>();
+            if (File.Exists(CompileTimesFile))
+            {
+                foreach (var line in File.ReadAllLines(CompileTimesFile))
+                {
+                    if (!line.StartsWith(key + ":", StringComparison.OrdinalIgnoreCase))
+                        allLines.Add(line);
+                }
+            }
+            allLines.Add($"{key}:{string.Join(",", times)}");
+            File.WriteAllLines(CompileTimesFile, allLines);
+        }
+        catch { }
+    }
+
+    static List<int> ReadCompileTimes(string projectName)
+    {
+        try
+        {
+            if (!File.Exists(CompileTimesFile)) return new List<int>();
+            foreach (var line in File.ReadAllLines(CompileTimesFile))
+            {
+                if (line.StartsWith(projectName + ":", StringComparison.OrdinalIgnoreCase))
+                {
+                    var values = line.Substring(projectName.Length + 1).Split(',');
+                    var result = new List<int>();
+                    foreach (var v in values)
+                        if (int.TryParse(v.Trim(), out var n) && n > 0)
+                            result.Add(n);
+                    return result;
+                }
+            }
+        }
+        catch { }
+        return new List<int>();
+    }
+
+    static string GetCompileTimeEstimate(string projectPath)
+    {
+        string key = Path.GetFileName(Path.GetFullPath(projectPath));
+        var times = ReadCompileTimes(key);
+        if (times.Count == 0) return null;
+
+        int sum = 0;
+        foreach (var t in times) sum += t;
+        int avg = sum / times.Count;
+        int last = times[times.Count - 1];
+        return $"~{avg}s (last: {last}s, based on {times.Count} compiles)";
     }
 
     // ───────────────────── Self-Update ─────────────────────
@@ -539,7 +605,12 @@ class Program
                 foreach (var err in unityInfo.RecentErrors)
                     Console.Error.WriteLine($"         {err}");
             }
+            string estimate = GetCompileTimeEstimate(projectPath);
             Console.Error.WriteLine("       Wait for it to finish, then retry the command.");
+            Console.Error.WriteLine($"       status: busy");
+            Console.Error.WriteLine($"       retry: true");
+            if (estimate != null)
+                Console.Error.WriteLine($"       compileTime: {estimate}");
             return 1;
         }
         // When importing, show any compile errors found in logs
@@ -1178,6 +1249,7 @@ class Program
                 {
                     Console.WriteLine($"[CLI] Compilation completed in {currentSeconds} seconds");
                     Console.WriteLine($"[CLI] Total connection attempts: {attemptCount}");
+                    RecordCompileTime(projectPath, currentSeconds);
                     Console.WriteLine();
                     Console.WriteLine(statusResponse);
 
@@ -1242,14 +1314,21 @@ class Program
     static bool HasCompileErrors(string statusResponse, out int errorCount)
     {
         errorCount = 0;
+        bool isCompiling = false;
+        bool hasErrors = false;
+
         foreach (var line in statusResponse.Split('\n'))
         {
             var trimmed = line.Trim();
-            if (trimmed.StartsWith("hasCompileErrors:", StringComparison.OrdinalIgnoreCase))
+            if (trimmed.StartsWith("isCompiling:", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = trimmed["isCompiling:".Length..].Trim();
+                isCompiling = value.Equals("True", StringComparison.OrdinalIgnoreCase);
+            }
+            else if (trimmed.StartsWith("hasCompileErrors:", StringComparison.OrdinalIgnoreCase))
             {
                 var value = trimmed["hasCompileErrors:".Length..].Trim();
-                if (!value.Equals("True", StringComparison.OrdinalIgnoreCase))
-                    return false;
+                hasErrors = value.Equals("True", StringComparison.OrdinalIgnoreCase);
             }
             else if (trimmed.StartsWith("compileErrorCount:", StringComparison.OrdinalIgnoreCase))
             {
@@ -1257,7 +1336,12 @@ class Program
                 int.TryParse(value, out errorCount);
             }
         }
-        return errorCount > 0;
+
+        // Only trust error count when compilation is fully done
+        // During compilation, early assemblies may have errors while later ones haven't compiled yet
+        if (isCompiling) return false;
+
+        return hasErrors && errorCount > 0;
     }
 
     static bool IsCompilationComplete(string statusResponse, DateTime? requestedAt = null)

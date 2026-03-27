@@ -148,7 +148,7 @@ namespace clibridge4unity
             Usage = "COMPILE",
             Streaming = false,
             RequiresMainThread = true,
-            TimeoutSeconds = 90)]
+            TimeoutSeconds = 300)]
         public static string Compile(string data)
         {
             if (EditorApplication.isPlaying)
@@ -179,7 +179,7 @@ namespace clibridge4unity
             return Response.SuccessWithData(new
             {
                 message = "Compilation requested. Unity will reload assemblies - connection will be lost during reload.",
-                timeoutSeconds = 90,
+                timeoutSeconds = 300,
                 reconnect = true
             });
         }
@@ -189,7 +189,7 @@ namespace clibridge4unity
             Usage = "REFRESH",
             Streaming = false,
             RequiresMainThread = true,
-            TimeoutSeconds = 90)]
+            TimeoutSeconds = 300)]
         public static string Refresh()
         {
             if (EditorApplication.isPlaying)
@@ -205,7 +205,7 @@ namespace clibridge4unity
             return Response.SuccessWithData(new
             {
                 message = "Asset refresh requested. If compilation is triggered, connection will be lost during assembly reload.",
-                timeoutSeconds = 90,
+                timeoutSeconds = 300,
                 reconnect = true
             });
         }

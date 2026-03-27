@@ -30,6 +30,20 @@ namespace clibridge4unity
             // Restore log ID counter across domain reloads
             _nextId = UnityEditor.SessionState.GetInt(SessionKeys.LogNextId, 1);
 
+            // Restore compile errors from SessionState (survive domain reload)
+            string savedErrors = SessionState.GetString("Bridge_CompileErrors", "");
+            if (!string.IsNullOrEmpty(savedErrors))
+            {
+                lock (_compileErrorLock)
+                {
+                    foreach (var line in savedErrors.Split('\n'))
+                    {
+                        if (!string.IsNullOrWhiteSpace(line))
+                            _compileErrors.Add(new CompilerMessage { message = line, type = CompilerMessageType.Error });
+                    }
+                }
+            }
+
             // Log file in temp directory - survives domain reloads, cleared on Unity restart
             // Use the same deterministic hash as the pipe name so the CLI can find this file
             string normalizedPath = Application.dataPath.Replace("/Assets", "").ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
@@ -47,6 +61,7 @@ namespace clibridge4unity
             CompilationPipeline.compilationStarted += _ =>
             {
                 lock (_compileErrorLock) _compileErrors.Clear();
+                SessionState.SetString("Bridge_CompileErrors", "");
             };
 
             Application.logMessageReceived += OnLogMessage;
@@ -56,6 +71,17 @@ namespace clibridge4unity
                 Application.logMessageReceived -= OnLogMessage;
                 CompilationPipeline.assemblyCompilationFinished -= OnAssemblyCompilationFinished;
                 UnityEditor.SessionState.SetInt(SessionKeys.LogNextId, (int)_nextId);
+
+                // Persist compile errors to SessionState so they survive domain reload
+                lock (_compileErrorLock)
+                {
+                    if (_compileErrors.Count > 0)
+                    {
+                        var errors = string.Join("\n", _compileErrors.Select(e => e.message).Take(20));
+                        SessionState.SetString("Bridge_CompileErrors", errors);
+                    }
+                }
+
                 FlushPendingWrites();
             };
 
