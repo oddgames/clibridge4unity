@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.19";
+        public const string Version = "1.0.20";
 
         private static CancellationTokenSource serverCts;
         private static NamedPipeServerStream currentPipeServer;
@@ -77,6 +77,13 @@ namespace clibridge4unity
                 int duration = (int)(lastCompileCompleteTime - new DateTime(requestTicks)).TotalSeconds;
                 if (duration > 0 && duration < 600)
                     RecordCompileDuration(duration);
+
+                // Re-enable auto-refresh if COMPILE disabled it
+                if (SessionState.GetBool("Bridge_RestoreAutoRefresh", false))
+                {
+                    SessionState.SetBool("Bridge_RestoreAutoRefresh", false);
+                    EditorPrefs.SetInt("kAutoRefreshMode", 1);
+                }
             }
             else if (finishedTicks > 0)
             {

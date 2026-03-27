@@ -161,7 +161,11 @@ namespace clibridge4unity
             if (EditorApplication.isPlaying)
                 return Response.Error("Cannot compile during play mode. Use STOP first.");
 
-            // Always compile when explicitly requested — the caller knows what they want
+            // Disable auto-refresh so Unity doesn't double-reload when it regains focus
+            // Re-enabled after domain reload in BridgeServer's [InitializeOnLoad] constructor
+            EditorPrefs.SetInt("kAutoRefreshMode", 0);
+            SessionState.SetBool("Bridge_RestoreAutoRefresh", true);
+
             CompilationPipeline.RequestScriptCompilation();
 
             // Force Unity to process the compilation request even when in background

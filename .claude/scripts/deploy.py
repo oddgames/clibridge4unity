@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Deploy clibridge4unity: build, package, push, tag, release, upload, verify."""
-import sys, os, subprocess, shutil
+import sys, os, subprocess, shutil, tempfile, time
 
 def run(cmd, check=True, capture=False, timeout=120):
     """Run a shell command, print it, return result."""
@@ -52,8 +52,6 @@ def main():
     shutil.copy2(exe_path, tools_path)
     print(f"  Copied exe to {tools_path}")
 
-    # Create zip (use Python tempdir to avoid $env:TEMP bash/powershell escaping issues)
-    import tempfile
     zip_path = os.path.join(tempfile.gettempdir(), "clibridge4unity-win-x64.zip")
     run(f'powershell -NoProfile -Command "Compress-Archive -Path \'{exe_path}\' -DestinationPath \'{zip_path}\' -Force"')
     print(f"  Created: {zip_path}")
@@ -62,18 +60,18 @@ def main():
     print(f"\n=== Git commit and push ===")
     run("git add -A")
     run(f'git commit -m "Release {tag}"')
-    run("git push origin main")
+    run("git push origin main", timeout=180)
 
     # Step 5: Tag and release
     print(f"\n=== Creating tag and release ===")
-    run(f"git tag {tag}", check=False)  # may already exist
-    run(f"git push origin {tag}", check=False)
+    run(f"git tag {tag}", check=False)
+    run(f"git push origin {tag}", timeout=180, check=False)
     run(f'gh release create {tag} --title "{tag}" --generate-notes', check=False)
 
     # Step 6: Upload assets
     print(f"\n=== Uploading assets ===")
-    run(f'gh release upload {tag} "{zip_path}" --clobber')
-    run(f'gh release upload {tag} "{exe_path}" --clobber')
+    run(f'gh release upload {tag} "{zip_path}" --clobber', timeout=180)
+    run(f'gh release upload {tag} "{exe_path}" --clobber', timeout=180)
 
     # Step 7: Verify
     print(f"\n=== Verifying release ===")
@@ -85,12 +83,28 @@ def main():
     status = r.stdout.split('\n')[0] if r.stdout else "unknown"
     print(f"  Install URL: {status.strip()}")
 
-    # Step 8: Update local CLI
+    # Step 8: Update local CLI (handle locked exe)
     print(f"\n=== Updating local CLI ===")
     local_dir = os.path.expanduser("~/.clibridge4unity")
     if os.path.isdir(local_dir):
-        shutil.copy2(exe_path, os.path.join(local_dir, "clibridge4unity.exe"))
-        print(f"  Updated {local_dir}/clibridge4unity.exe")
+        local_exe = os.path.join(local_dir, "clibridge4unity.exe")
+        try:
+            shutil.copy2(exe_path, local_exe)
+            print(f"  Updated {local_exe}")
+        except PermissionError:
+            # Exe is locked (running) — try rename trick
+            old_exe = local_exe + ".old"
+            try:
+                if os.path.exists(old_exe):
+                    os.remove(old_exe)
+                os.rename(local_exe, old_exe)
+                shutil.copy2(exe_path, local_exe)
+                try: os.remove(old_exe)
+                except: pass
+                print(f"  Updated {local_exe} (via rename)")
+            except Exception as e:
+                print(f"  WARNING: Could not update local CLI ({e})")
+                print(f"  Run: cp {exe_path} {local_exe}")
 
     # Summary
     print(f"\n{'='*40}")
