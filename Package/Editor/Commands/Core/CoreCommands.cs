@@ -126,6 +126,11 @@ namespace clibridge4unity
                 }
             }
 
+            // Compile time stats
+            var compileStats = BridgeServer.GetCompileTimeStats();
+            string compileTimeAvg = compileStats.HasValue ? $"{compileStats.Value.avg}s" : "unknown";
+            string compileTimeLast = compileStats.HasValue ? $"{compileStats.Value.last}s" : "unknown";
+
             return Response.SuccessWithData(new
             {
                 bridgeVersion = BridgeServer.Version,
@@ -137,6 +142,8 @@ namespace clibridge4unity
                 scriptsModified = ScriptsModifiedSinceCompile(),
                 lastCompileRequest = lastCompileRequestStr,
                 lastCompileFinished = lastCompileStr,
+                compileTimeAvg,
+                compileTimeLast,
                 projectPath = Application.dataPath,
                 unityVersion = Application.unityVersion,
                 openWindows = windowList.ToArray()
@@ -154,23 +161,7 @@ namespace clibridge4unity
             if (EditorApplication.isPlaying)
                 return Response.Error("Cannot compile during play mode. Use STOP first.");
 
-            // Skip if no scripts have changed (unless forced with "force")
-            bool force = !string.IsNullOrEmpty(data) && data.Trim().Equals("force", System.StringComparison.OrdinalIgnoreCase);
-            if (!force && !ScriptsModifiedSinceCompile())
-            {
-                string lastCompileStr = "unknown";
-                if (long.TryParse(SessionState.GetString(SessionKeys.LastCompileTime, "0"), out var ticks) && ticks > 0)
-                    lastCompileStr = new System.DateTime(ticks).ToString("yyyy-MM-dd HH:mm:ss");
-                return Response.SuccessWithData(new
-                {
-                    message = "No scripts modified since last compile. Use COMPILE force to override.",
-                    skipped = true,
-                    lastCompileFinished = lastCompileStr
-                });
-            }
-
-            // Trigger compilation - this will cause Unity to recompile and reload assemblies
-            // The connection will be lost during assembly reload, but that's expected
+            // Always compile when explicitly requested — the caller knows what they want
             CompilationPipeline.RequestScriptCompilation();
 
             // Force Unity to process the compilation request even when in background

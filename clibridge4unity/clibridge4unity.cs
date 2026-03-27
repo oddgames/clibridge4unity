@@ -610,7 +610,9 @@ class Program
             Console.Error.WriteLine($"       status: busy");
             Console.Error.WriteLine($"       retry: true");
             if (estimate != null)
-                Console.Error.WriteLine($"       compileTime: {estimate}");
+                Console.Error.WriteLine($"       estimatedWait: {estimate}");
+            else
+                Console.Error.WriteLine($"       estimatedWait: unknown (no compile history yet)");
             return 1;
         }
         // When importing, show any compile errors found in logs
@@ -1282,7 +1284,21 @@ class Program
                 }
                 else
                 {
-                    Console.WriteLine($"[CLI] Unity is still compiling... ({currentSeconds}s elapsed)");
+                    // Parse compileTimeAvg from status for ETA
+                    string eta = "";
+                    foreach (var line in statusResponse.Split('\n'))
+                    {
+                        var t = line.Trim();
+                        if (t.StartsWith("compileTimeAvg:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var val = t.Substring("compileTimeAvg:".Length).Trim().TrimEnd('s');
+                            if (int.TryParse(val, out int avgSec) && avgSec > currentSeconds)
+                                eta = $", ~{avgSec - currentSeconds}s remaining";
+                            else if (avgSec > 0)
+                                eta = $", avg {avgSec}s";
+                        }
+                    }
+                    Console.WriteLine($"[CLI] Unity is still compiling... ({currentSeconds}s elapsed{eta})");
                 }
             }
             catch (TimeoutException)

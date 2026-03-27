@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.17";
+        public const string Version = "1.0.18";
 
         private static CancellationTokenSource serverCts;
         private static NamedPipeServerStream currentPipeServer;
@@ -72,6 +72,11 @@ namespace clibridge4unity
                 // Domain reload just completed — update the finish time NOW
                 lastCompileCompleteTime = DateTime.Now;
                 SessionState.SetString(SessionKeys.LastCompileTime, lastCompileCompleteTime.Ticks.ToString());
+
+                // Record compile duration (request → domain reload complete)
+                int duration = (int)(lastCompileCompleteTime - new DateTime(requestTicks)).TotalSeconds;
+                if (duration > 0 && duration < 600)
+                    RecordCompileDuration(duration);
             }
             else if (finishedTicks > 0)
             {
@@ -172,6 +177,36 @@ namespace clibridge4unity
         {
             lastCompileRequestTime = DateTime.Now;
             SessionState.SetString(SessionKeys.LastCompileRequest, lastCompileRequestTime.Ticks.ToString());
+        }
+
+        private static void RecordCompileDuration(int seconds)
+        {
+            string existing = SessionState.GetString("Bridge_CompileDurations", "");
+            var times = new List<int>();
+            if (!string.IsNullOrEmpty(existing))
+            {
+                foreach (var s in existing.Split(','))
+                    if (int.TryParse(s.Trim(), out var v) && v > 0) times.Add(v);
+            }
+            times.Add(seconds);
+            while (times.Count > 10) times.RemoveAt(0);
+            SessionState.SetString("Bridge_CompileDurations", string.Join(",", times));
+        }
+
+        /// <summary>
+        /// Returns compile time stats: average, last, count. Null if no data.
+        /// </summary>
+        public static (int avg, int last, int count)? GetCompileTimeStats()
+        {
+            string data = SessionState.GetString("Bridge_CompileDurations", "");
+            if (string.IsNullOrEmpty(data)) return null;
+            var times = new List<int>();
+            foreach (var s in data.Split(','))
+                if (int.TryParse(s.Trim(), out var v) && v > 0) times.Add(v);
+            if (times.Count == 0) return null;
+            int sum = 0;
+            foreach (var t in times) sum += t;
+            return (sum / times.Count, times[times.Count - 1], times.Count);
         }
 
         private static void OnCompilationFinished(object ctx)
