@@ -693,6 +693,13 @@ namespace clibridge4unity
             {
                 sb.AppendLine($"=== Field: {type.Name}.{memberName} ===");
 
+                var fieldDoc = ExtractMemberDocComment(type.Name, memberName);
+                if (fieldDoc != null)
+                {
+                    sb.AppendLine(fieldDoc);
+                    sb.AppendLine();
+                }
+
                 var mod = field.IsPublic ? "public" : field.IsPrivate ? "private" : "protected";
                 if (field.IsStatic) mod += " static";
                 if (field.IsInitOnly) mod += " readonly";
@@ -712,6 +719,13 @@ namespace clibridge4unity
             if (prop != null)
             {
                 sb.AppendLine($"=== Property: {type.Name}.{memberName} ===");
+
+                var propDoc = ExtractMemberDocComment(type.Name, memberName);
+                if (propDoc != null)
+                {
+                    sb.AppendLine(propDoc);
+                    sb.AppendLine();
+                }
 
                 var getter = prop.GetMethod;
                 var setter = prop.SetMethod;
@@ -782,6 +796,70 @@ namespace clibridge4unity
                 return null;
 
             return string.Join("\n", docLines);
+        }
+
+        /// <summary>
+        /// Extracts doc comments above a class declaration.
+        /// </summary>
+        private static string ExtractClassDocComment(string className)
+        {
+            RefreshCacheIfNeeded();
+            var pattern = $@"class\s+{Regex.Escape(className)}\b";
+
+            foreach (var filePath in _sourceFilesCache)
+            {
+                var content = GetFileContent(filePath);
+                if (!content.Contains(className)) continue;
+
+                var lines = content.Split('\n');
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    if (Regex.IsMatch(lines[i], pattern))
+                        return ExtractXmlDocComments(lines, i + 1); // 1-indexed
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Extracts doc comments above a field or property declaration within a class.
+        /// </summary>
+        private static string ExtractMemberDocComment(string className, string memberName)
+        {
+            RefreshCacheIfNeeded();
+            var classPattern = $@"class\s+{Regex.Escape(className)}\b";
+            var memberPattern = $@"\b{Regex.Escape(memberName)}\b";
+
+            foreach (var filePath in _sourceFilesCache)
+            {
+                var content = GetFileContent(filePath);
+                if (!content.Contains(className)) continue;
+
+                var lines = content.Split('\n');
+                bool inClass = false;
+                int braceDepth = 0;
+
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    if (!inClass && Regex.IsMatch(lines[i], classPattern))
+                        inClass = true;
+
+                    if (inClass)
+                    {
+                        foreach (char c in lines[i])
+                        {
+                            if (c == '{') braceDepth++;
+                            else if (c == '}') braceDepth--;
+                        }
+
+                        if (braceDepth <= 0 && i > 0) break;
+
+                        if (Regex.IsMatch(lines[i], memberPattern) && !lines[i].TrimStart().StartsWith("//"))
+                            return ExtractXmlDocComments(lines, i + 1);
+                    }
+                }
+            }
+            return null;
         }
 
         /// <summary>
@@ -910,6 +988,15 @@ namespace clibridge4unity
         {
             var sb = new StringBuilder();
             sb.AppendLine($"=== {targetType.Name} ===");
+
+            // Extract class-level doc comments from source
+            var classDoc = ExtractClassDocComment(targetType.Name);
+            if (classDoc != null)
+            {
+                sb.AppendLine(classDoc);
+                sb.AppendLine();
+            }
+
             sb.AppendLine($"Namespace: {targetType.Namespace}");
             sb.AppendLine($"Assembly: {targetType.Assembly.GetName().Name}");
 

@@ -1025,6 +1025,31 @@ class Program
 
                 string statusResponse = responseBuilder.ToString();
 
+                // Check for compile errors (terminal state — don't keep waiting)
+                if (HasCompileErrors(statusResponse, out int errorCount))
+                {
+                    Console.Error.WriteLine($"\n[CLI] Compilation finished with {errorCount} error(s) in {currentSeconds} seconds");
+                    Console.Error.WriteLine($"[CLI] Total connection attempts: {attemptCount}");
+                    Console.Error.WriteLine();
+
+                    // Fetch and show the actual errors
+                    string errors = SendCommandGetResponse(pipeName, "LOG", "errors");
+                    if (errors != null)
+                        Console.Error.WriteLine(errors);
+                    else
+                        Console.Error.WriteLine(statusResponse);
+
+                    Console.Error.WriteLine("\nFix the errors above, then run COMPILE.");
+                    return 1;
+                }
+
+                // Check if Unity entered play mode (shouldn't compile during play)
+                if (statusResponse.Contains("isPlaying: True"))
+                {
+                    Console.Error.WriteLine($"\n[CLI] Unity entered play mode — cannot compile. Use STOP first.");
+                    return 1;
+                }
+
                 // Parse status to check if still compiling
                 if (IsCompilationComplete(statusResponse, requestedAt))
                 {
@@ -1089,6 +1114,27 @@ class Program
         Console.Error.WriteLine($"[CLI] Total connection attempts: {attemptCount}");
         Console.Error.WriteLine($"[CLI] Reconnected at least once: {hasConnectedOnce}");
         return 1;
+    }
+
+    static bool HasCompileErrors(string statusResponse, out int errorCount)
+    {
+        errorCount = 0;
+        foreach (var line in statusResponse.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("hasCompileErrors:", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = trimmed["hasCompileErrors:".Length..].Trim();
+                if (!value.Equals("True", StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            else if (trimmed.StartsWith("compileErrorCount:", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = trimmed["compileErrorCount:".Length..].Trim();
+                int.TryParse(value, out errorCount);
+            }
+        }
+        return errorCount > 0;
     }
 
     static bool IsCompilationComplete(string statusResponse, DateTime? requestedAt = null)

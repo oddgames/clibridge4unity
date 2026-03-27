@@ -111,10 +111,27 @@ namespace clibridge4unity
             if (long.TryParse(SessionState.GetString(SessionKeys.LastCompileRequest, "0"), out var requestTicks) && requestTicks > 0)
                 lastCompileRequestStr = new System.DateTime(requestTicks).ToString("yyyy-MM-dd HH:mm:ss");
 
+            // Check for compile errors
+            bool hasCompileErrors = false;
+            int compileErrorCount = 0;
+            var getErrors = CommandRegistry.GetCompileErrors;
+            if (getErrors != null)
+            {
+                string compileErrors = getErrors();
+                if (compileErrors != null)
+                {
+                    hasCompileErrors = true;
+                    var match = System.Text.RegularExpressions.Regex.Match(compileErrors, @"COMPILE ERRORS \((\d+)\)");
+                    if (match.Success) compileErrorCount = int.Parse(match.Groups[1].Value);
+                }
+            }
+
             return Response.SuccessWithData(new
             {
                 bridgeVersion = BridgeServer.Version,
                 isCompiling = EditorApplication.isCompiling,
+                hasCompileErrors,
+                compileErrorCount,
                 isPlaying = EditorApplication.isPlaying,
                 isPaused = EditorApplication.isPaused,
                 scriptsModified = ScriptsModifiedSinceCompile(),
