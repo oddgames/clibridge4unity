@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.Rendering;
 using UnityEditor;
 using TMPro;
 
@@ -12,43 +13,66 @@ namespace clibridge4unity
 {
     public static class UICommands
     {
-        private static readonly string[] DiscoverFlags = { "sprites", "prefabs", "scenes", "fonts" };
-        private static readonly string[] DiscoverOptions = { "sprites" };
+        private static readonly string[] DiscoverFlags = { "sprites", "prefabs", "scenes", "fonts", "shaders", "materials", "models", "variants", "ui" };
+        private static readonly string[] DiscoverOptions = { "sprites", "materials", "shaders" };
 
-        [BridgeCommand("UI_DISCOVER", "Discover UI assets: sprites, fonts, UI prefabs, and scenes",
-            Category = "UI",
-            Usage = "UI_DISCOVER [type]\n" +
-                    "  UI_DISCOVER                   - All UI assets\n" +
-                    "  UI_DISCOVER sprites            - Sprite folders with counts\n" +
-                    "  UI_DISCOVER sprites:Icons/128  - Sprites in specific folder\n" +
-                    "  UI_DISCOVER prefabs            - UI prefabs\n" +
-                    "  UI_DISCOVER scenes             - Scenes with UI\n" +
-                    "  UI_DISCOVER fonts              - Available fonts",
+        [BridgeCommand("ASSET_DISCOVER", "Discover project assets by category",
+            Category = "Asset",
+            Usage = "ASSET_DISCOVER                      - Summary of all categories\n" +
+                    "  ASSET_DISCOVER ui                    - UI prefabs, sprites, fonts\n" +
+                    "  ASSET_DISCOVER sprites                - Sprite folders with names\n" +
+                    "  ASSET_DISCOVER sprites:Icons/128      - Sprites in specific folder\n" +
+                    "  ASSET_DISCOVER prefabs                - UI prefabs (Canvas + element)\n" +
+                    "  ASSET_DISCOVER scenes                 - Scenes (flags UI content)\n" +
+                    "  ASSET_DISCOVER fonts                  - TTF/OTF and TMP font assets\n" +
+                    "  ASSET_DISCOVER shaders                - All shaders in project\n" +
+                    "  ASSET_DISCOVER shaders:URP            - Shaders matching filter\n" +
+                    "  ASSET_DISCOVER materials               - Materials grouped by shader\n" +
+                    "  ASSET_DISCOVER materials:Standard      - Materials using specific shader\n" +
+                    "  ASSET_DISCOVER models                  - FBX/OBJ with sub-assets (meshes, mats, clips)\n" +
+                    "  ASSET_DISCOVER variants                - Prefab variant inheritance chains",
             RequiresMainThread = true)]
         public static string Discover(string data)
         {
             try
             {
                 var args = CommandArgs.Parse(data, DiscoverFlags, DiscoverOptions);
+                string prefix = args.WarningPrefix();
 
-                // sprites:folder option
+                // Options with values
                 string spritesFolder = args.Get("sprites");
                 if (spritesFolder != null)
-                    return args.WarningPrefix() + DiscoverSprites(spritesFolder);
+                    return prefix + DiscoverSprites(spritesFolder);
 
+                string materialFilter = args.Get("materials");
+                if (materialFilter != null)
+                    return prefix + DiscoverMaterials(materialFilter);
+
+                string shaderFilter = args.Get("shaders");
+                if (shaderFilter != null)
+                    return prefix + DiscoverShaders(shaderFilter);
+
+                // Flags
+                if (args.Has("ui"))
+                    return prefix + DiscoverUI();
                 if (args.Has("sprites"))
-                    return args.WarningPrefix() + DiscoverSprites(null);
+                    return prefix + DiscoverSprites(null);
                 if (args.Has("prefabs"))
-                    return args.WarningPrefix() + DiscoverUIPrefabs();
+                    return prefix + DiscoverUIPrefabs();
                 if (args.Has("scenes"))
-                    return args.WarningPrefix() + DiscoverUIScenes();
+                    return prefix + DiscoverScenes();
                 if (args.Has("fonts"))
-                    return args.WarningPrefix() + DiscoverFonts();
+                    return prefix + DiscoverFonts();
+                if (args.Has("shaders"))
+                    return prefix + DiscoverShaders(null);
+                if (args.Has("materials"))
+                    return prefix + DiscoverMaterials(null);
+                if (args.Has("models"))
+                    return prefix + DiscoverModels();
+                if (args.Has("variants"))
+                    return prefix + DiscoverVariants();
 
-                if (args.Warnings.Count > 0)
-                    return args.WarningPrefix() + DiscoverAll();
-
-                return DiscoverAll();
+                return prefix + DiscoverSummary();
             }
             catch (Exception ex)
             {
@@ -56,7 +80,85 @@ namespace clibridge4unity
             }
         }
 
-        private static string DiscoverAll()
+        // Keep UI_DISCOVER as alias for backwards compatibility
+        [BridgeCommand("UI_DISCOVER", "Alias for ASSET_DISCOVER ui",
+            Category = "UI",
+            Usage = "UI_DISCOVER [sprites|prefabs|scenes|fonts]",
+            RequiresMainThread = true)]
+        public static string DiscoverLegacy(string data)
+        {
+            if (string.IsNullOrWhiteSpace(data))
+                return Discover("ui");
+            return Discover(data);
+        }
+
+        #region Summary
+
+        private static string DiscoverSummary()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("=== Asset Discovery ===");
+            sb.AppendLine();
+
+            // Count by type
+            int sprites = AssetDatabase.FindAssets("t:Sprite", new[] { "Assets" }).Length;
+            int textures = AssetDatabase.FindAssets("t:Texture2D", new[] { "Assets" }).Length;
+            int materials = AssetDatabase.FindAssets("t:Material", new[] { "Assets" }).Length;
+            int prefabs = AssetDatabase.FindAssets("t:Prefab", new[] { "Assets" }).Length;
+            int scenes = AssetDatabase.FindAssets("t:Scene", new[] { "Assets" }).Length;
+            int fonts = AssetDatabase.FindAssets("t:Font", new[] { "Assets" }).Length;
+            int tmpFonts = AssetDatabase.FindAssets("t:TMP_FontAsset", new[] { "Assets" }).Length;
+            int meshes = AssetDatabase.FindAssets("t:Mesh", new[] { "Assets" }).Length;
+            int animations = AssetDatabase.FindAssets("t:AnimationClip", new[] { "Assets" }).Length;
+            int scripts = AssetDatabase.FindAssets("t:MonoScript", new[] { "Assets" }).Length;
+            int audioClips = AssetDatabase.FindAssets("t:AudioClip", new[] { "Assets" }).Length;
+
+            // Count shaders in project (not packages)
+            int shaders = AssetDatabase.FindAssets("t:Shader", new[] { "Assets" }).Length;
+
+            // Count models (FBX, OBJ, etc.)
+            int models = AssetDatabase.FindAssets("t:Model", new[] { "Assets" }).Length;
+
+            // Count UI prefabs and variants
+            int uiPrefabs = 0;
+            int variants = 0;
+            foreach (var guid in AssetDatabase.FindAssets("t:Prefab", new[] { "Assets" }))
+            {
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                var go = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+                if (go == null) continue;
+                if (go.GetComponentInChildren<Canvas>(true) != null || go.GetComponent<RectTransform>() != null)
+                    uiPrefabs++;
+                if (PrefabUtility.GetPrefabAssetType(go) == PrefabAssetType.Variant)
+                    variants++;
+            }
+
+            sb.AppendLine("  Category        Count   Drill down with");
+            sb.AppendLine("  ─────────────── ─────── ─────────────────────────");
+            sb.AppendLine($"  Sprites         {sprites,7}   ASSET_DISCOVER sprites");
+            sb.AppendLine($"  Textures        {textures,7}");
+            sb.AppendLine($"  Materials       {materials,7}   ASSET_DISCOVER materials");
+            sb.AppendLine($"  Shaders         {shaders,7}   ASSET_DISCOVER shaders");
+            sb.AppendLine($"  Models          {models,7}   ASSET_DISCOVER models");
+            sb.AppendLine($"  Prefabs         {prefabs,7}   ASSET_DISCOVER prefabs");
+            sb.AppendLine($"  Variants        {variants,7}   ASSET_DISCOVER variants");
+            sb.AppendLine($"  UI Prefabs      {uiPrefabs,7}   ASSET_DISCOVER ui");
+            sb.AppendLine($"  Scenes          {scenes,7}   ASSET_DISCOVER scenes");
+            sb.AppendLine($"  Fonts           {fonts,7}   ASSET_DISCOVER fonts");
+            sb.AppendLine($"  TMP Fonts       {tmpFonts,7}");
+            sb.AppendLine($"  Meshes          {meshes,7}");
+            sb.AppendLine($"  Animations      {animations,7}");
+            sb.AppendLine($"  Audio Clips     {audioClips,7}");
+            sb.AppendLine($"  Scripts         {scripts,7}");
+
+            return sb.ToString().TrimEnd();
+        }
+
+        #endregion
+
+        #region UI (combined sprites + fonts + prefabs)
+
+        private static string DiscoverUI()
         {
             var sb = new StringBuilder();
             sb.AppendLine("=== UI Asset Discovery ===");
@@ -71,7 +173,6 @@ namespace clibridge4unity
                 .OrderByDescending(g => g.Count())
                 .ToList();
 
-            // Skip icon size duplicates (32/64/256/512) if 128 exists — they're the same icons at different sizes
             var iconFolders = folderGroups.Where(g => g.Key.Contains("/Icons/")).ToList();
             var nonIconFolders = folderGroups.Where(g => !g.Key.Contains("/Icons/")).ToList();
             var preferredIconFolder = iconFolders.FirstOrDefault(g => g.Key.Contains("/128"));
@@ -81,27 +182,17 @@ namespace clibridge4unity
             if (!string.IsNullOrEmpty(commonPrefix))
                 sb.AppendLine($"  Base: {commonPrefix}");
 
-            // Show non-icon folders with all names
             foreach (var group in nonIconFolders)
             {
-                string displayPath = !string.IsNullOrEmpty(commonPrefix) && group.Key.StartsWith(commonPrefix)
-                    ? group.Key.Substring(commonPrefix.Length)
-                    : group.Key;
+                string displayPath = TrimPrefix(group.Key, commonPrefix);
                 var names = group.OrderBy(p => p).Select(p => Path.GetFileNameWithoutExtension(p)).ToArray();
                 sb.AppendLine($"  {displayPath}/ ({names.Length})");
-                for (int i = 0; i < names.Length; i += 4)
-                {
-                    var batch = names.Skip(i).Take(4).Select(n => n.PadRight(28));
-                    sb.AppendLine($"    {string.Join("", batch)}");
-                }
+                AppendColumns(sb, names, 4, 28);
             }
 
-            // Show icons (128px only, note other sizes)
             if (preferredIconFolder != null)
             {
-                string displayPath = !string.IsNullOrEmpty(commonPrefix) && preferredIconFolder.Key.StartsWith(commonPrefix)
-                    ? preferredIconFolder.Key.Substring(commonPrefix.Length)
-                    : preferredIconFolder.Key;
+                string displayPath = TrimPrefix(preferredIconFolder.Key, commonPrefix);
                 var names = preferredIconFolder.OrderBy(p => p).Select(p => Path.GetFileNameWithoutExtension(p)).ToArray();
                 var otherSizes = otherIconFolders.Select(g =>
                 {
@@ -109,11 +200,7 @@ namespace clibridge4unity
                     return match.Success ? match.Groups[1].Value + "px" : g.Key;
                 });
                 sb.AppendLine($"  {displayPath}/ ({names.Length}) [also available: {string.Join(", ", otherSizes)}]");
-                for (int i = 0; i < names.Length; i += 4)
-                {
-                    var batch = names.Skip(i).Take(4).Select(n => n.PadRight(28));
-                    sb.AppendLine($"    {string.Join("", batch)}");
-                }
+                AppendColumns(sb, names, 4, 28);
             }
 
             sb.AppendLine($"  Total: {spritePaths.Length} sprites in {folderGroups.Count} folders");
@@ -126,7 +213,6 @@ namespace clibridge4unity
             var tmpFontGuids = AssetDatabase.FindAssets("t:TMP_FontAsset", new[] { "Assets" });
             var tmpFontPaths = tmpFontGuids.Select(g => AssetDatabase.GUIDToAssetPath(g)).ToList();
 
-            // Group fonts by folder, show folder once
             var fontsByFolder = allFontPaths.Select(p => new { path = p, label = "" })
                 .Concat(tmpFontPaths.Select(p => new { path = p, label = " (TMP)" }))
                 .GroupBy(f => Path.GetDirectoryName(f.path).Replace("\\", "/"));
@@ -168,7 +254,7 @@ namespace clibridge4unity
                 sb.AppendLine("  (none found)");
             sb.AppendLine();
 
-            sb.AppendLine($"## UI Element Prefabs — RectTransform root, place inside Canvas ({elementPrefabs.Count})");
+            sb.AppendLine($"## UI Element Prefabs — RectTransform root ({elementPrefabs.Count})");
             var elementsByFolder = elementPrefabs
                 .GroupBy(e => Path.GetDirectoryName(e.path).Replace("\\", "/"))
                 .OrderBy(g => g.Key);
@@ -179,7 +265,7 @@ namespace clibridge4unity
                 {
                     var imageCount = prefab.GetComponentsInChildren<Image>(true).Length;
                     var buttonCount = prefab.GetComponentsInChildren<Button>(true).Length;
-                    var tmpCount = prefab.GetComponentsInChildren<TMPro.TMP_Text>(true).Length;
+                    var tmpCount = prefab.GetComponentsInChildren<TMP_Text>(true).Length;
                     var parts = new List<string>();
                     if (imageCount > 0) parts.Add($"{imageCount} Img");
                     if (tmpCount > 0) parts.Add($"{tmpCount} TMP");
@@ -192,7 +278,7 @@ namespace clibridge4unity
                 sb.AppendLine("  (none found)");
             sb.AppendLine();
 
-            // --- Scenes with UI ---
+            // --- Scenes ---
             sb.AppendLine("## Scenes");
             var sceneGuids = AssetDatabase.FindAssets("t:Scene", new[] { "Assets" });
             foreach (var guid in sceneGuids)
@@ -213,6 +299,161 @@ namespace clibridge4unity
             return sb.ToString().TrimEnd();
         }
 
+        #endregion
+
+        #region Shaders
+
+        private static string DiscoverShaders(string filter)
+        {
+            var sb = new StringBuilder();
+
+            // Project shaders
+            var projectGuids = AssetDatabase.FindAssets("t:Shader", new[] { "Assets" });
+            var projectShaders = projectGuids
+                .Select(g => AssetDatabase.GUIDToAssetPath(g))
+                .Select(p => (path: p, shader: AssetDatabase.LoadAssetAtPath<Shader>(p)))
+                .Where(s => s.shader != null)
+                .ToList();
+
+            // Built-in/package shaders (enumerate all loaded shaders not in Assets/)
+            var allShaders = Resources.FindObjectsOfTypeAll<Shader>()
+                .Where(s => !string.IsNullOrEmpty(s.name) && !s.name.StartsWith("Hidden/"))
+                .OrderBy(s => s.name)
+                .ToList();
+
+            bool hasFilter = !string.IsNullOrEmpty(filter);
+
+            if (hasFilter)
+            {
+                projectShaders = projectShaders
+                    .Where(s => s.shader.name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0
+                             || s.path.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .ToList();
+                allShaders = allShaders
+                    .Where(s => s.name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .ToList();
+            }
+
+            sb.AppendLine(hasFilter ? $"=== Shaders matching '{filter}' ===" : "=== Shaders ===");
+            sb.AppendLine();
+
+            if (projectShaders.Count > 0)
+            {
+                sb.AppendLine($"## Project Shaders ({projectShaders.Count})");
+                foreach (var (path, shader) in projectShaders.OrderBy(s => s.shader.name))
+                {
+                    int passes = shader.passCount;
+                    int propCount = ShaderUtil.GetPropertyCount(shader);
+                    sb.AppendLine($"  {shader.name}  ({passes} pass{(passes != 1 ? "es" : "")}, {propCount} props)");
+                    sb.AppendLine($"    {path}");
+                }
+                sb.AppendLine();
+            }
+
+            // Group built-in shaders by category (first path segment)
+            var builtIn = allShaders
+                .Where(s => !projectShaders.Any(ps => ps.shader.name == s.name))
+                .ToList();
+
+            if (builtIn.Count > 0)
+            {
+                sb.AppendLine($"## Available Shaders ({builtIn.Count})");
+                var grouped = builtIn.GroupBy(s =>
+                {
+                    int slash = s.name.IndexOf('/');
+                    return slash >= 0 ? s.name.Substring(0, slash) : "(Uncategorized)";
+                }).OrderBy(g => g.Key);
+
+                foreach (var group in grouped)
+                {
+                    sb.AppendLine($"  {group.Key}/ ({group.Count()})");
+                    foreach (var shader in group.Take(20))
+                        sb.AppendLine($"    {shader.name}");
+                    if (group.Count() > 20)
+                        sb.AppendLine($"    ... +{group.Count() - 20} more");
+                }
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        #endregion
+
+        #region Materials
+
+        private static string DiscoverMaterials(string filter)
+        {
+            var sb = new StringBuilder();
+            var guids = AssetDatabase.FindAssets("t:Material", new[] { "Assets" });
+
+            var mats = guids
+                .Select(g => AssetDatabase.GUIDToAssetPath(g))
+                .Select(p => (path: p, mat: AssetDatabase.LoadAssetAtPath<Material>(p)))
+                .Where(m => m.mat != null && m.mat.shader != null)
+                .ToList();
+
+            bool hasFilter = !string.IsNullOrEmpty(filter);
+
+            if (hasFilter)
+            {
+                mats = mats
+                    .Where(m => m.mat.shader.name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0
+                             || m.mat.name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0
+                             || m.path.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .ToList();
+            }
+
+            sb.AppendLine(hasFilter ? $"=== Materials matching '{filter}' ===" : "=== Materials ===");
+            sb.AppendLine();
+
+            if (mats.Count == 0)
+            {
+                sb.AppendLine(hasFilter ? $"  No materials matching '{filter}'" : "  No materials found");
+                return sb.ToString().TrimEnd();
+            }
+
+            // Group by shader
+            var byShader = mats.GroupBy(m => m.mat.shader.name).OrderByDescending(g => g.Count());
+            foreach (var group in byShader)
+            {
+                sb.AppendLine($"## {group.Key} ({group.Count()})");
+                foreach (var (path, mat) in group.OrderBy(m => m.path).Take(30))
+                {
+                    var props = new List<string>();
+
+                    // Show key visual properties
+                    if (mat.HasProperty("_Color"))
+                    {
+                        var c = mat.GetColor("_Color");
+                        props.Add($"color:#{ColorUtility.ToHtmlStringRGB(c)}");
+                    }
+                    if (mat.HasProperty("_MainTex") && mat.GetTexture("_MainTex") != null)
+                        props.Add($"tex:{mat.GetTexture("_MainTex").name}");
+                    if (mat.HasProperty("_BaseMap") && mat.GetTexture("_BaseMap") != null)
+                        props.Add($"tex:{mat.GetTexture("_BaseMap").name}");
+                    if (mat.HasProperty("_Metallic"))
+                        props.Add($"metallic:{mat.GetFloat("_Metallic"):F1}");
+                    if (mat.HasProperty("_Smoothness"))
+                        props.Add($"smooth:{mat.GetFloat("_Smoothness"):F1}");
+                    if (mat.renderQueue != (int)RenderQueue.Geometry)
+                        props.Add($"queue:{mat.renderQueue}");
+
+                    string info = props.Count > 0 ? $"  ({string.Join(", ", props)})" : "";
+                    sb.AppendLine($"  {path}{info}");
+                }
+                if (group.Count() > 30)
+                    sb.AppendLine($"  ... +{group.Count() - 30} more");
+                sb.AppendLine();
+            }
+
+            sb.AppendLine($"Total: {mats.Count} materials, {byShader.Count()} shaders");
+            return sb.ToString().TrimEnd();
+        }
+
+        #endregion
+
+        #region Sprites
+
         private static string DiscoverSprites(string subfolder)
         {
             var sb = new StringBuilder();
@@ -220,7 +461,6 @@ namespace clibridge4unity
 
             if (!string.IsNullOrEmpty(subfolder))
             {
-                // Find folders matching the subfolder pattern
                 var matchingFolders = AssetDatabase.GetAllAssetPaths()
                     .Where(p => AssetDatabase.IsValidFolder(p) &&
                                 p.Replace("\\", "/").Contains(subfolder, StringComparison.OrdinalIgnoreCase))
@@ -243,52 +483,32 @@ namespace clibridge4unity
 
             if (!string.IsNullOrEmpty(subfolder))
             {
-                // List individual sprites - just names since folder context is known
                 var names = spritePaths.OrderBy(p => p)
                     .Select(p => Path.GetFileNameWithoutExtension(p))
                     .ToArray();
 
-                // Show in compact columns
-                for (int i = 0; i < Math.Min(names.Length, 200); i += 4)
-                {
-                    var batch = names.Skip(i).Take(4).Select(n => n.PadRight(28));
-                    sb.AppendLine($"  {string.Join("", batch)}");
-                }
-                if (names.Length > 200)
-                    sb.AppendLine($"  ... and {names.Length - 200} more");
+                AppendColumns(sb, names, 4, 28, 200);
                 sb.AppendLine();
                 sb.AppendLine($"Total: {spritePaths.Length} sprites");
                 sb.AppendLine($"Path: {searchFolders[0]}");
             }
             else
             {
-                // Group by folder - find common prefix to abbreviate
                 var groups = spritePaths
                     .GroupBy(p => Path.GetDirectoryName(p).Replace("\\", "/"))
                     .OrderByDescending(g => g.Count())
                     .ToList();
 
                 string commonPrefix = FindCommonPrefix(groups.Select(g => g.Key).ToArray());
-
                 if (!string.IsNullOrEmpty(commonPrefix))
                     sb.AppendLine($"Base: {commonPrefix}");
 
                 foreach (var group in groups.Take(30))
                 {
-                    string displayPath = !string.IsNullOrEmpty(commonPrefix) && group.Key.StartsWith(commonPrefix)
-                        ? group.Key.Substring(commonPrefix.Length)
-                        : group.Key;
-                    sb.AppendLine($"  {displayPath}/ ({group.Count()})");
-
-                    // Show all sprite names in compact columns
-                    var names = group.OrderBy(p => p)
-                        .Select(p => Path.GetFileNameWithoutExtension(p))
-                        .ToArray();
-                    for (int i = 0; i < names.Length; i += 4)
-                    {
-                        var batch = names.Skip(i).Take(4).Select(n => n.PadRight(28));
-                        sb.AppendLine($"    {string.Join("", batch)}");
-                    }
+                    string displayPath = TrimPrefix(group.Key, commonPrefix);
+                    var names = group.OrderBy(p => p).Select(p => Path.GetFileNameWithoutExtension(p)).ToArray();
+                    sb.AppendLine($"  {displayPath}/ ({names.Length})");
+                    AppendColumns(sb, names, 4, 28);
                 }
                 sb.AppendLine();
                 sb.AppendLine($"Total: {spritePaths.Length} sprites in {groups.Count} folders");
@@ -296,6 +516,10 @@ namespace clibridge4unity
 
             return sb.ToString().TrimEnd();
         }
+
+        #endregion
+
+        #region Prefabs
 
         private static string DiscoverUIPrefabs()
         {
@@ -317,7 +541,6 @@ namespace clibridge4unity
                     elementPrefabs.Add((path, prefab));
             }
 
-            // --- Canvas prefabs (full UI screens) ---
             sb.AppendLine($"UI Prefabs with Canvas ({canvasPrefabs.Count}):");
             sb.AppendLine();
             foreach (var (path, prefab) in canvasPrefabs)
@@ -330,7 +553,7 @@ namespace clibridge4unity
                 var inputs = prefab.GetComponentsInChildren<InputField>(true);
                 var toggles = prefab.GetComponentsInChildren<Toggle>(true);
                 var sliders = prefab.GetComponentsInChildren<Slider>(true);
-                var tmps = prefab.GetComponentsInChildren<TMPro.TMP_Text>(true);
+                var tmps = prefab.GetComponentsInChildren<TMP_Text>(true);
                 var scrollRects = prefab.GetComponentsInChildren<ScrollRect>(true);
 
                 var parts = new List<string>();
@@ -354,7 +577,6 @@ namespace clibridge4unity
             if (canvasPrefabs.Count == 0)
                 sb.AppendLine("  (none found)\n");
 
-            // --- Element prefabs (RectTransform root, no Canvas) ---
             sb.AppendLine($"UI Element Prefabs (RectTransform, no Canvas) ({elementPrefabs.Count}):");
             sb.AppendLine();
             var byFolder = elementPrefabs
@@ -367,7 +589,7 @@ namespace clibridge4unity
                 {
                     var images = prefab.GetComponentsInChildren<Image>(true);
                     var buttons = prefab.GetComponentsInChildren<Button>(true);
-                    var tmps = prefab.GetComponentsInChildren<TMPro.TMP_Text>(true);
+                    var tmps = prefab.GetComponentsInChildren<TMP_Text>(true);
                     var toggles = prefab.GetComponentsInChildren<Toggle>(true);
                     var sliders = prefab.GetComponentsInChildren<Slider>(true);
 
@@ -381,7 +603,6 @@ namespace clibridge4unity
                     string info = parts.Count > 0 ? $"  ({string.Join(", ", parts)})" : "";
                     string name = Path.GetFileNameWithoutExtension(path);
 
-                    // Show root children as structure hint
                     var root = prefab.transform;
                     var childNames = Enumerable.Range(0, Mathf.Min(root.childCount, 5))
                         .Select(i => root.GetChild(i).name);
@@ -397,14 +618,22 @@ namespace clibridge4unity
             return sb.ToString().TrimEnd();
         }
 
-        private static string DiscoverUIScenes()
+        #endregion
+
+        #region Scenes
+
+        private static string DiscoverScenes()
         {
             var sb = new StringBuilder();
-            sb.AppendLine("Scenes with UI content:");
+            sb.AppendLine("Scenes:");
             sb.AppendLine();
 
             var sceneGuids = AssetDatabase.FindAssets("t:Scene", new[] { "Assets" });
             int uiSceneCount = 0;
+
+            // UI scenes first
+            var uiScenes = new List<string>();
+            var otherScenes = new List<string>();
 
             foreach (var guid in sceneGuids)
             {
@@ -423,39 +652,43 @@ namespace clibridge4unity
                     if (indicators.Count > 0)
                     {
                         uiSceneCount++;
-                        sb.AppendLine($"  {path}");
-                        sb.AppendLine($"    UI indicators: {string.Join(", ", indicators)}");
+                        uiScenes.Add($"  {path}  [{string.Join(", ", indicators)}]");
+                    }
+                    else
+                    {
+                        otherScenes.Add($"  {path}");
                     }
                 }
-                catch { /* skip unreadable scenes */ }
-            }
-
-            if (uiSceneCount == 0)
-                sb.AppendLine("  (no scenes with UI found)");
-
-            // Also list all scenes
-            if (sceneGuids.Length > uiSceneCount)
-            {
-                sb.AppendLine();
-                sb.AppendLine("Other scenes:");
-                foreach (var guid in sceneGuids)
+                catch
                 {
-                    var path = AssetDatabase.GUIDToAssetPath(guid);
-                    try
-                    {
-                        var sceneText = File.ReadAllText(path);
-                        if (!sceneText.Contains("Canvas"))
-                            sb.AppendLine($"  {path}");
-                    }
-                    catch
-                    {
-                        sb.AppendLine($"  {path}");
-                    }
+                    otherScenes.Add($"  {path}");
                 }
             }
+
+            if (uiScenes.Count > 0)
+            {
+                sb.AppendLine($"## With UI ({uiScenes.Count})");
+                foreach (var s in uiScenes)
+                    sb.AppendLine(s);
+                sb.AppendLine();
+            }
+
+            if (otherScenes.Count > 0)
+            {
+                sb.AppendLine($"## Other ({otherScenes.Count})");
+                foreach (var s in otherScenes)
+                    sb.AppendLine(s);
+            }
+
+            if (sceneGuids.Length == 0)
+                sb.AppendLine("  (no scenes found)");
 
             return sb.ToString().TrimEnd();
         }
+
+        #endregion
+
+        #region Fonts
 
         private static string DiscoverFonts()
         {
@@ -463,7 +696,6 @@ namespace clibridge4unity
             sb.AppendLine("Available Fonts:");
             sb.AppendLine();
 
-            // Regular fonts
             sb.AppendLine("## Unity Fonts (TTF/OTF)");
             var fontGuids = AssetDatabase.FindAssets("t:Font", new[] { "Assets" });
             foreach (var guid in fontGuids)
@@ -477,7 +709,6 @@ namespace clibridge4unity
                 sb.AppendLine("  (none)");
             sb.AppendLine();
 
-            // TMP fonts
             sb.AppendLine("## TextMeshPro Font Assets");
             var tmpGuids = AssetDatabase.FindAssets("t:TMP_FontAsset", new[] { "Assets" });
             foreach (var guid in tmpGuids)
@@ -485,17 +716,196 @@ namespace clibridge4unity
                 var path = AssetDatabase.GUIDToAssetPath(guid);
                 sb.AppendLine($"  {path}");
             }
-            // Also check Packages for TMP defaults
             var tmpPackageGuids = AssetDatabase.FindAssets("t:TMP_FontAsset", new[] { "Packages" });
             if (tmpPackageGuids.Length > 0)
-            {
                 sb.AppendLine($"  + {tmpPackageGuids.Length} built-in TMP fonts (in Packages/)");
-            }
             if (tmpGuids.Length == 0 && tmpPackageGuids.Length == 0)
                 sb.AppendLine("  (none)");
 
             return sb.ToString().TrimEnd();
         }
+
+        #endregion
+
+        #region Models
+
+        private static string DiscoverModels()
+        {
+            var sb = new StringBuilder();
+            var modelGuids = AssetDatabase.FindAssets("t:Model", new[] { "Assets" });
+
+            if (modelGuids.Length == 0)
+            {
+                sb.AppendLine("No model assets found.");
+                return sb.ToString().TrimEnd();
+            }
+
+            sb.AppendLine($"=== Models ({modelGuids.Length}) ===");
+            sb.AppendLine();
+
+            // Group by folder
+            var models = modelGuids
+                .Select(g => AssetDatabase.GUIDToAssetPath(g))
+                .OrderBy(p => p)
+                .ToList();
+
+            var byFolder = models
+                .GroupBy(p => Path.GetDirectoryName(p).Replace("\\", "/"))
+                .OrderBy(g => g.Key);
+
+            foreach (var group in byFolder)
+            {
+                sb.AppendLine($"## {group.Key}/");
+                foreach (var path in group)
+                {
+                    string name = Path.GetFileName(path);
+                    var subAssets = AssetDatabase.LoadAllAssetsAtPath(path);
+
+                    int meshCount = 0, matCount = 0, clipCount = 0;
+                    var meshNames = new List<string>();
+                    var matNames = new List<string>();
+                    var clipNames = new List<string>();
+
+                    foreach (var sub in subAssets)
+                    {
+                        if (sub == null) continue;
+                        if (sub is Mesh m)
+                        {
+                            meshCount++;
+                            if (meshNames.Count < 5) meshNames.Add(m.name);
+                        }
+                        else if (sub is Material mat)
+                        {
+                            matCount++;
+                            if (matNames.Count < 5) matNames.Add($"{mat.name} ({mat.shader?.name ?? "?"})");
+                        }
+                        else if (sub is AnimationClip clip && !clip.name.StartsWith("__preview__"))
+                        {
+                            clipCount++;
+                            if (clipNames.Count < 5) clipNames.Add($"{clip.name} ({clip.length:F1}s)");
+                        }
+                    }
+
+                    var parts = new List<string>();
+                    if (meshCount > 0) parts.Add($"{meshCount} mesh");
+                    if (matCount > 0) parts.Add($"{matCount} mat");
+                    if (clipCount > 0) parts.Add($"{clipCount} clip");
+
+                    sb.AppendLine($"  {name}  ({string.Join(", ", parts)})");
+
+                    if (meshNames.Count > 0 && meshCount <= 5)
+                        sb.AppendLine($"    Meshes: {string.Join(", ", meshNames)}");
+                    if (matNames.Count > 0)
+                    {
+                        foreach (var mn in matNames)
+                            sb.AppendLine($"    Mat: {mn}");
+                        if (matCount > 5)
+                            sb.AppendLine($"    ... +{matCount - 5} more materials");
+                    }
+                    if (clipNames.Count > 0)
+                    {
+                        foreach (var cn in clipNames)
+                            sb.AppendLine($"    Clip: {cn}");
+                        if (clipCount > 5)
+                            sb.AppendLine($"    ... +{clipCount - 5} more clips");
+                    }
+                }
+                sb.AppendLine();
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        #endregion
+
+        #region Variants
+
+        private static string DiscoverVariants()
+        {
+            var sb = new StringBuilder();
+            var prefabGuids = AssetDatabase.FindAssets("t:Prefab", new[] { "Assets" });
+
+            // Build base→variants map
+            var variantMap = new Dictionary<string, List<string>>(); // basePath → [variantPaths]
+            var allVariants = new HashSet<string>();
+
+            foreach (var guid in prefabGuids)
+            {
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                var go = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+                if (go == null) continue;
+
+                if (PrefabUtility.GetPrefabAssetType(go) != PrefabAssetType.Variant)
+                    continue;
+
+                allVariants.Add(path);
+
+                var baseObj = PrefabUtility.GetCorrespondingObjectFromSource(go);
+                if (baseObj == null) continue;
+
+                string basePath = AssetDatabase.GetAssetPath(baseObj);
+                if (string.IsNullOrEmpty(basePath)) continue;
+
+                if (!variantMap.TryGetValue(basePath, out var list))
+                {
+                    list = new List<string>();
+                    variantMap[basePath] = list;
+                }
+                list.Add(path);
+            }
+
+            if (variantMap.Count == 0)
+            {
+                sb.AppendLine("No prefab variants found.");
+                return sb.ToString().TrimEnd();
+            }
+
+            sb.AppendLine($"=== Prefab Variants ({allVariants.Count} variants from {variantMap.Count} bases) ===");
+            sb.AppendLine();
+
+            // Show trees: bases that are themselves variants form chains
+            foreach (var kvp in variantMap.OrderBy(k => k.Key))
+            {
+                string basePath = kvp.Key;
+                bool baseIsVariant = allVariants.Contains(basePath);
+                string marker = baseIsVariant ? " (variant)" : "";
+
+                sb.AppendLine($"  {basePath}{marker}");
+                foreach (var variant in kvp.Value.OrderBy(v => v))
+                {
+                    // Check if this variant is also a base for other variants
+                    bool hasChildren = variantMap.ContainsKey(variant);
+                    string arrow = hasChildren ? "├─▶" : "└──";
+                    sb.AppendLine($"    {arrow} {variant}");
+
+                    // Show overrides summary
+                    var variantGo = AssetDatabase.LoadAssetAtPath<GameObject>(variant);
+                    if (variantGo != null)
+                    {
+                        var overrides = PrefabUtility.GetObjectOverrides(variantGo, false);
+                        var addedComponents = PrefabUtility.GetAddedComponents(variantGo);
+                        var removedComponents = PrefabUtility.GetRemovedComponents(variantGo);
+                        var addedObjects = PrefabUtility.GetAddedGameObjects(variantGo);
+
+                        var changes = new List<string>();
+                        if (overrides.Count > 0) changes.Add($"{overrides.Count} override{(overrides.Count != 1 ? "s" : "")}");
+                        if (addedComponents.Count > 0) changes.Add($"+{addedComponents.Count} comp");
+                        if (removedComponents.Count > 0) changes.Add($"-{removedComponents.Count} comp");
+                        if (addedObjects.Count > 0) changes.Add($"+{addedObjects.Count} obj");
+
+                        if (changes.Count > 0)
+                            sb.AppendLine($"         ({string.Join(", ", changes)})");
+                    }
+                }
+                sb.AppendLine();
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        #endregion
+
+        #region Helpers
 
         private static string FindCommonPrefix(string[] paths)
         {
@@ -517,10 +927,30 @@ namespace clibridge4unity
                 }
             }
 
-            // Trim back to last /
             var prefix = first.Substring(0, prefixLen);
             int lastSlash = prefix.LastIndexOf('/');
             return lastSlash >= 0 ? prefix.Substring(0, lastSlash + 1) : "";
         }
+
+        private static string TrimPrefix(string path, string prefix)
+        {
+            return !string.IsNullOrEmpty(prefix) && path.StartsWith(prefix)
+                ? path.Substring(prefix.Length)
+                : path;
+        }
+
+        private static void AppendColumns(StringBuilder sb, string[] names, int cols, int colWidth, int maxItems = 0)
+        {
+            int limit = maxItems > 0 ? Math.Min(names.Length, maxItems) : names.Length;
+            for (int i = 0; i < limit; i += cols)
+            {
+                var batch = names.Skip(i).Take(cols).Select(n => n.PadRight(colWidth));
+                sb.AppendLine($"    {string.Join("", batch)}");
+            }
+            if (maxItems > 0 && names.Length > maxItems)
+                sb.AppendLine($"    ... and {names.Length - maxItems} more");
+        }
+
+        #endregion
     }
 }

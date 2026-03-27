@@ -106,11 +106,11 @@ tool_claude_unity_bridge/
 │   │       ├── Scene/         # Scene manipulation, play mode, windows
 │   │       ├── Prefab/        # Prefab creation/instantiation
 │   │       ├── Component/     # Component inspection & modification
-│   │       ├── Asset/         # Asset search
+│   │       ├── Asset/         # Asset search, move, copy, delete, labels
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
-│   │       └── UI/            # UI_DISCOVER, SCREENSHOT
+│   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.0.11)
+│   └── package.json           # UPM manifest (v1.0.12)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -265,10 +265,15 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 
 ### Asset
 - `ASSET_SEARCH query` - Search assets using Unity Search syntax
+- `ASSET_DISCOVER [category]` - Discover assets (ui, sprites, prefabs, scenes, fonts, shaders, materials, models, variants)
+- `ASSET_MOVE src dst` - Move/rename assets (preserves GUIDs), supports multi-source to folder
+- `ASSET_COPY src dst` - Copy assets, supports multi-source to folder
+- `ASSET_DELETE path [path2...]` - Delete assets (batch)
+- `ASSET_MKDIR path [path2...]` - Create folders (nested, batch)
+- `ASSET_LABEL path [+add -remove]` - Get/set asset labels
 
 ### UI
-- `UI_DISCOVER [filter]` - Discover sprites, fonts, prefabs, scenes
-- `SCREENSHOT Assets/path  - Render prefab/UXML to PNG
+- `SCREENSHOT Assets/path` - Render prefab/UXML to PNG
 
 ### CLI-side (no Unity connection needed)
 - `SETUP` - Install UPM package + verify Unity + generate CLAUDE.md (alias: `INSTALL`)

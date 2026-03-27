@@ -562,18 +562,30 @@ namespace clibridge4unity
             var canvas = prefab.GetComponentInChildren<Canvas>(true);
             if (canvas != null)
             {
-                // Auto-size: use the Canvas's RectTransform size
                 if (width <= 0 || height <= 0)
                 {
                     var canvasRect = prefab.GetComponent<RectTransform>();
-                    if (canvasRect != null && canvasRect.rect.width > 1 && canvasRect.rect.height > 1)
+                    // Check for explicit size (not stretch-anchored)
+                    if (canvasRect != null && canvasRect.rect.width > 1 && canvasRect.rect.height > 1
+                        && (canvasRect.anchorMin != Vector2.zero || canvasRect.anchorMax != Vector2.one))
                     {
                         width = Mathf.CeilToInt(canvasRect.rect.width);
                         height = Mathf.CeilToInt(canvasRect.rect.height);
                     }
                     else
                     {
-                        width = 1920; height = 1080;
+                        // Check CanvasScaler reference resolution
+                        var scaler = prefab.GetComponent<CanvasScaler>();
+                        if (scaler != null && scaler.uiScaleMode == CanvasScaler.ScaleMode.ScaleWithScreenSize
+                            && scaler.referenceResolution.x > 1 && scaler.referenceResolution.y > 1)
+                        {
+                            width = Mathf.CeilToInt(scaler.referenceResolution.x);
+                            height = Mathf.CeilToInt(scaler.referenceResolution.y);
+                        }
+                        else
+                        {
+                            width = 1920; height = 1080;
+                        }
                     }
                 }
                 return RenderUIPrefab(prefab, prefabPath, width, height);
@@ -604,12 +616,21 @@ namespace clibridge4unity
             var canvas = instance.GetComponentInChildren<Canvas>(true);
             canvas.renderMode = RenderMode.ScreenSpaceCamera;
 
+            // Ensure CanvasScaler matches our render resolution
+            var scaler = instance.GetComponent<CanvasScaler>();
+            if (scaler == null) scaler = instance.AddComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(width, height);
+            scaler.matchWidthOrHeight = 0.5f;
+
             var camGo = new GameObject("__RENDER_CAM__");
             camGo.hideFlags = HideFlags.HideAndDontSave;
             var cam = camGo.AddComponent<Camera>();
             cam.clearFlags = CameraClearFlags.SolidColor;
             cam.backgroundColor = new Color(0.12f, 0.12f, 0.12f, 1f);
             cam.orthographic = true;
+            cam.orthographicSize = height * 0.5f;
+            cam.aspect = (float)width / height;
             cam.nearClipPlane = 0.1f;
             cam.farClipPlane = 100f;
             canvas.worldCamera = cam;
@@ -620,6 +641,7 @@ namespace clibridge4unity
 
             try
             {
+                Canvas.ForceUpdateCanvases();
                 cam.Render();
                 return ReadRtAndSave(rt, width, height, "render_ui",
                     $"Rendered UI prefab: {prefabPath}");
@@ -641,7 +663,10 @@ namespace clibridge4unity
             canvasGo.hideFlags = HideFlags.HideAndDontSave;
             var canvas = canvasGo.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceCamera;
-            canvasGo.AddComponent<CanvasScaler>();
+            var scaler = canvasGo.AddComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(width, height);
+            scaler.matchWidthOrHeight = 0.5f;
             canvasGo.AddComponent<GraphicRaycaster>();
 
             var instance = UnityEngine.Object.Instantiate(prefab, canvasGo.transform);
@@ -654,7 +679,6 @@ namespace clibridge4unity
                 instanceRect.anchorMin = new Vector2(0.5f, 0.5f);
                 instanceRect.anchorMax = new Vector2(0.5f, 0.5f);
                 instanceRect.anchoredPosition = Vector2.zero;
-                // Keep the prefab's original sizeDelta (natural size)
             }
 
             var camGo = new GameObject("__RENDER_CAM__");
@@ -663,8 +687,10 @@ namespace clibridge4unity
             cam.clearFlags = CameraClearFlags.SolidColor;
             cam.backgroundColor = new Color(0.12f, 0.12f, 0.12f, 1f);
             cam.orthographic = true;
+            cam.orthographicSize = height * 0.5f; // match render target so 1 unit = 1 pixel
             cam.nearClipPlane = 0.1f;
             cam.farClipPlane = 100f;
+            cam.aspect = (float)width / height;
             canvas.worldCamera = cam;
 
             var rt = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32);
@@ -694,15 +720,26 @@ namespace clibridge4unity
             var instance = UnityEngine.Object.Instantiate(prefab);
             instance.hideFlags = HideFlags.HideAndDontSave;
 
-            var renderers = instance.GetComponentsInChildren<Renderer>();
+            var renderers = instance.GetComponentsInChildren<Renderer>(true);
             if (renderers.Length == 0)
             {
                 UnityEngine.Object.DestroyImmediate(instance);
                 return Response.Error($"No renderers in prefab: {prefabPath}");
             }
 
-            var bounds = renderers[0].bounds;
-            foreach (var r in renderers.Skip(1))
+            // Enable disabled renderers temporarily so bounds are accurate
+            var wasDisabled = new List<Renderer>();
+            foreach (var r in renderers)
+            {
+                if (!r.enabled) { r.enabled = true; wasDisabled.Add(r); }
+            }
+
+            // Compute bounds, filtering outliers (e.g. far-flung collider children)
+            var validRenderers = renderers.Where(r => r is MeshRenderer || r is SkinnedMeshRenderer || r is SpriteRenderer).ToArray();
+            if (validRenderers.Length == 0) validRenderers = renderers;
+
+            var bounds = validRenderers[0].bounds;
+            foreach (var r in validRenderers.Skip(1))
                 bounds.Encapsulate(r.bounds);
 
             var camGo = new GameObject("__RENDER_CAM__");
@@ -710,9 +747,13 @@ namespace clibridge4unity
             var cam = camGo.AddComponent<Camera>();
             cam.clearFlags = CameraClearFlags.SolidColor;
             cam.backgroundColor = new Color(0.15f, 0.15f, 0.15f, 1f);
-            cam.fieldOfView = 30f;
             cam.nearClipPlane = 0.01f;
             cam.farClipPlane = 1000f;
+
+            // Use FOV that matches the aspect ratio to fully frame the object
+            float aspect = (float)width / height;
+            float fov = 30f;
+            cam.fieldOfView = fov;
 
             var lightGo = new GameObject("__RENDER_LIGHT__");
             lightGo.hideFlags = HideFlags.HideAndDontSave;
@@ -727,8 +768,22 @@ namespace clibridge4unity
 
             string[] angleNames = { "front", "front_right", "right", "back_right", "back", "back_left", "left", "front_left" };
             float[] angles = { 0, 45, 90, 135, 180, 225, 270, 315 };
-            float dist = bounds.extents.magnitude * 3.5f;
+
+            // Calculate distance to fully frame the object for the given FOV and aspect ratio
             var center = bounds.center;
+            float halfFovRad = fov * 0.5f * Mathf.Deg2Rad;
+            float verticalHalfAngle = halfFovRad;
+            float horizontalHalfAngle = Mathf.Atan(Mathf.Tan(halfFovRad) * aspect);
+
+            // Distance needed to fit each axis
+            float distForHeight = bounds.extents.y / Mathf.Tan(verticalHalfAngle);
+            float distForWidth = bounds.extents.x / Mathf.Tan(horizontalHalfAngle);
+            float distForDepth = bounds.extents.z / Mathf.Tan(Mathf.Min(verticalHalfAngle, horizontalHalfAngle));
+
+            // Use the largest required distance + padding for the diagonal extent
+            float dist = Mathf.Max(distForHeight, Mathf.Max(distForWidth, distForDepth)) * 1.3f;
+            // Floor: don't get closer than 2x the largest extent (avoids clipping on thin objects)
+            dist = Mathf.Max(dist, bounds.extents.magnitude * 2f);
             var outputPaths = new StringBuilder();
 
             try

@@ -52,13 +52,14 @@ Run `SETUP` again after updates to regenerate the docs. The generated `CLAUDE.md
 
 | Category | Commands |
 |----------|----------|
-| **Core** | `PING` `STATUS` `HELP` `COMPILE` `REFRESH` `LOG` `STACK_MINIMIZE` |
+| **Core** | `PING` `PROBE` `DIAG` `STATUS` `HELP` `COMPILE` `REFRESH` `LOG` `STACK_MINIMIZE` |
 | **Code** | `CODE_SEARCH` `CODE_ANALYZE` `CODE_EXEC` `CODE_EXEC_RETURN` `TEST` |
-| **Scene** | `SCENE` `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `SCENEVIEW` `GAMEVIEW` `WINDOWS` |
+| **Scene** | `SCENE` `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `PLAYMODE` `SCENEVIEW` `GAMEVIEW` `WINDOWS` |
 | **Prefab** | `PREFAB_CREATE` `PREFAB_INSTANTIATE` `PREFAB_HIERARCHY` `PREFAB_SAVE` |
 | **Component** | `INSPECTOR` `COMPONENT_SET` `COMPONENT_ADD` `COMPONENT_REMOVE` |
-| **Asset & UI** | `ASSET_SEARCH` `UI_DISCOVER` |
-| **CLI-side** | `SETUP` `SCREENSHOT` `DISMISS` |
+| **Asset** | `ASSET_SEARCH` `ASSET_DISCOVER` `ASSET_MOVE` `ASSET_COPY` `ASSET_DELETE` `ASSET_MKDIR` `ASSET_LABEL` |
+| **UI** | `SCREENSHOT` |
+| **CLI-side** | `SETUP` `SCREENSHOT` `WAKEUP` `DISMISS` |
 
 Run `clibridge4unity HELP` for full usage details.
 
