@@ -213,37 +213,49 @@ namespace clibridge4unity
         /// <summary>
         /// Inspect a GameObject's components and their serialized fields.
         /// </summary>
-        [BridgeCommand("INSPECTOR", "Get component details for a GameObject",
+        [BridgeCommand("INSPECTOR", "Inspect a scene GameObject or any asset (prefab, material, shader, ScriptableObject, etc.)",
             Category = "Component",
-            Usage = "INSPECTOR Canvas/Panel  OR  INSPECTOR {\"gameObject\":\"Canvas/Panel\",\"component\":\"Transform\"}",
+            Usage = "INSPECTOR Canvas/Panel                              (scene GameObject)\n" +
+                    "  INSPECTOR Assets/Prefabs/My.prefab                  (prefab asset)\n" +
+                    "  INSPECTOR Assets/Materials/My.mat                   (material)\n" +
+                    "  INSPECTOR Assets/Data/Config.asset                  (ScriptableObject)\n" +
+                    "  INSPECTOR {\"gameObject\":\"Panel\",\"component\":\"Image\"}  (filter component)",
             RequiresMainThread = true)]
         public static string Inspector(string data)
         {
             try
             {
-                string gameObjectPath;
+                string targetPath;
                 string filterComponent = null;
 
                 if (data.TrimStart().StartsWith("{"))
                 {
                     var json = JObject.Parse(data);
-                    gameObjectPath = json["gameObject"]?.ToString();
+                    targetPath = json["gameObject"]?.ToString() ?? json["asset"]?.ToString();
                     filterComponent = json["component"]?.ToString();
                 }
                 else
                 {
-                    gameObjectPath = data.Trim();
+                    targetPath = data.Trim();
                 }
 
-                if (string.IsNullOrEmpty(gameObjectPath))
-                    return Response.Error("GameObject path is required");
+                if (string.IsNullOrEmpty(targetPath))
+                    return Response.Error("Path is required");
 
-                var go = GameObject.Find(gameObjectPath);
+                // Asset path → inspect asset directly
+                if (targetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
+                 || targetPath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
+                {
+                    return InspectAsset(targetPath, filterComponent);
+                }
+
+                // Scene GameObject
+                var go = GameObject.Find(targetPath);
                 if (go == null)
-                    return Response.Error($"GameObject not found: {gameObjectPath}");
+                    return Response.Error($"GameObject not found: {targetPath}");
 
                 var sb = new System.Text.StringBuilder();
-                sb.AppendLine($"GameObject: {gameObjectPath}");
+                sb.AppendLine($"GameObject: {targetPath}");
                 sb.AppendLine($"active: {go.activeSelf}");
                 sb.AppendLine($"layer: {LayerMask.LayerToName(go.layer)}");
                 sb.AppendLine($"tag: {go.tag}");
@@ -279,6 +291,90 @@ namespace clibridge4unity
             catch (Exception ex)
             {
                 return Response.Exception(ex);
+            }
+        }
+
+        private static string InspectAsset(string assetPath, string filterComponent)
+        {
+            var asset = AssetDatabase.LoadMainAssetAtPath(assetPath);
+            if (asset == null)
+                return Response.Error($"Asset not found: {assetPath}");
+
+            // Prefab → inspect like a GameObject (components)
+            if (asset is GameObject go)
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"Prefab: {assetPath}");
+                sb.AppendLine($"active: {go.activeSelf}");
+                sb.AppendLine($"layer: {LayerMask.LayerToName(go.layer)}");
+                sb.AppendLine($"tag: {go.tag}");
+                var prefabType = PrefabUtility.GetPrefabAssetType(go);
+                sb.AppendLine($"prefabType: {prefabType}");
+                if (prefabType == PrefabAssetType.Variant)
+                {
+                    var source = PrefabUtility.GetCorrespondingObjectFromSource(go);
+                    if (source != null)
+                        sb.AppendLine($"basePrefab: {AssetDatabase.GetAssetPath(source)}");
+                }
+                sb.AppendLine($"children: {go.transform.childCount}");
+                sb.AppendLine("---");
+
+                foreach (var comp in go.GetComponents<Component>())
+                {
+                    if (comp == null) continue;
+                    string typeName = comp.GetType().Name;
+                    if (!string.IsNullOrEmpty(filterComponent) &&
+                        !typeName.Equals(filterComponent, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    sb.AppendLine($"[{typeName}]");
+                    var so = new SerializedObject(comp);
+                    var prop = so.GetIterator();
+                    if (prop.NextVisible(true))
+                    {
+                        do
+                        {
+                            sb.AppendLine($"  {prop.name}: {GetPropertyValue(prop)}");
+                        } while (prop.NextVisible(false));
+                    }
+                    sb.AppendLine();
+                }
+                return sb.ToString().TrimEnd();
+            }
+
+            // Any other asset (ScriptableObject, Material, Shader, Texture, AudioClip, etc.)
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"Asset: {assetPath}");
+                sb.AppendLine($"type: {asset.GetType().Name}");
+                sb.AppendLine($"name: {asset.name}");
+
+                // Sub-assets (e.g. FBX contains meshes, materials, clips)
+                var subAssets = AssetDatabase.LoadAllAssetsAtPath(assetPath);
+                if (subAssets.Length > 1)
+                {
+                    var subs = subAssets.Where(s => s != null && s != asset).ToList();
+                    sb.AppendLine($"subAssets: {subs.Count}");
+                    foreach (var sub in subs.Take(20))
+                        sb.AppendLine($"  [{sub.GetType().Name}] {sub.name}");
+                    if (subs.Count > 20)
+                        sb.AppendLine($"  ... +{subs.Count - 20} more");
+                }
+                sb.AppendLine("---");
+
+                // Serialized properties
+                sb.AppendLine($"[{asset.GetType().Name}]");
+                var serialized = new SerializedObject(asset);
+                var iter = serialized.GetIterator();
+                if (iter.NextVisible(true))
+                {
+                    do
+                    {
+                        sb.AppendLine($"  {iter.name}: {GetPropertyValue(iter)}");
+                    } while (iter.NextVisible(false));
+                }
+
+                return sb.ToString().TrimEnd();
             }
         }
 
