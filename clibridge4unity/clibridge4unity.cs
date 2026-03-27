@@ -263,6 +263,122 @@ class Program
         return json.Substring(start, end - start);
     }
 
+    // ───────────────────── Self-Update ─────────────────────
+
+    static int HandleSelfUpdate()
+    {
+        Console.WriteLine($"clibridge4unity v{CLI_VERSION} — checking for updates...");
+
+        try
+        {
+            // Fetch latest release info
+            using var http = new HttpClient();
+            http.DefaultRequestHeaders.Add("User-Agent", "clibridge4unity");
+            string json = http.GetStringAsync(
+                $"https://api.github.com/repos/{GITHUB_REPO}/releases/latest").Result;
+
+            string latestVersion = ExtractJsonString(json, "tag_name")?.TrimStart('v');
+            if (string.IsNullOrEmpty(latestVersion))
+            {
+                Console.Error.WriteLine("Error: Could not determine latest version.");
+                return 1;
+            }
+
+            if (!Version.TryParse(latestVersion, out var latest) || !Version.TryParse(CLI_VERSION, out var current))
+            {
+                Console.Error.WriteLine($"Error: Could not parse versions (current={CLI_VERSION}, latest={latestVersion})");
+                return 1;
+            }
+
+            if (latest <= current)
+            {
+                Console.WriteLine($"Already up to date (v{CLI_VERSION}).");
+                return 0;
+            }
+
+            Console.WriteLine($"Updating v{CLI_VERSION} → v{latestVersion}...");
+
+            // Find the exe download URL from release assets
+            string exeUrl = null;
+            int searchStart = 0;
+            while (true)
+            {
+                int urlIdx = json.IndexOf("\"browser_download_url\"", searchStart, StringComparison.Ordinal);
+                if (urlIdx < 0) break;
+                string url = ExtractJsonString(json.Substring(urlIdx), "browser_download_url");
+                if (url != null && url.EndsWith("clibridge4unity.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    exeUrl = url;
+                    break;
+                }
+                searchStart = urlIdx + 1;
+            }
+
+            if (exeUrl == null)
+            {
+                Console.Error.WriteLine("Error: Could not find exe in release assets.");
+                Console.Error.WriteLine($"  Run: irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
+                return 1;
+            }
+
+            // Download to temp file
+            string installDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".clibridge4unity");
+            string exePath = Path.Combine(installDir, "clibridge4unity.exe");
+            string tempPath = exePath + ".update";
+
+            Console.WriteLine($"Downloading from GitHub...");
+            byte[] exeBytes = http.GetByteArrayAsync(exeUrl).Result;
+            Directory.CreateDirectory(installDir);
+            File.WriteAllBytes(tempPath, exeBytes);
+
+            // Replace current exe: rename current → .old, rename .update → current
+            string oldPath = exePath + ".old";
+            if (File.Exists(oldPath)) File.Delete(oldPath);
+
+            if (File.Exists(exePath))
+                File.Move(exePath, oldPath);
+            File.Move(tempPath, exePath);
+
+            // Clean up old exe
+            try { if (File.Exists(oldPath)) File.Delete(oldPath); } catch { }
+
+            Console.WriteLine($"Updated to v{latestVersion}");
+            Console.WriteLine($"  {exePath}");
+
+            // Also update UPM package in current project if we can detect one
+            string projectPath = AutoDetectProjectPath();
+            if (projectPath != null)
+            {
+                string manifestPath = Path.Combine(projectPath, "Packages", "manifest.json");
+                if (File.Exists(manifestPath))
+                {
+                    string manifest = File.ReadAllText(manifestPath);
+                    if (manifest.Contains($"\"{UPM_PACKAGE_NAME}\""))
+                    {
+                        string oldUrl = $"#v{CLI_VERSION}";
+                        string newUrl = $"#v{latestVersion}";
+                        if (manifest.Contains(oldUrl))
+                        {
+                            manifest = manifest.Replace(oldUrl, newUrl);
+                            File.WriteAllText(manifestPath, manifest);
+                            Console.WriteLine($"  Updated UPM package tag in manifest.json → v{latestVersion}");
+                        }
+                    }
+                }
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.GetType().Name}: {ex.Message}");
+            Console.Error.WriteLine($"  Run: irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
+            return 1;
+        }
+    }
+
     // ───────────────────── Entry Point ─────────────────────
 
     static int Main(string[] args)
@@ -352,9 +468,15 @@ class Program
         // Skip for fast commands: PING, PROBE, DIAG, DISMISS, SCREENSHOT
         string cmdUpper = command.ToUpperInvariant();
         if (cmdUpper != "PING" && cmdUpper != "PROBE" && cmdUpper != "DIAG" &&
-            cmdUpper != "DISMISS" && cmdUpper != "SCREENSHOT")
+            cmdUpper != "DISMISS" && cmdUpper != "SCREENSHOT" && cmdUpper != "UPDATE")
         {
             CheckForUpdateInBackground();
+        }
+
+        // UPDATE: self-update CLI (no Unity needed)
+        if (cmdUpper == "UPDATE")
+        {
+            return HandleSelfUpdate();
         }
 
         // Auto-detect project path if not specified
@@ -586,8 +708,9 @@ class Program
         Console.Error.WriteLine("  --log-filter <filter>   Log filter for --wait: errors (default), warnings, all");
         Console.Error.WriteLine("  --version               Show version information");
         Console.Error.WriteLine();
-        Console.Error.WriteLine("Setup:");
+        Console.Error.WriteLine("Setup & Update:");
         Console.Error.WriteLine("  clibridge4unity SETUP                      # Install UPM package + CLAUDE.md");
+        Console.Error.WriteLine("  clibridge4unity UPDATE                     # Self-update CLI + UPM package");
         Console.Error.WriteLine();
         Console.Error.WriteLine("Examples:");
         Console.Error.WriteLine("  clibridge4unity PING                       # Auto-detect project");

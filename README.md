@@ -97,7 +97,7 @@ The generated `CLAUDE.md` tells AI assistants which commands are available, when
 | **Component** | `INSPECTOR` `COMPONENT_SET` `COMPONENT_ADD` `COMPONENT_REMOVE` |
 | **Asset** | `ASSET_SEARCH` `ASSET_DISCOVER` `ASSET_MOVE` `ASSET_COPY` `ASSET_DELETE` `ASSET_MKDIR` `ASSET_LABEL` |
 | **UI** | `SCREENSHOT` |
-| **CLI-side** | `SETUP` `SCREENSHOT` `WAKEUP` `DISMISS` |
+| **CLI-side** | `SETUP` `UPDATE` `SCREENSHOT` `WAKEUP` `DISMISS` |
 
 Run `clibridge4unity HELP` for full usage details.
 
