@@ -1,6 +1,6 @@
 # CLI Bridge for Unity
 
-A CLI tool for automating Unity Editor via Named Pipes. Send commands from your terminal, scripts, or AI tools (like Claude).
+A CLI tool for automating Unity Editor via Named Pipes. Send commands from your terminal, scripts, or AI assistants like Claude.
 
 ## Install
 
@@ -16,37 +16,75 @@ clibridge4unity SETUP
 
 This installs the UPM package and generates a `CLAUDE.md` for AI-assisted development.
 
-## What AI Assistants Can Do
+## What It Does
 
-### Execute C# (built-in Roslyn compiler — no COMPILE needed)
+### Execute C# in Unity (built-in Roslyn compiler)
 ```bash
-clibridge4unity CODE_EXEC "Debug.Log(42)"       # Run C# in Unity (fire-and-forget)
-clibridge4unity CODE_EXEC_RETURN "return 1+1"   # Run C# and get the result back
+clibridge4unity CODE_EXEC "Debug.Log(42)"       # Fire-and-forget
+clibridge4unity CODE_EXEC_RETURN "return 1+1"   # Get the result back
 clibridge4unity CODE_EXEC @script.cs            # Run from file (no size limit)
 ```
-CODE_EXEC runs on a background thread — works even when Unity's main thread is busy.
+CODE_EXEC has its own Roslyn compiler — no COMPILE needed, works even when Unity's main thread is busy.
 
-### Search & Navigate Code
+### Search & Analyze Code
 ```bash
-clibridge4unity CODE_SEARCH class:PlayerController          # Find types, methods, fields
-clibridge4unity CODE_SEARCH inherits:MonoBehaviour           # Inheritance search
-clibridge4unity CODE_ANALYZE PlayerController                # Class overview
-clibridge4unity CODE_ANALYZE PlayerController.TakeDamage     # Member details
+clibridge4unity CODE_SEARCH class:PlayerController      # Find types
+clibridge4unity CODE_SEARCH inherits:MonoBehaviour       # Inheritance search
+clibridge4unity CODE_SEARCH method:TakeDamage            # Find methods
+clibridge4unity CODE_ANALYZE PlayerController            # Class overview with doc comments
+clibridge4unity CODE_ANALYZE PlayerController.TakeDamage # Member details + callers
 ```
 
-### Inspect & Modify the Scene
+### Inspect Anything
 ```bash
-clibridge4unity INSPECTOR Player                            # All components and fields
+clibridge4unity INSPECTOR Player                              # Scene GameObject
+clibridge4unity INSPECTOR Assets/Prefabs/Enemy.prefab         # Prefab asset
+clibridge4unity INSPECTOR Assets/Data/GameConfig.asset        # ScriptableObject
+clibridge4unity INSPECTOR Assets/Materials/Metal.mat          # Material properties
+```
+INSPECTOR uses `SerializedObject` — shows every field the Unity Inspector would show.
+
+### Discover Project Assets
+```bash
+clibridge4unity ASSET_DISCOVER                   # Summary of all asset types
+clibridge4unity ASSET_DISCOVER ui                # Sprites, fonts, UI prefabs
+clibridge4unity ASSET_DISCOVER materials         # Materials grouped by shader
+clibridge4unity ASSET_DISCOVER shaders:URP       # Shaders matching a filter
+clibridge4unity ASSET_DISCOVER models            # FBX/OBJ with sub-assets
+clibridge4unity ASSET_DISCOVER variants          # Prefab variant inheritance chains
+```
+
+### Manage Assets (preserves GUID references)
+```bash
+clibridge4unity ASSET_MOVE Assets/Old.prefab Assets/New/          # Move (single or batch)
+clibridge4unity ASSET_COPY Assets/A.prefab Assets/B.prefab        # Copy
+clibridge4unity ASSET_DELETE Assets/Unused.mat                    # Delete
+clibridge4unity ASSET_MKDIR Assets/Art/Textures/UI                # Create folders
+clibridge4unity ASSET_LABEL Assets/Enemy.prefab +Boss +Spawnable  # Tag with labels
+```
+
+### Scene & Play Mode
+```bash
+clibridge4unity SCENE                            # Full hierarchy
+clibridge4unity CREATE MyObject                  # Create GameObject
 clibridge4unity COMPONENT_SET Player Transform position "(1,2,3)"
-clibridge4unity SCENE                                       # Full hierarchy
-clibridge4unity SCREENSHOT scene                            # Capture editor windows
+clibridge4unity PLAY                             # Enter play mode
+clibridge4unity SCREENSHOT scene                 # Capture editor windows
+clibridge4unity SCREENSHOT Assets/UI/Menu.prefab # Render prefab to PNG
+```
+
+### Diagnostics (no main thread needed)
+```bash
+clibridge4unity DIAG                # Thread state, HWND, sync context
+clibridge4unity STATUS              # Compile state, play mode, version
+clibridge4unity LOG errors          # Unity console errors
 ```
 
 ### AI Setup
 ```bash
-clibridge4unity SETUP       # Generates CLAUDE.md with tool reference for AI assistants
+clibridge4unity SETUP    # Installs UPM package + generates CLAUDE.md for AI assistants
 ```
-Run `SETUP` again after updates to regenerate the docs. The generated `CLAUDE.md` tells AI assistants which commands are available, when to use COMPILE vs CODE_EXEC, and how to handle busy/timeout errors.
+The generated `CLAUDE.md` tells AI assistants which commands are available, when to use COMPILE vs CODE_EXEC, and how to handle busy/timeout errors. Run `SETUP` again after updates to regenerate.
 
 ## All Commands
 
@@ -62,6 +100,31 @@ Run `SETUP` again after updates to regenerate the docs. The generated `CLAUDE.md
 | **CLI-side** | `SETUP` `SCREENSHOT` `WAKEUP` `DISMISS` |
 
 Run `clibridge4unity HELP` for full usage details.
+
+## How It Works
+
+The CLI communicates with Unity Editor through Named Pipes. The Unity-side package registers commands via `[BridgeCommand]` attributes — no manual wiring needed.
+
+```
+Terminal / AI                    Unity Editor
+┌──────────────┐    Named Pipe    ┌──────────────┐
+│ clibridge4   │ ──────────────── │ BridgeServer │
+│ unity.exe    │  COMMAND|data\n  │ (EditorOnly) │
+└──────────────┘                  └──────┬───────┘
+                                         │
+                                  CommandRegistry
+                                   auto-discovers
+                                  [BridgeCommand]
+                                   attributes in
+                                  clibridge4unity.*
+                                    assemblies
+```
+
+Key design decisions:
+- **Speed first** — CLI detects Unity state via process list and window titles before even connecting
+- **Background-safe** — uses `SynchronizationContext` + `PostMessage(WM_NULL)` to wake Unity when minimized
+- **Compile-error aware** — commands fail fast with error details instead of hanging
+- **Dual code execution** — CODE_EXEC uses bundled Roslyn (background thread), COMPILE uses Unity's pipeline (main thread)
 
 ## Development
 
@@ -100,61 +163,15 @@ dotnet test
 
 Tests require Unity Editor running with `UnityTestProject` open and the bridge package compiled.
 
-### Git Workflow
-
-The project uses a single `main` branch with version tags:
-
-```
-main ──●──●──●──●── (all development)
-       │     │
-     v1.0.8  v1.0.10
-```
-
-- All commits go directly to `main`
-- Each release is a git tag (`v1.0.10`, `v1.0.11`, etc.)
-- No feature branches or PRs required — this is a solo-dev workflow
-
-### Versioning
-
-Version is tracked in multiple files, all kept in sync:
-
-| File | Field |
-|------|-------|
-| `clibridge4unity/clibridge4unity.csproj` | `<Version>` **(source of truth)** |
-| `Package/package.json` | `"version"` |
-| `Package/Editor/Core/BridgeServer.cs` | `Version` const |
-
-The UPM package is installed via git URL with a version tag:
-```
-https://github.com/oddgames/clibridge4unity.git?path=Package#v1.0.10
-```
-
 ### Releasing
 
-Releases are automated via the deploy script:
+Releases are automated:
 
 ```bash
-# Patch bump (1.0.10 → 1.0.11), build, tag, push, create GitHub release
-python .claude/scripts/deploy.py 1.0.11
-
-# Or use the Claude Code slash command which handles version bumping too:
-# /deploy        — patch bump
-# /deploy minor  — minor bump (1.0.10 → 1.1.0)
-# /deploy check  — dry run
+python .claude/scripts/deploy.py 1.0.15   # Build, tag, push, release
 ```
 
-The deploy script:
-1. Builds the CLI (`dotnet publish`)
-2. Verifies the version matches in all files
-3. Packages the binary into a zip
-4. Commits and pushes to `main`
-5. Creates a git tag (`v1.0.11`)
-6. Creates a GitHub Release with the zip attached
-7. Updates the local CLI installation
-
-### Update Mechanism
-
-The CLI checks GitHub Releases in the background and notifies users when a new version is available. Checks are throttled to once per 30 minutes and cached in `~/.clibridge4unity/.last_update_check`.
+The CLI checks GitHub Releases in the background and notifies users when a new version is available.
 
 ## Requirements
 
