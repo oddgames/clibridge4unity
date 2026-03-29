@@ -161,14 +161,16 @@ namespace clibridge4unity
             if (EditorApplication.isPlaying)
                 return Response.Error("Cannot compile during play mode. Use STOP first.");
 
-            // Disable auto-refresh so Unity doesn't double-reload when it regains focus
-            // Re-enabled after domain reload in BridgeServer's [InitializeOnLoad] constructor
-            EditorPrefs.SetInt("kAutoRefreshMode", 0);
-            SessionState.SetBool("Bridge_RestoreAutoRefresh", true);
+            // Refresh first so Unity's file tracker is up to date — this prevents
+            // a second compile when Unity regains focus (auto-refresh on focus).
+            // Refresh detects changed .cs files and triggers compilation automatically.
+            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
 
-            CompilationPipeline.RequestScriptCompilation();
+            // If refresh didn't trigger compilation (e.g. no file changes detected),
+            // force it explicitly
+            if (!EditorApplication.isCompiling)
+                CompilationPipeline.RequestScriptCompilation();
 
-            // Force Unity to process the compilation request even when in background
             EditorApplication.QueuePlayerLoopUpdate();
 
             return Response.SuccessWithData(new
