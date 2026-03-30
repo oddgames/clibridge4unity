@@ -184,6 +184,36 @@ namespace clibridge4unity
             return Response.Success($"{path}: {string.Join(", ", current)}");
         }
 
+        [BridgeCommand("ASSET_RESERIALIZE", "Force re-validate and re-import assets (fixes corrupted YAML)",
+            Category = "Asset",
+            Usage = "ASSET_RESERIALIZE                              (entire project)\n" +
+                    "  ASSET_RESERIALIZE Assets/Prefabs/My.prefab     (specific asset)\n" +
+                    "  ASSET_RESERIALIZE Assets/A.prefab Assets/B.mat (batch)",
+            RequiresMainThread = true)]
+        public static string Reserialize(string data)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(data))
+                {
+                    AssetDatabase.ForceReserializeAssets();
+                    return Response.Success("Reserialized entire project");
+                }
+
+                var paths = data.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var p in paths)
+                    if (!AssetDatabase.AssetPathExists(p) && !AssetDatabase.IsValidFolder(p))
+                        return Response.Error($"Asset not found: {p}");
+
+                AssetDatabase.ForceReserializeAssets(paths);
+                return Response.Success($"Reserialized {paths.Length} asset(s)");
+            }
+            catch (Exception ex)
+            {
+                return Response.Exception(ex);
+            }
+        }
+
         #region GameObject Copy
 
         static bool IsGameObjectPath(string path)

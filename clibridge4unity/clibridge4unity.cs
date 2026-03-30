@@ -606,6 +606,9 @@ class Program
                     Console.Error.WriteLine($"         {err}");
             }
             string estimate = GetCompileTimeEstimate(projectPath);
+            // Also check heartbeat for server-side compile time
+            if (estimate == null && unityInfo.HeartbeatCompileTimeAvg > 0)
+                estimate = $"~{unityInfo.HeartbeatCompileTimeAvg}s (from Unity)";
             Console.Error.WriteLine("       Wait for it to finish, then retry the command.");
             Console.Error.WriteLine($"       status: busy");
             Console.Error.WriteLine($"       retry: true");
@@ -1480,6 +1483,50 @@ class Program
         public string ImportStatus;       // e.g. "Importing - Compress 50% (busy for 02:04)..."
         public List<string> OpenProjects = new List<string>();
         public List<string> RecentErrors = new List<string>();  // from Editor.log
+        public string HeartbeatState;     // from heartbeat file: ready, compiling, reloading, etc.
+        public int HeartbeatCompileTimeAvg; // avg compile time from heartbeat file
+    }
+
+    /// <summary>
+    /// Reads the heartbeat status file written by Unity-side Heartbeat.cs.
+    /// Returns null if file doesn't exist or is stale (>10s old).
+    /// </summary>
+    static (string state, bool compileErrors, int compileErrorCount, int compileTimeAvg)?
+        ReadHeartbeatFile(string projectPath)
+    {
+        try
+        {
+            string normalizedPath = Path.GetFullPath(projectPath).ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
+            int hash1 = 5381, hash2 = hash1;
+            for (int i = 0; i < normalizedPath.Length && normalizedPath[i] != '\0'; i += 2)
+            {
+                hash1 = ((hash1 << 5) + hash1) ^ normalizedPath[i];
+                if (i == normalizedPath.Length - 1 || normalizedPath[i + 1] == '\0') break;
+                hash2 = ((hash2 << 5) + hash2) ^ normalizedPath[i + 1];
+            }
+            int hash = hash1 + (hash2 * 1566083941);
+            string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}.status");
+
+            if (!File.Exists(statusFile)) return null;
+
+            // Check freshness — stale files are unreliable
+            var age = DateTime.UtcNow - File.GetLastWriteTimeUtc(statusFile);
+            if (age.TotalSeconds > 10) return null;
+
+            string json = File.ReadAllText(statusFile);
+
+            // Simple JSON parsing (no dependency on Newtonsoft in CLI)
+            string state = ExtractJsonString(json, "state");
+            bool errors = json.Contains("\"compileErrors\": true");
+            int errorCount = 0, avgTime = 0;
+            var ecMatch = System.Text.RegularExpressions.Regex.Match(json, @"""compileErrorCount"":\s*(\d+)");
+            if (ecMatch.Success) errorCount = int.Parse(ecMatch.Groups[1].Value);
+            var atMatch = System.Text.RegularExpressions.Regex.Match(json, @"""compileTimeAvg"":\s*(\d+)");
+            if (atMatch.Success) avgTime = int.Parse(atMatch.Groups[1].Value);
+
+            return (state, errors, errorCount, avgTime);
+        }
+        catch { return null; }
     }
 
     static UnityProcessInfo DetectUnityProcess(string projectPath)
@@ -1487,6 +1534,29 @@ class Program
         var info = new UnityProcessInfo { State = UnityProcessState.NotRunning };
         string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
         string lockfilePath = Path.Combine(Path.GetFullPath(projectPath), "Temp", "UnityLockfile");
+
+        // Check heartbeat file first — most accurate source during domain reload
+        var heartbeat = ReadHeartbeatFile(projectPath);
+        if (heartbeat.HasValue)
+        {
+            var hb = heartbeat.Value;
+            info.HeartbeatState = hb.state;
+            info.HeartbeatCompileTimeAvg = hb.compileTimeAvg;
+
+            if (hb.state == "reloading" || hb.state == "compiling" || hb.state == "importing")
+            {
+                info.State = UnityProcessState.Importing;
+                info.ImportStatus = hb.state == "reloading" ? "Reloading Domain" :
+                                    hb.state == "compiling" ? "Compiling Scripts" :
+                                    "Importing Assets";
+                if (hb.compileErrors)
+                    info.ImportStatus += $" ({hb.compileErrorCount} compile errors)";
+                return info;
+            }
+
+            // Heartbeat says ready/playing/paused — Unity is alive
+            info.State = UnityProcessState.Running;
+        }
 
         // Check lockfile — Unity creates this while project is open
         bool lockfileExists = File.Exists(lockfilePath);

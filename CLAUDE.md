@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.0.21)
+│   └── package.json           # UPM manifest (v1.0.22)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -228,6 +228,8 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `REFRESH` - Force asset database refresh
 - `LOG [filter]` - Get Unity console logs
 - `STACK_MINIMIZE` - Minimize a stack trace for AI
+- `MENU path` - Execute a Unity menu item (e.g. `MENU Window/General/Console`)
+- `PROFILE [enable|disable|clear|hierarchy]` - Control profiler and read performance data
 
 ### Code
 - `CODE_SEARCH query` - Search code (`class:Name`, `method:Name`, `field:Name`, `inherits:Type`, `attribute:Name`)
@@ -271,6 +273,7 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `ASSET_DELETE path [path2...]` - Delete assets (batch)
 - `ASSET_MKDIR path [path2...]` - Create folders (nested, batch)
 - `ASSET_LABEL path [+add -remove]` - Get/set asset labels
+- `ASSET_RESERIALIZE [paths...]` - Force re-validate and re-import assets (fixes corrupted YAML)
 
 ### UI
 - `SCREENSHOT Assets/path` - Render prefab/UXML to PNG

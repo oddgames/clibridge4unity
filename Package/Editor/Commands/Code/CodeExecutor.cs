@@ -171,7 +171,7 @@ namespace clibridge4unity
                 var asm = assembly;
                 string desc = code.Length > 80 ? $"CODE_EXEC_RETURN|{code.Substring(0, 80)}..." : $"CODE_EXEC_RETURN|{code}";
                 var result = await CommandRegistry.RunOnMainThreadAsync<object>(() => RunAssembly(asm), desc);
-                return Response.Success(result?.ToString() ?? "null");
+                return Response.Success(SerializeResult(result));
             }
             catch (TargetInvocationException ex)
             {
@@ -181,6 +181,103 @@ namespace clibridge4unity
             {
                 return Response.Exception(ex);
             }
+        }
+
+        static string SerializeResult(object obj)
+        {
+            if (obj == null) return "null";
+
+            var type = obj.GetType();
+
+            // Primitives, strings — direct
+            if (type.IsPrimitive || type == typeof(string) || type == typeof(decimal) || type.IsEnum)
+                return obj.ToString();
+
+            // Serialize with Newtonsoft — depth limit, collection truncation, pretty print
+            try
+            {
+                var serialized = SerializeWithLimits(obj, 0);
+                string json = Newtonsoft.Json.JsonConvert.SerializeObject(
+                    serialized, Newtonsoft.Json.Formatting.Indented);
+
+                if (json.Length > 32000)
+                    json = json.Substring(0, 32000) + "\n... (truncated, >32KB)";
+
+                return json;
+            }
+            catch
+            {
+                return obj.ToString();
+            }
+        }
+
+        const int MaxDepth = 4;
+        const int MaxItems = 100;
+
+        static object SerializeWithLimits(object obj, int depth)
+        {
+            if (obj == null) return null;
+            if (depth > MaxDepth) return obj.ToString();
+
+            var type = obj.GetType();
+            if (type.IsPrimitive || type == typeof(string) || type == typeof(decimal))
+                return obj;
+            if (type.IsEnum) return obj.ToString();
+
+            // Unity objects — name + type
+            if (obj is UnityEngine.Object uObj)
+                return uObj != null ? $"{type.Name}(\"{uObj.name}\")" : $"{type.Name}(destroyed)";
+
+            // Dictionary
+            if (obj is IDictionary dict)
+            {
+                var result = new Dictionary<string, object>();
+                int count = 0;
+                foreach (DictionaryEntry e in dict)
+                {
+                    if (count++ >= MaxItems) { result["..."] = $"{dict.Count - MaxItems} more"; break; }
+                    result[e.Key?.ToString() ?? "null"] = SerializeWithLimits(e.Value, depth + 1);
+                }
+                return result;
+            }
+
+            // Collections
+            if (obj is IEnumerable enumerable && type != typeof(string))
+            {
+                var list = new List<object>();
+                int count = 0;
+                foreach (var item in enumerable)
+                {
+                    if (count++ >= MaxItems) { list.Add($"... ({count} total, truncated at {MaxItems})"); break; }
+                    list.Add(SerializeWithLimits(item, depth + 1));
+                }
+                return list;
+            }
+
+            // Structs/classes — public fields + readable properties
+            var fields = type.GetFields(BindingFlags.Public | BindingFlags.Instance);
+            var props = type.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+            var readable = new List<PropertyInfo>();
+            foreach (var p in props)
+                if (p.CanRead && p.GetIndexParameters().Length == 0) readable.Add(p);
+
+            if (fields.Length == 0 && readable.Count == 0)
+                return obj.ToString();
+
+            var dict2 = new Dictionary<string, object>();
+            dict2["_type"] = type.Name;
+            foreach (var f in fields)
+            {
+                try { dict2[f.Name] = SerializeWithLimits(f.GetValue(obj), depth + 1); }
+                catch { dict2[f.Name] = "<error>"; }
+            }
+            foreach (var p in readable)
+            {
+                if (dict2.Count >= 30) { dict2["..."] = $"{readable.Count - 30} more properties"; break; }
+                try { dict2[p.Name] = SerializeWithLimits(p.GetValue(obj), depth + 1); }
+                catch { dict2[p.Name] = "<error>"; }
+            }
+            return dict2;
         }
 
         struct CompileResult
