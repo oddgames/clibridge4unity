@@ -171,7 +171,23 @@ namespace clibridge4unity
                 var asm = assembly;
                 string desc = code.Length > 80 ? $"CODE_EXEC_RETURN|{code.Substring(0, 80)}..." : $"CODE_EXEC_RETURN|{code}";
                 var result = await CommandRegistry.RunOnMainThreadAsync<object>(() => RunAssembly(asm), desc);
-                return Response.Success(SerializeResult(result));
+                string serialized = SerializeResult(result);
+
+                // Small results inline, large results go to file
+                if (serialized.Length <= 2000)
+                    return Response.Success(serialized);
+
+                string outputDir = Path.Combine(
+                    Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(),
+                    "clibridge4unity_output");
+                Directory.CreateDirectory(outputDir);
+                string outputFile = Path.Combine(outputDir, $"exec_result_{DateTime.Now:HHmmss}.txt");
+                File.WriteAllText(outputFile, serialized);
+
+                // Return summary + file path
+                string type = result?.GetType().Name ?? "null";
+                string preview = serialized.Length > 200 ? serialized.Substring(0, 200) + "..." : serialized;
+                return Response.Success($"type: {type}\nlength: {serialized.Length}\npreview: {preview}\noutput: {outputFile}");
             }
             catch (TargetInvocationException ex)
             {

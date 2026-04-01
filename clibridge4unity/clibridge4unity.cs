@@ -1535,27 +1535,13 @@ class Program
         string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
         string lockfilePath = Path.Combine(Path.GetFullPath(projectPath), "Temp", "UnityLockfile");
 
-        // Check heartbeat file first — most accurate source during domain reload
+        // Read heartbeat file for advisory info (compile time estimates, state hints)
+        // Don't use it to block commands — it can be slightly stale
         var heartbeat = ReadHeartbeatFile(projectPath);
         if (heartbeat.HasValue)
         {
-            var hb = heartbeat.Value;
-            info.HeartbeatState = hb.state;
-            info.HeartbeatCompileTimeAvg = hb.compileTimeAvg;
-
-            if (hb.state == "reloading" || hb.state == "compiling" || hb.state == "importing")
-            {
-                info.State = UnityProcessState.Importing;
-                info.ImportStatus = hb.state == "reloading" ? "Reloading Domain" :
-                                    hb.state == "compiling" ? "Compiling Scripts" :
-                                    "Importing Assets";
-                if (hb.compileErrors)
-                    info.ImportStatus += $" ({hb.compileErrorCount} compile errors)";
-                return info;
-            }
-
-            // Heartbeat says ready/playing/paused — Unity is alive
-            info.State = UnityProcessState.Running;
+            info.HeartbeatState = heartbeat.Value.state;
+            info.HeartbeatCompileTimeAvg = heartbeat.Value.compileTimeAvg;
         }
 
         // Check lockfile — Unity creates this while project is open
