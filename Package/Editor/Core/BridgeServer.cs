@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.23";
+        public const string Version = "1.0.24";
 
         private static CancellationTokenSource serverCts;
         private static NamedPipeServerStream currentPipeServer;
@@ -78,8 +78,14 @@ namespace clibridge4unity
                 if (duration > 0 && duration < 600)
                     RecordCompileDuration(duration);
 
-                // Touch a marker so auto-refresh on focus knows compilation already happened
-                // This prevents double domain reload when alt-tabbing back to Unity
+                // Re-enable auto-refresh if COMPILE disabled it
+                // Do NOT call AssetDatabase.Refresh() — that would trigger another import cycle
+                if (SessionState.GetBool("Bridge_RestoreAutoRefresh", false))
+                {
+                    SessionState.SetBool("Bridge_RestoreAutoRefresh", false);
+                    int prev = SessionState.GetInt("Bridge_PrevAutoRefresh", 1);
+                    EditorPrefs.SetInt("kAutoRefreshMode", prev);
+                }
             }
             else if (finishedTicks > 0)
             {
