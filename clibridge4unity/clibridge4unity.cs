@@ -138,8 +138,12 @@ class Program
 
             if (hwnd != IntPtr.Zero)
             {
-                // WM_NULL wakes the message pump without any visible side effects
+                // Multiple wake strategies — WM_NULL alone doesn't trigger the import pipeline
                 PostMessage(hwnd, WM_NULL, IntPtr.Zero, IntPtr.Zero);
+                // WM_TIMER forces Unity's internal timer tick which processes pending reloads
+                PostMessage(hwnd, 0x0113 /*WM_TIMER*/, IntPtr.Zero, IntPtr.Zero);
+                // InvalidateRect forces a repaint cycle which triggers EditorApplication.update
+                InvalidateRect(hwnd, IntPtr.Zero, false);
             }
         }
         catch { }
@@ -618,6 +622,15 @@ class Program
         }
         if (unityInfo.State == UnityProcessState.Importing)
         {
+            // If COMPILE was requested and Unity is already compiling, just wait for it
+            bool isAlreadyCompiling = unityInfo.ImportStatus != null &&
+                (unityInfo.ImportStatus.Contains("Compil") || unityInfo.ImportStatus.Contains("Reload"));
+            if ((cmdUpper == "COMPILE" || cmdUpper == "REFRESH") && isAlreadyCompiling)
+            {
+                Console.Error.WriteLine($"[CLI] Unity is already compiling ({unityInfo.ImportStatus}). Waiting for it to finish...");
+                return WaitForCompilationAndReconnect(pipeName, projectPath, 300, DateTime.Now);
+            }
+
             Console.Error.WriteLine($"Error: Unity is busy — {unityInfo.ImportStatus}");
             if (unityInfo.RecentErrors.Count > 0)
             {
@@ -626,7 +639,6 @@ class Program
                     Console.Error.WriteLine($"         {err}");
             }
             string estimate = GetCompileTimeEstimate(projectPath);
-            // Also check heartbeat for server-side compile time
             if (estimate == null && unityInfo.HeartbeatCompileTimeAvg > 0)
                 estimate = $"~{unityInfo.HeartbeatCompileTimeAvg}s (from Unity)";
             Console.Error.WriteLine("       Wait for it to finish, then retry the command.");
