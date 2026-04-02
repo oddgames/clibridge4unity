@@ -183,13 +183,6 @@ namespace clibridge4unity
             // If already compiling (e.g. after exiting play mode), just wait for it
             if (!EditorApplication.isCompiling)
             {
-                // Disable auto-refresh so Unity doesn't do ANOTHER refresh when it regains
-                // focus after compile. Re-enabled in BridgeServer [InitializeOnLoad] after
-                // domain reload completes.
-                SessionState.SetBool("Bridge_RestoreAutoRefresh", true);
-                SessionState.SetInt("Bridge_PrevAutoRefresh", EditorPrefs.GetInt("kAutoRefreshMode", 1));
-                EditorPrefs.SetInt("kAutoRefreshMode", 0);
-
                 CompilationPipeline.RequestScriptCompilation();
                 EditorApplication.QueuePlayerLoopUpdate();
             }

@@ -7,7 +7,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishTrimmed>true</PublishTrimmed>
     <AssemblyName>clibridge4unity</AssemblyName>
-    <Version>1.0.27</Version>
+    <Version>1.0.28</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
