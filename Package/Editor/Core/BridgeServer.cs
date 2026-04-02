@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.25";
+        public const string Version = "1.0.26";
 
         private static CancellationTokenSource serverCts;
         private static NamedPipeServerStream currentPipeServer;
@@ -342,6 +342,59 @@ namespace clibridge4unity
             {
                 Debug.LogError($"[Bridge] Client error: {ex.Message}");
             }
+        }
+    }
+
+    /// <summary>
+    /// Quote-aware argument splitter. Handles "paths with spaces" in plain args.
+    /// </summary>
+    public static class ArgParser
+    {
+        /// <summary>
+        /// Splits a string on spaces, respecting double-quoted segments.
+        /// "Canvas/Text Area/Text" Component field value → 4 args with spaces preserved.
+        /// </summary>
+        public static string[] Split(string input, int maxParts = 0)
+        {
+            if (string.IsNullOrEmpty(input)) return new string[0];
+
+            var parts = new List<string>();
+            var current = new System.Text.StringBuilder();
+            bool inQuotes = false;
+
+            for (int i = 0; i < input.Length; i++)
+            {
+                char c = input[i];
+
+                if (c == '"')
+                {
+                    inQuotes = !inQuotes;
+                    continue;
+                }
+
+                if (c == ' ' && !inQuotes)
+                {
+                    if (current.Length > 0)
+                    {
+                        // If we've reached maxParts-1, take the rest as the last arg
+                        if (maxParts > 0 && parts.Count == maxParts - 1)
+                        {
+                            current.Append(input.Substring(i));
+                            break;
+                        }
+                        parts.Add(current.ToString());
+                        current.Clear();
+                    }
+                    continue;
+                }
+
+                current.Append(c);
+            }
+
+            if (current.Length > 0)
+                parts.Add(current.ToString().Trim());
+
+            return parts.ToArray();
         }
     }
 

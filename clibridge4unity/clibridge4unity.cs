@@ -1205,6 +1205,8 @@ class Program
         int lastUpdateSeconds = 0;
         int attemptCount = 0;
         bool hasConnectedOnce = false;
+        int idleStaleSeconds = 0; // how long Unity has been idle with stale timestamp
+        bool hasRetriggered = false;
 
         while (elapsed < timeoutSeconds * 1000)
         {
@@ -1307,6 +1309,32 @@ class Program
                 }
                 else
                 {
+                    // Check if Unity is idle with a stale compile timestamp
+                    bool isIdle = statusResponse.Contains("isCompiling: False");
+                    if (isIdle)
+                    {
+                        idleStaleSeconds++;
+                        if (idleStaleSeconds >= 15 && !hasRetriggered)
+                        {
+                            // Unity has been idle for 15s without compiling our request.
+                            // Re-send COMPILE — original request was likely lost during domain reload.
+                            Console.WriteLine($"[CLI] Unity idle for {idleStaleSeconds}s without compiling. Re-triggering...");
+                            hasRetriggered = true;
+                            requestedAt = DateTime.Now;
+                            SendCommandGetResponse(pipeName, "COMPILE", "");
+                        }
+                        else if (hasRetriggered && idleStaleSeconds >= 30)
+                        {
+                            // Already re-triggered and waited another 15s. Accept as done.
+                            Console.WriteLine($"[CLI] No compilation needed (Unity reports no changes).");
+                            Console.WriteLine(statusResponse);
+                            return 0;
+                        }
+                    }
+                    else
+                    {
+                        idleStaleSeconds = 0; // reset when actually compiling
+                    }
                     // Parse compileTimeAvg from status for ETA
                     string eta = "";
                     foreach (var line in statusResponse.Split('\n'))
@@ -1413,7 +1441,9 @@ class Program
         {
             if (lastCompileFinished.Value < requestedAt.Value.AddSeconds(-2))
             {
-                Console.Error.WriteLine($"[CLI] Warning: Last compile ({lastCompileFinished:HH:mm:ss}) is BEFORE our request ({requestedAt:HH:mm:ss}). Unity may not have compiled yet.");
+                // Unity is idle but last compile was before our request.
+                // Could be: (a) compile hasn't started yet, or (b) request was lost.
+                // Return false to keep waiting — caller handles re-trigger after timeout.
                 return false;
             }
         }

@@ -45,7 +45,7 @@ namespace clibridge4unity
                 else
                 {
                     // Plain args: PREFAB_CREATE <name> [path]
-                    var parts = jsonData.Trim().Split(new[] { ' ' }, 2);
+                    var parts = ArgParser.Split(jsonData.Trim(), 2);
                     name = parts.Length > 0 ? parts[0] : "NewPrefab";
                     path = parts.Length > 1 ? parts[1] : "Assets/Prefabs";
                 }
@@ -154,7 +154,7 @@ namespace clibridge4unity
                     }
                     else
                     {
-                        var parts = data.Trim().Split(new[] { ' ' }, 2);
+                        var parts = ArgParser.Split(data.Trim(), 2);
                         goName = parts[0];
                         outputPath = parts.Length > 1 ? parts[1] : null;
                     }

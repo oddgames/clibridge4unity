@@ -42,7 +42,8 @@ namespace clibridge4unity
                 else
                 {
                     // Plain args: COMPONENT_SET <gameObject> <component> <field> <value...>
-                    var parts = jsonData.Trim().Split(new[] { ' ' }, 4);
+                    // Supports quoted paths: COMPONENT_SET "Canvas/Text Area/Text" TMP m_fontSize 24
+                    var parts = ArgParser.Split(jsonData.Trim(), 4);
                     gameObjectPath = parts.Length > 0 ? parts[0] : null;
                     componentName = parts.Length > 1 ? parts[1] : null;
                     fieldName = parts.Length > 2 ? parts[2] : null;
@@ -125,8 +126,8 @@ namespace clibridge4unity
                 }
                 else
                 {
-                    // Plain args: ADDCOMPONENT <gameObject> <component>
-                    var parts = jsonData.Trim().Split(new[] { ' ' }, 2);
+                    // Plain args: COMPONENT_ADD <gameObject> <component>
+                    var parts = ArgParser.Split(jsonData.Trim(), 2);
                     gameObjectPath = parts.Length > 0 ? parts[0] : null;
                     componentName = parts.Length > 1 ? parts[1] : null;
                 }
@@ -180,7 +181,7 @@ namespace clibridge4unity
                 }
                 else
                 {
-                    var parts = jsonData.Trim().Split(new[] { ' ' }, 2);
+                    var parts = ArgParser.Split(jsonData.Trim(), 2);
                     gameObjectPath = parts.Length > 0 ? parts[0] : null;
                     componentName = parts.Length > 1 ? parts[1] : null;
                 }
