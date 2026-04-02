@@ -358,7 +358,9 @@ class Program
 
             if (latest <= current)
             {
-                Console.WriteLine($"Already up to date (v{CLI_VERSION}).");
+                Console.WriteLine($"CLI already up to date (v{CLI_VERSION}).");
+                // Still check manifest — CLI may be updated but manifest lagging
+                UpdateManifestTag(CLI_VERSION);
                 return 0;
             }
 
@@ -413,28 +415,7 @@ class Program
             Console.WriteLine($"Updated to v{latestVersion}");
             Console.WriteLine($"  {exePath}");
 
-            // Also update UPM package in current project if we can detect one
-            string projectPath = AutoDetectProjectPath();
-            if (projectPath != null)
-            {
-                string manifestPath = Path.Combine(projectPath, "Packages", "manifest.json");
-                if (File.Exists(manifestPath))
-                {
-                    string manifest = File.ReadAllText(manifestPath);
-                    if (manifest.Contains($"\"{UPM_PACKAGE_NAME}\""))
-                    {
-                        string oldUrl = $"#v{CLI_VERSION}";
-                        string newUrl = $"#v{latestVersion}";
-                        if (manifest.Contains(oldUrl))
-                        {
-                            manifest = manifest.Replace(oldUrl, newUrl);
-                            File.WriteAllText(manifestPath, manifest);
-                            Console.WriteLine($"  Updated UPM package tag in manifest.json → v{latestVersion}");
-                        }
-                    }
-                }
-            }
-
+            UpdateManifestTag(latestVersion);
             return 0;
         }
         catch (Exception ex)
@@ -442,6 +423,45 @@ class Program
             Console.Error.WriteLine($"Error: {ex.GetType().Name}: {ex.Message}");
             Console.Error.WriteLine($"  Run: irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
             return 1;
+        }
+    }
+
+    /// <summary>
+    /// Updates the UPM package git tag in the current project's manifest.json.
+    /// Finds any existing version tag (#vX.Y.Z) and replaces it with the target version.
+    /// </summary>
+    static void UpdateManifestTag(string targetVersion)
+    {
+        try
+        {
+            string projectPath = AutoDetectProjectPath();
+            if (projectPath == null) return;
+
+            string manifestPath = Path.Combine(projectPath, "Packages", "manifest.json");
+            if (!File.Exists(manifestPath)) return;
+
+            string manifest = File.ReadAllText(manifestPath);
+            if (!manifest.Contains($"\"{UPM_PACKAGE_NAME}\"")) return;
+
+            string targetTag = $"#v{targetVersion}";
+            if (manifest.Contains(targetTag))
+            {
+                Console.WriteLine($"  UPM package already at v{targetVersion}");
+                return;
+            }
+
+            // Find and replace any existing version tag (#vX.Y.Z)
+            var tagPattern = new System.Text.RegularExpressions.Regex(@"#v\d+\.\d+\.\d+");
+            if (tagPattern.IsMatch(manifest))
+            {
+                manifest = tagPattern.Replace(manifest, targetTag);
+                File.WriteAllText(manifestPath, manifest);
+                Console.WriteLine($"  Updated UPM package tag in manifest.json → v{targetVersion}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  Warning: Could not update manifest.json ({ex.Message})");
         }
     }
 
