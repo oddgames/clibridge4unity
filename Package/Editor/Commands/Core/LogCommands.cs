@@ -104,6 +104,7 @@ namespace clibridge4unity
             {
                 foreach (var msg in messages)
                 {
+                    // Capture both errors and warnings-as-errors (e.g. CS1998 with TreatWarningsAsErrors)
                     if (msg.type == CompilerMessageType.Error)
                         _compileErrors.Add(msg);
                 }
@@ -111,22 +112,112 @@ namespace clibridge4unity
         }
 
         /// <summary>
+        /// Fast console error/warning counts via LogEntries reflection. No entry scanning.
+        /// </summary>
+        public static void GetConsoleCounts(out int errors, out int warnings)
+        {
+            errors = 0;
+            warnings = 0;
+            try
+            {
+                var logEntries = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntries");
+                if (logEntries == null) return;
+                var getCount = logEntries.GetMethod("GetCountsByType",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                if (getCount != null)
+                {
+                    var args = new object[] { 0, 0, 0 };
+                    getCount.Invoke(null, args);
+                    errors = (int)args[0];
+                    warnings = (int)args[1];
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Reads compile errors (error CS*) directly from Unity's Console via LogEntries.
+        /// Called on demand by LOG compile, not on every STATUS poll.
+        /// </summary>
+        public static List<string> GetCompileErrorsFromConsole()
+        {
+            var result = new List<string>();
+            try
+            {
+                var logEntries = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntries");
+                if (logEntries == null) return result;
+
+                var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public;
+                var startGetting = logEntries.GetMethod("StartGettingEntries", flags);
+                var endGetting = logEntries.GetMethod("EndGettingEntries", flags);
+                var getEntry = logEntries.GetMethod("GetEntryInternal", flags);
+                var getCount = logEntries.GetMethod("GetCount", flags);
+                var logEntryType = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntry");
+
+                if (startGetting == null || getCount == null || getEntry == null || logEntryType == null)
+                    return result;
+
+                startGetting.Invoke(null, null);
+                try
+                {
+                    int count = (int)getCount.Invoke(null, null);
+                    for (int i = count - 1; i >= 0 && i >= count - 100; i--)
+                    {
+                        var entry = System.Activator.CreateInstance(logEntryType);
+                        if ((bool)getEntry.Invoke(null, new object[] { i, entry }))
+                        {
+                            var msg = logEntryType.GetField("message")?.GetValue(entry)?.ToString();
+                            if (msg != null && msg.Contains("error CS"))
+                            {
+                                string firstLine = msg.Split('\n')[0];
+                                if (!result.Contains(firstLine))
+                                    result.Add(firstLine);
+                                if (result.Count >= 20) break;
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    endGetting?.Invoke(null, null);
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        /// <summary>
         /// Returns a formatted compile error summary, or null if no errors.
         /// </summary>
         public static string GetCompileErrorsSummary()
         {
+            // Check our tracked errors first
             lock (_compileErrorLock)
             {
-                if (_compileErrors.Count == 0) return null;
+                if (_compileErrors.Count > 0)
+                {
+                    var sb = new StringBuilder();
+                    sb.AppendLine($"COMPILE ERRORS ({_compileErrors.Count}) — fix these before running commands:");
+                    foreach (var err in _compileErrors.Take(10))
+                        sb.AppendLine($"  {err.message}");
+                    if (_compileErrors.Count > 10)
+                        sb.AppendLine($"  ... and {_compileErrors.Count - 10} more");
+                    return sb.ToString().TrimEnd();
+                }
+            }
 
+            // Fall back to reading Unity's Console directly (survives domain reload)
+            var consoleErrors = GetCompileErrorsFromConsole();
+            if (consoleErrors.Count > 0)
+            {
                 var sb = new StringBuilder();
-                sb.AppendLine($"COMPILE ERRORS ({_compileErrors.Count}) — fix these before running commands:");
-                foreach (var err in _compileErrors.Take(10))
-                    sb.AppendLine($"  {err.message}");
-                if (_compileErrors.Count > 10)
-                    sb.AppendLine($"  ... and {_compileErrors.Count - 10} more");
+                sb.AppendLine($"COMPILE ERRORS ({consoleErrors.Count}) — fix these before running commands:");
+                foreach (var err in consoleErrors)
+                    sb.AppendLine($"  {err}");
                 return sb.ToString().TrimEnd();
             }
+
+            return null;
         }
 
         private static void OnLogMessage(string message, string stackTrace, LogType type)

@@ -135,12 +135,27 @@ namespace clibridge4unity
             string compileTimeAvg = compileStats.HasValue ? $"{compileStats.Value.avg}s" : "unknown";
             string compileTimeLast = compileStats.HasValue ? $"{compileStats.Value.last}s" : "unknown";
 
+            // Get Unity Console counts + compile errors (always included)
+            int consoleErrors = 0, consoleWarnings = 0;
+            LogCommands.GetConsoleCounts(out consoleErrors, out consoleWarnings);
+
+            // Always read compile errors from console — they're critical diagnostics
+            var compileErrorMessages = LogCommands.GetCompileErrorsFromConsole();
+            if (compileErrorMessages.Count > 0)
+            {
+                hasCompileErrors = true;
+                compileErrorCount = compileErrorMessages.Count;
+            }
+
             return Response.SuccessWithData(new
             {
                 bridgeVersion = BridgeServer.Version,
                 isCompiling = EditorApplication.isCompiling,
                 hasCompileErrors,
                 compileErrorCount,
+                compileErrors = compileErrorMessages.Count > 0 ? compileErrorMessages.ToArray() : null,
+                consoleErrors,
+                consoleWarnings,
                 isPlaying = EditorApplication.isPlaying,
                 isPaused = EditorApplication.isPaused,
                 scriptsModified = ScriptsModifiedSinceCompile(),
