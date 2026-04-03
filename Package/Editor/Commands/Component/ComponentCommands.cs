@@ -57,10 +57,30 @@ namespace clibridge4unity
                 if (string.IsNullOrEmpty(fieldName))
                     return Response.Error("field name is required");
 
-                // Find the GameObject
-                var go = GameObject.Find(gameObjectPath);
-                if (go == null)
-                    return Response.Error($"GameObject not found: {gameObjectPath}");
+                // Find the GameObject (scene or prefab asset child)
+                bool isPrefab = false;
+                GameObject go;
+                string prefabAssetPath = null;
+
+                if (gameObjectPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) &&
+                    gameObjectPath.Contains(".prefab"))
+                {
+                    go = ResolvePrefabChild(gameObjectPath, out prefabAssetPath);
+                    if (go == null)
+                    {
+                        // Try as whole prefab
+                        go = AssetDatabase.LoadAssetAtPath<GameObject>(gameObjectPath);
+                    }
+                    if (go == null)
+                        return Response.Error($"Prefab or child not found: {gameObjectPath}");
+                    isPrefab = true;
+                }
+                else
+                {
+                    go = GameObject.Find(gameObjectPath);
+                    if (go == null)
+                        return Response.Error($"GameObject not found: {gameObjectPath}");
+                }
 
                 // Find the component
                 var component = go.GetComponents<Component>()
@@ -90,6 +110,10 @@ namespace clibridge4unity
                     property.SetValue(component, value);
 
                 EditorUtility.SetDirty(component);
+
+                // Save prefab asset if we modified a prefab
+                if (isPrefab && !string.IsNullOrEmpty(prefabAssetPath))
+                    AssetDatabase.SaveAssets();
 
                 return Response.SuccessWithData(new
                 {
@@ -137,9 +161,25 @@ namespace clibridge4unity
                 if (string.IsNullOrEmpty(componentName))
                     return Response.Error("component name is required");
 
-                var go = GameObject.Find(gameObjectPath);
-                if (go == null)
-                    return Response.Error($"GameObject not found: {gameObjectPath}");
+                bool isPrefab = false;
+                string prefabAssetPath = null;
+                GameObject go;
+
+                if (gameObjectPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) &&
+                    gameObjectPath.Contains(".prefab"))
+                {
+                    go = ResolvePrefabChild(gameObjectPath, out prefabAssetPath)
+                      ?? AssetDatabase.LoadAssetAtPath<GameObject>(gameObjectPath);
+                    if (go == null)
+                        return Response.Error($"Prefab or child not found: {gameObjectPath}");
+                    isPrefab = true;
+                }
+                else
+                {
+                    go = GameObject.Find(gameObjectPath);
+                    if (go == null)
+                        return Response.Error($"GameObject not found: {gameObjectPath}");
+                }
 
                 var componentType = FindType(componentName);
                 if (componentType == null)
@@ -151,6 +191,7 @@ namespace clibridge4unity
                 Undo.RecordObject(go, $"Add {componentName}");
                 var added = go.AddComponent(componentType);
                 EditorUtility.SetDirty(go);
+                if (isPrefab) AssetDatabase.SaveAssets();
 
                 return Response.Success($"Added {added.GetType().Name} to {gameObjectPath}");
             }
@@ -191,9 +232,25 @@ namespace clibridge4unity
                 if (string.IsNullOrEmpty(componentName))
                     return Response.Error("component name is required");
 
-                var go = GameObject.Find(gameObjectPath);
-                if (go == null)
-                    return Response.Error($"GameObject not found: {gameObjectPath}");
+                bool isPrefab = false;
+                string prefabAssetPath = null;
+                GameObject go;
+
+                if (gameObjectPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) &&
+                    gameObjectPath.Contains(".prefab"))
+                {
+                    go = ResolvePrefabChild(gameObjectPath, out prefabAssetPath)
+                      ?? AssetDatabase.LoadAssetAtPath<GameObject>(gameObjectPath);
+                    if (go == null)
+                        return Response.Error($"Prefab or child not found: {gameObjectPath}");
+                    isPrefab = true;
+                }
+                else
+                {
+                    go = GameObject.Find(gameObjectPath);
+                    if (go == null)
+                        return Response.Error($"GameObject not found: {gameObjectPath}");
+                }
 
                 var component = go.GetComponents<Component>()
                     .FirstOrDefault(c => c.GetType().Name.Equals(componentName, StringComparison.OrdinalIgnoreCase));
@@ -202,6 +259,7 @@ namespace clibridge4unity
 
                 Undo.DestroyObjectImmediate(component);
                 EditorUtility.SetDirty(go);
+                if (isPrefab) AssetDatabase.SaveAssets();
 
                 return Response.Success($"Removed {componentName} from {gameObjectPath}");
             }
@@ -297,6 +355,15 @@ namespace clibridge4unity
 
         private static string InspectAsset(string assetPath, string filterComponent)
         {
+            // Support child paths: Assets/My.prefab/Child/Path
+            string childPath = null;
+            int prefabIdx = assetPath.IndexOf(".prefab/", StringComparison.OrdinalIgnoreCase);
+            if (prefabIdx >= 0)
+            {
+                childPath = assetPath.Substring(prefabIdx + ".prefab/".Length);
+                assetPath = assetPath.Substring(0, prefabIdx + ".prefab".Length);
+            }
+
             var asset = AssetDatabase.LoadMainAssetAtPath(assetPath);
             if (asset == null)
                 return Response.Error($"Asset not found: {assetPath}");
@@ -304,6 +371,27 @@ namespace clibridge4unity
             // Prefab → inspect like a GameObject (components)
             if (asset is GameObject go)
             {
+                // Navigate to child if specified
+                if (!string.IsNullOrEmpty(childPath))
+                {
+                    var child = go.transform.Find(childPath);
+                    if (child == null)
+                    {
+                        // Try recursive search by name
+                        child = FindChildRecursive(go.transform, childPath);
+                    }
+                    if (child == null)
+                    {
+                        var sb2 = new System.Text.StringBuilder();
+                        sb2.AppendLine($"Child not found: {childPath}");
+                        sb2.AppendLine($"Available children of {go.name}:");
+                        ListChildren(go.transform, sb2, 2);
+                        return Response.Error(sb2.ToString().TrimEnd());
+                    }
+                    go = child.gameObject;
+                    assetPath = $"{assetPath}/{childPath}";
+                }
+
                 var sb = new System.Text.StringBuilder();
                 sb.AppendLine($"Prefab: {assetPath}");
                 sb.AppendLine($"active: {go.activeSelf}");
@@ -468,6 +556,55 @@ namespace clibridge4unity
 
             // For other types, try to deserialize
             return valueToken.ToObject(targetType);
+        }
+
+        /// <summary>
+        /// Resolves a prefab asset child path like "Assets/My.prefab/Child/Path"
+        /// into the actual GameObject. Returns null if not a prefab path.
+        /// </summary>
+        private static GameObject ResolvePrefabChild(string path, out string assetPath)
+        {
+            assetPath = null;
+            int prefabIdx = path.IndexOf(".prefab/", StringComparison.OrdinalIgnoreCase);
+            if (prefabIdx < 0) return null;
+
+            string childPath = path.Substring(prefabIdx + ".prefab/".Length);
+            assetPath = path.Substring(0, prefabIdx + ".prefab".Length);
+
+            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+            if (prefab == null) return null;
+
+            var child = prefab.transform.Find(childPath);
+            if (child == null) child = FindChildRecursive(prefab.transform, childPath);
+            return child?.gameObject;
+        }
+
+        private static Transform FindChildRecursive(Transform parent, string name)
+        {
+            if (name.Contains("/"))
+            {
+                var found = parent.Find(name);
+                if (found != null) return found;
+            }
+            foreach (Transform child in parent)
+            {
+                if (child.name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                    return child;
+                var result = FindChildRecursive(child, name);
+                if (result != null) return result;
+            }
+            return null;
+        }
+
+        private static void ListChildren(Transform parent, System.Text.StringBuilder sb, int maxDepth, int depth = 0)
+        {
+            string indent = new string(' ', depth * 2 + 2);
+            foreach (Transform child in parent)
+            {
+                sb.AppendLine($"{indent}{child.name}");
+                if (depth < maxDepth)
+                    ListChildren(child, sb, maxDepth, depth + 1);
+            }
         }
     }
 }

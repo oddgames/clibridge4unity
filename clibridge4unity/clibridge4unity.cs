@@ -11,6 +11,7 @@ using System.IO;
 using System.IO.Compression;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Linq;
 using System.Text;
 using System.Net.Http;
 using System.Threading;
@@ -57,6 +58,13 @@ class Program
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr hWnd);
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, StringBuilder lParam);
 
     [DllImport("user32.dll")]
     private static extern bool InvalidateRect(IntPtr hWnd, IntPtr lpRect, bool bErase);
@@ -569,6 +577,7 @@ class Program
             return HandleSelfUpdate();
         }
 
+
         // Auto-detect project path if not specified
         projectPath = projectPath ?? AutoDetectProjectPath();
         if (projectPath == null)
@@ -600,8 +609,69 @@ class Program
             }
         }
 
-        // Pre-flight: check if Unity is running for this project (instant, no pipe needed)
+        // DISMISS: close dialogs or click specific buttons — works on ANY Unity process, no pipe needed
+        // Usage: DISMISS          — list dialogs, send WM_CLOSE to all
+        //        DISMISS Yes      — click button labeled "Yes"
+        //        DISMISS "Don't Save" — click button with exact label
         var unityInfo = DetectUnityProcess(projectPath);
+        if (command.Equals("DISMISS", StringComparison.OrdinalIgnoreCase))
+        {
+            var dialogs = unityInfo.Dialogs;
+            if (dialogs.Count == 0)
+            {
+                Console.WriteLine("No dialogs detected.");
+                return 0;
+            }
+
+            string targetButton = string.IsNullOrWhiteSpace(data) ? null : data.Trim().Trim('"');
+
+            foreach (var dlg in dialogs)
+            {
+                Console.WriteLine($"Dialog: \"{dlg.Title}\" ({dlg.Width}x{dlg.Height})");
+
+                // Show all controls
+                var buttons = new List<(IntPtr hwnd, string text)>();
+                foreach (var ctrl in dlg.Controls)
+                {
+                    if (!ctrl.IsVisible || string.IsNullOrEmpty(ctrl.Text)) continue;
+                    string cls = ctrl.ClassName.ToLowerInvariant();
+                    Console.WriteLine($"  [{ctrl.ClassName}] \"{ctrl.Text}\"");
+                    if (cls.Contains("button"))
+                        buttons.Add((ctrl.Hwnd, ctrl.Text));
+                }
+
+                if (targetButton != null)
+                {
+                    // Find and click the specified button
+                    var match = buttons.Find(b =>
+                        b.text.Equals(targetButton, StringComparison.OrdinalIgnoreCase));
+                    if (match.hwnd != IntPtr.Zero)
+                    {
+                        Console.WriteLine($"Clicking button: \"{match.text}\"");
+                        const uint BM_CLICK = 0x00F5;
+                        PostMessage(match.hwnd, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+                    }
+                    else
+                    {
+                        Console.Error.WriteLine($"Button \"{targetButton}\" not found. Available: {string.Join(", ", buttons.Select(b => $"\"{b.text}\""))}");
+                        PostMessage(dlg.Hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                    }
+                }
+                else
+                {
+                    // No button specified — send WM_CLOSE
+                    PostMessage(dlg.Hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                }
+            }
+
+            if (targetButton != null)
+                Console.WriteLine($"Clicked \"{targetButton}\" on {dialogs.Count} dialog(s).");
+            else
+                Console.WriteLine($"Sent WM_CLOSE to {dialogs.Count} dialog(s).");
+            return 0;
+        }
+
+        // Pre-flight: check if Unity is running for this project (instant, no pipe needed)
         if (unityInfo.State == UnityProcessState.NotRunning)
         {
             Console.Error.WriteLine("Error: Unity is not running.");
@@ -617,6 +687,7 @@ class Program
                 Console.Error.WriteLine($"       Unity has open: {title}");
             if (!string.IsNullOrEmpty(unityInfo.ImportStatus))
                 Console.Error.WriteLine($"       Status: {unityInfo.ImportStatus}");
+            PrintDialogInfo(unityInfo.Dialogs);
             Console.Error.WriteLine($"       Open this project in Unity or use -d to specify the correct path.");
             return 1;
         }
@@ -668,71 +739,11 @@ class Program
             return HandleSetup(pipeName, projectPath, data);
         }
 
-        // DISMISS: close any floating/modal dialogs (handled before modal check)
-        if (command.Equals("DISMISS", StringComparison.OrdinalIgnoreCase))
+        // Pre-flight: report dialogs as warning (don't block — let the command try)
+        if (unityInfo.Dialogs.Count > 0)
         {
-            var dialogs = FindFloatingUnityWindows(projectPath);
-            if (dialogs.Count == 0)
-            {
-                Console.WriteLine("No modal dialogs detected.");
-                return 0;
-            }
-            foreach (var (hwnd, title, rect) in dialogs)
-            {
-                int w = rect.Right - rect.Left;
-                int h = rect.Bottom - rect.Top;
-                Console.WriteLine($"Closing: \"{title}\" (HWND={hwnd}, {w}x{h})");
-                PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-            }
-            Console.WriteLine($"Sent WM_CLOSE to {dialogs.Count} dialog(s).");
-            return 0;
-        }
-
-        // Pre-flight: detect modal dialogs — auto-dismiss safe ones, block on others
-        var floatingWindows = FindFloatingUnityWindows(projectPath);
-        if (floatingWindows.Count > 0)
-        {
-            // Auto-dismiss safe dialogs (save prompts, etc.)
-            bool allDismissed = true;
-            foreach (var (hwnd, title, rect) in floatingWindows)
-            {
-                bool safe = title.Contains("Scene(s) Have Been Modified", StringComparison.OrdinalIgnoreCase)
-                    || title.Contains("Save", StringComparison.OrdinalIgnoreCase);
-                if (safe)
-                {
-                    Console.Error.WriteLine($"[CLI] Auto-dismissing: \"{title}\"");
-                    PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-                }
-                else
-                {
-                    allDismissed = false;
-                }
-            }
-
-            if (allDismissed)
-            {
-                // Give Unity a moment to process the dismiss
-                Thread.Sleep(500);
-                // Re-check
-                floatingWindows = FindFloatingUnityWindows(projectPath);
-            }
-        }
-
-        if (floatingWindows.Count > 0)
-        {
-            Console.Error.WriteLine($"Error: Unity has {floatingWindows.Count} modal dialog(s) open — commands cannot execute until closed.");
-            Console.Error.WriteLine();
-            foreach (var (hwnd, title, rect) in floatingWindows)
-            {
-                int w = rect.Right - rect.Left;
-                int h = rect.Bottom - rect.Top;
-                Console.Error.WriteLine($"  [{floatingWindows.IndexOf((hwnd, title, rect)) + 1}] \"{title}\"");
-                Console.Error.WriteLine($"      Size: {w}x{h}, Position: ({rect.Left}, {rect.Top})");
-            }
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Fix: Run 'clibridge4unity DISMISS' to close all dialogs via WM_CLOSE.");
-            Console.Error.WriteLine("     If that doesn't work, the dialog may need manual interaction in Unity.");
-            return 1;
+            Console.Error.WriteLine($"Warning: Unity has {unityInfo.Dialogs.Count} dialog(s) open:");
+            PrintDialogInfo(unityInfo.Dialogs);
         }
 
         // SCREENSHOT: smart routing
@@ -1494,12 +1505,24 @@ class Program
         // Floating dialogs
         try
         {
-            var dialogs = FindFloatingUnityWindows(projectPath);
-            if (dialogs.Count > 0)
+            if (info.Dialogs.Count > 0)
             {
-                sb.AppendLine($"dialogs ({dialogs.Count}):");
-                foreach (var (_, title, _) in dialogs)
-                    sb.AppendLine($"  - {title}");
+                sb.AppendLine($"dialogs ({info.Dialogs.Count}):");
+                foreach (var dlg in info.Dialogs)
+                {
+                    sb.AppendLine($"  - \"{dlg.Title}\" ({dlg.Width}x{dlg.Height})");
+                    var buttons = new List<string>();
+                    var texts = new List<string>();
+                    foreach (var ctrl in dlg.Controls)
+                    {
+                        if (!ctrl.IsVisible || string.IsNullOrEmpty(ctrl.Text)) continue;
+                        string cls = ctrl.ClassName.ToLowerInvariant();
+                        if (cls.Contains("button")) buttons.Add(ctrl.Text);
+                        else texts.Add(ctrl.Text);
+                    }
+                    if (texts.Count > 0) sb.AppendLine($"    message: {string.Join(" | ", texts)}");
+                    if (buttons.Count > 0) sb.AppendLine($"    buttons: [{string.Join("] [", buttons)}]");
+                }
                 sb.AppendLine("action: Run DISMISS to close dialogs, then retry.");
             }
         }
@@ -1537,6 +1560,73 @@ class Program
         return sb.ToString();
     }
 
+    class DialogInfo
+    {
+        public IntPtr Hwnd;
+        public string Title;
+        public RECT Rect;
+        public List<DialogControl> Controls = new List<DialogControl>();
+        public int Width => Rect.Right - Rect.Left;
+        public int Height => Rect.Bottom - Rect.Top;
+    }
+
+    class DialogControl
+    {
+        public IntPtr Hwnd;
+        public string ClassName;  // Button, Static, Edit, etc.
+        public string Text;
+        public bool IsVisible;
+        public RECT Rect;
+    }
+
+    static void PrintDialogInfo(List<DialogInfo> dialogs)
+    {
+        if (dialogs == null || dialogs.Count == 0) return;
+        Console.Error.WriteLine($"       Dialogs ({dialogs.Count}):");
+        foreach (var dlg in dialogs)
+        {
+            Console.Error.WriteLine($"         \"{dlg.Title}\" ({dlg.Width}x{dlg.Height})");
+            var buttons = new List<string>();
+            var texts = new List<string>();
+            foreach (var ctrl in dlg.Controls)
+            {
+                if (!ctrl.IsVisible) continue;
+                string cls = ctrl.ClassName.ToLowerInvariant();
+                if (string.IsNullOrEmpty(ctrl.Text))
+                {
+                    // Still report the control class for visibility
+                    continue;
+                }
+                if (cls.Contains("button"))
+                    buttons.Add(ctrl.Text);
+                else
+                    texts.Add(ctrl.Text); // Any control with text is potentially a message
+            }
+            if (texts.Count > 0) Console.Error.WriteLine($"           Message: {string.Join(" | ", texts)}");
+            if (buttons.Count > 0) Console.Error.WriteLine($"           Buttons: [{string.Join("] [", buttons)}]");
+            // If no recognized controls found, dump all visible controls for debugging
+            if (texts.Count == 0 && buttons.Count == 0)
+            {
+                if (dlg.Controls.Count > 0)
+                {
+                    Console.Error.WriteLine($"           Controls ({dlg.Controls.Count}):");
+                    foreach (var ctrl in dlg.Controls)
+                    {
+                        if (!ctrl.IsVisible) continue;
+                        int cw = ctrl.Rect.Right - ctrl.Rect.Left;
+                        int ch = ctrl.Rect.Bottom - ctrl.Rect.Top;
+                        string t = string.IsNullOrEmpty(ctrl.Text) ? "" : $" \"{ctrl.Text}\"";
+                        Console.Error.WriteLine($"             [{ctrl.ClassName}]{t} ({cw}x{ch})");
+                    }
+                }
+                else
+                {
+                    Console.Error.WriteLine($"           (no Win32 child controls — likely IMGUI dialog)");
+                }
+            }
+        }
+    }
+
     enum UnityProcessState { Running, NotRunning, DifferentProject, Importing }
 
     class UnityProcessInfo
@@ -1544,9 +1634,11 @@ class Program
         public UnityProcessState State;
         public string ImportStatus;       // e.g. "Importing - Compress 50% (busy for 02:04)..."
         public List<string> OpenProjects = new List<string>();
+        public List<DialogInfo> Dialogs = new List<DialogInfo>(); // dialog windows with buttons/text
         public List<string> RecentErrors = new List<string>();  // from Editor.log
         public string HeartbeatState;     // from heartbeat file: ready, compiling, reloading, etc.
         public int HeartbeatCompileTimeAvg; // avg compile time from heartbeat file
+        public bool MatchedByCommandLine; // true if project matched via -projectPath arg, not window title
     }
 
     /// <summary>
@@ -1624,6 +1716,7 @@ class Program
         // (Unity 6 uses separate processes for UI and scripting runtime)
         var unityPids = new HashSet<uint>();
         bool foundProject = false;
+        string fullProjectPath = Path.GetFullPath(projectPath).TrimEnd('\\', '/');
 
         try
         {
@@ -1641,17 +1734,87 @@ class Program
                 }
                 catch { }
             }
+
+            // Fallback: match by command line -projectPath when window title isn't available yet
+            // (Unity has no window title during early loading, import, upgrade dialogs)
+            if (!foundProject && unityPids.Count > 0)
+            {
+                try
+                {
+                    using var searcher = new System.Management.ManagementObjectSearcher(
+                        "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'Unity.exe'");
+                    foreach (var obj in searcher.Get())
+                    {
+                        string cmdLine = obj["CommandLine"]?.ToString() ?? "";
+                        // Match -projectPath (or -projectpath) followed by the path
+                        // Skip AssetImportWorker processes (-batchMode -noUpm)
+                        if (cmdLine.Contains("-batchMode", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        if (cmdLine.Contains(fullProjectPath, StringComparison.OrdinalIgnoreCase) ||
+                            cmdLine.Contains(fullProjectPath.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
+                        {
+                            foundProject = true;
+                            uint pid = (uint)(int)obj["ProcessId"];
+                            unityPids.Add(pid);
+                            info.MatchedByCommandLine = true;
+                            break;
+                        }
+                    }
+                }
+                catch { } // WMI may fail in restricted environments
+            }
+
+            // Enumerate all visible windows from Unity PIDs to find dialogs
+            if (unityPids.Count > 0)
+            {
+                var seenHwnds = new HashSet<IntPtr>();
+                EnumWindows((hwnd, _) =>
+                {
+                    if (!IsWindowVisible(hwnd)) return true;
+                    GetWindowThreadProcessId(hwnd, out uint pid);
+                    if (!unityPids.Contains(pid)) return true;
+
+                    var sb = new StringBuilder(256);
+                    GetWindowText(hwnd, sb, 256);
+                    string title = sb.ToString();
+                    if (string.IsNullOrEmpty(title)) return true;
+
+                    // Skip the main Unity editor window (contains " - Unity" or "SAFE MODE")
+                    if (title.Contains(" - Unity ") || title.Contains(" - SAFE MODE -")) return true;
+
+                    // Any other visible Unity window is potentially a dialog
+                    GetWindowRect(hwnd, out RECT rect);
+                    int w = rect.Right - rect.Left;
+                    int h = rect.Bottom - rect.Top;
+                    if (w > 50 && h > 30 && seenHwnds.Add(hwnd))
+                    {
+                        var dlg = new DialogInfo { Hwnd = hwnd, Title = title, Rect = rect };
+                        EnumerateChildControls(hwnd, dlg.Controls);
+                        info.Dialogs.Add(dlg);
+                    }
+                    return true;
+                }, IntPtr.Zero);
+            }
         }
         catch { }
 
-        // Determine state: lockfile is most reliable, window title as fallback
+        // Determine state: lockfile is most reliable, then command line match, then window title
         if (!lockfileHeld && !foundProject)
         {
             info.State = unityPids.Count > 0 ? UnityProcessState.DifferentProject : UnityProcessState.NotRunning;
             return info;
         }
 
-        // Unity has this project open — scan ALL Unity windows for import/progress
+        // Unity has this project open
+        // If matched only by command line (no window title yet), Unity is still loading
+        if (info.MatchedByCommandLine && info.OpenProjects.All(t => !t.Contains(projectName, StringComparison.OrdinalIgnoreCase)))
+        {
+            info.State = UnityProcessState.Importing;
+            if (string.IsNullOrEmpty(info.ImportStatus))
+                info.ImportStatus = "Loading project (no editor window yet — matched by process command line)";
+            return info;
+        }
+
         info.State = UnityProcessState.Running;
 
         if (unityPids.Count > 0)
@@ -1801,77 +1964,45 @@ class Program
         return Encoding.UTF8.GetString(buffer, 0, read);
     }
 
-    static List<(IntPtr hwnd, string title, RECT rect)> FindFloatingUnityWindows(string projectPath)
+    /// <summary>
+    /// Enumerates all child controls of a window (buttons, text labels, edit fields, etc.)
+    /// </summary>
+    static void EnumerateChildControls(IntPtr parentHwnd, List<DialogControl> controls)
     {
-        var floating = new List<(IntPtr, string, RECT)>();
-        try
-        {
-            string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
-            IntPtr mainHwnd = IntPtr.Zero;
-            uint unityPid = 0;
+        const uint WM_GETTEXT = 0x000D;
+        const uint WM_GETTEXTLENGTH = 0x000E;
 
-            foreach (var proc in Process.GetProcessesByName("Unity"))
+        EnumChildWindows(parentHwnd, (hwnd, _) =>
+        {
+            var classNameBuf = new StringBuilder(256);
+            GetClassName(hwnd, classNameBuf, 256);
+            string className = classNameBuf.ToString();
+
+            // Get control text via WM_GETTEXT (works for all control types)
+            var lenResult = SendMessage(hwnd, WM_GETTEXTLENGTH, IntPtr.Zero, null);
+            int textLen = lenResult.ToInt32();
+            string text = "";
+            if (textLen > 0)
             {
-                if (proc.MainWindowHandle != IntPtr.Zero &&
-                    proc.MainWindowTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase))
-                {
-                    mainHwnd = proc.MainWindowHandle;
-                    unityPid = (uint)proc.Id;
-                    break;
-                }
+                var textBuf = new StringBuilder(textLen + 1);
+                SendMessage(hwnd, WM_GETTEXT, (IntPtr)(textLen + 1), textBuf);
+                text = textBuf.ToString();
             }
 
-            if (mainHwnd == IntPtr.Zero) return floating;
+            bool visible = IsWindowVisible(hwnd);
+            GetWindowRect(hwnd, out RECT rect);
 
-            // Known Unity editor window titles — these are NOT modal dialogs
-            var editorWindows = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            controls.Add(new DialogControl
             {
-                "Game", "Scene", "Inspector", "Hierarchy", "Console", "Project",
-                "Profiler", "Animation", "Animator", "Audio Mixer", "Frame Debugger",
-                "Lighting", "Navigation", "Occlusion", "Package Manager",
-                "Rendering Debugger", "Sprite Editor", "Tile Palette",
-                "Timeline", "UI Builder", "Version Control", "Test Runner"
-            };
+                Hwnd = hwnd,
+                ClassName = className,
+                Text = text,
+                IsVisible = visible,
+                Rect = rect
+            });
 
-            EnumWindows((hwnd, _) =>
-            {
-                if (hwnd == mainHwnd) return true;
-                if (!IsWindowVisible(hwnd)) return true;
-
-                GetWindowThreadProcessId(hwnd, out uint pid);
-                if (pid != unityPid) return true;
-
-                var sb = new StringBuilder(256);
-                GetWindowText(hwnd, sb, 256);
-                string title = sb.ToString();
-                if (string.IsNullOrEmpty(title)) return true;
-
-                // Skip known Unity editor windows — they're not modal dialogs
-                if (editorWindows.Contains(title)) return true;
-
-                // Check window style: modal dialogs typically have WS_POPUP or WS_EX_DLGMODALFRAME
-                long style = GetWindowLong(hwnd, -16); // GWL_STYLE
-                long exStyle = GetWindowLong(hwnd, -20); // GWL_EXSTYLE
-                bool isPopup = (style & 0x80000000L) != 0; // WS_POPUP
-                bool isDialog = (exStyle & 0x00000001L) != 0; // WS_EX_DLGMODALFRAME
-                // Also treat windows with title containing common dialog keywords as dialogs
-                bool hasDialogTitle = title.Contains("Save", StringComparison.OrdinalIgnoreCase)
-                    || title.Contains("Import", StringComparison.OrdinalIgnoreCase)
-                    || title.Contains("Error", StringComparison.OrdinalIgnoreCase)
-                    || title.Contains("Warning", StringComparison.OrdinalIgnoreCase)
-                    || title.Contains("Build", StringComparison.OrdinalIgnoreCase)
-                    || title.Contains("Progress", StringComparison.OrdinalIgnoreCase);
-
-                if (isPopup || isDialog || hasDialogTitle)
-                {
-                    GetWindowRect(hwnd, out RECT rect);
-                    floating.Add((hwnd, title, rect));
-                }
-                return true;
-            }, IntPtr.Zero);
-        }
-        catch { }
-        return floating;
+            return true;
+        }, IntPtr.Zero);
     }
 
     /// <summary>
