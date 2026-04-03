@@ -566,7 +566,8 @@ class Program
         // Skip for fast commands: PING, PROBE, DIAG, DISMISS, SCREENSHOT
         string cmdUpper = command.ToUpperInvariant();
         if (cmdUpper != "PING" && cmdUpper != "PROBE" && cmdUpper != "DIAG" &&
-            cmdUpper != "DISMISS" && cmdUpper != "SCREENSHOT" && cmdUpper != "UPDATE")
+            cmdUpper != "DISMISS" && cmdUpper != "SCREENSHOT" && cmdUpper != "UPDATE" &&
+            cmdUpper != "SERVE")
         {
             CheckForUpdateInBackground();
         }
@@ -575,6 +576,12 @@ class Program
         if (cmdUpper == "UPDATE")
         {
             return HandleSelfUpdate();
+        }
+
+        // SERVE: local HTTP file server (no Unity needed)
+        if (cmdUpper == "SERVE")
+        {
+            return ReportServer.Run(data);
         }
 
 
@@ -830,6 +837,7 @@ class Program
         Console.Error.WriteLine("Setup & Update:");
         Console.Error.WriteLine("  clibridge4unity SETUP                      # Install UPM package + CLAUDE.md");
         Console.Error.WriteLine("  clibridge4unity UPDATE                     # Self-update CLI + UPM package");
+        Console.Error.WriteLine("  clibridge4unity SERVE [--port N] [--ttl M] # Start local file server (port 8420)");
         Console.Error.WriteLine();
         Console.Error.WriteLine("Examples:");
         Console.Error.WriteLine("  clibridge4unity PING                       # Auto-detect project");

@@ -399,7 +399,10 @@ namespace clibridge4unity
             {
                 if (assembly.IsDynamic) continue;
                 string assemblyName = assembly.GetName().Name;
-                if (!assemblyName.StartsWith("clibridge4unity")) continue;
+                // Scan our own assemblies + any assembly that references clibridge4unity.Core
+                // This allows external packages to register [BridgeCommand] methods
+                if (!assemblyName.StartsWith("clibridge4unity") &&
+                    !ReferencesCore(assembly)) continue;
 
                 try
                 {
@@ -586,6 +589,13 @@ namespace clibridge4unity
         {
             if (!_isInitialized)
                 Initialize();
+        }
+
+        private static bool ReferencesCore(System.Reflection.Assembly assembly)
+        {
+            foreach (var r in assembly.GetReferencedAssemblies())
+                if (r.Name == "clibridge4unity.Core") return true;
+            return false;
         }
 
         private static bool ValidateMethodSignature(MethodInfo method, BridgeCommandAttribute attr, out string error)
