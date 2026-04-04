@@ -44,7 +44,8 @@ namespace clibridge4unity
                 var args = CommandArgs.Parse(data, TestFlags);
 
                 if (api == null)
-                    api = ScriptableObject.CreateInstance<TestRunnerApi>();
+                    api = await CommandRegistry.RunOnMainThreadAsync(() =>
+                        ScriptableObject.CreateInstance<TestRunnerApi>());
 
                 // Determine test mode
                 var testMode = args.Has("all") ? TestMode.EditMode | TestMode.PlayMode
@@ -79,11 +80,15 @@ namespace clibridge4unity
         {
             var tcs = new TaskCompletionSource<List<string>>();
 
-            api.RetrieveTestList(testMode, (testRoot) =>
+            await CommandRegistry.RunOnMainThreadAsync(() =>
             {
-                var tests = new List<string>();
-                CollectTestNames(testRoot, tests);
-                tcs.TrySetResult(tests);
+                api.RetrieveTestList(testMode, (testRoot) =>
+                {
+                    var tests = new List<string>();
+                    CollectTestNames(testRoot, tests);
+                    tcs.TrySetResult(tests);
+                });
+                return 0;
             });
 
             var timeout = Task.Delay(10000);
@@ -110,22 +115,27 @@ namespace clibridge4unity
 
         private static async Task RunTests(StreamWriter writer, TestMode testMode, string testName, CancellationToken ct)
         {
-            // Unregister previous callbacks
-            if (currentCallbacks != null)
-                api.UnregisterCallbacks(currentCallbacks);
-
             var state = new RunState { Writer = writer, StartTime = DateTime.Now, Ct = ct };
             var callbacks = new StreamingTestCallbacks(state);
-            currentCallbacks = callbacks;
-            api.RegisterCallbacks(callbacks);
 
-            // Create filter
-            var testFilter = new Filter { testMode = testMode };
-            if (!string.IsNullOrEmpty(testName))
-                testFilter.groupNames = new[] { testName };
+            await CommandRegistry.RunOnMainThreadAsync(() =>
+            {
+                // Unregister previous callbacks
+                if (currentCallbacks != null)
+                    api.UnregisterCallbacks(currentCallbacks);
 
-            // Start the run
-            api.Execute(new ExecutionSettings(testFilter));
+                currentCallbacks = callbacks;
+                api.RegisterCallbacks(callbacks);
+
+                // Create filter
+                var testFilter = new Filter { testMode = testMode };
+                if (!string.IsNullOrEmpty(testName))
+                    testFilter.groupNames = new[] { testName };
+
+                // Start the run
+                api.Execute(new ExecutionSettings(testFilter));
+                return 0;
+            });
 
             // Wait for completion, cancellation, or 10 minute timeout
             var timeoutTask = Task.Delay(600000, ct);
