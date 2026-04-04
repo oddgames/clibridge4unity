@@ -959,7 +959,7 @@ class Program
             string cmdUpper2 = command.ToUpperInvariant();
             if (cmdUpper2 == "COMPILE" || cmdUpper2 == "REFRESH" || cmdUpper2 == "TEST" ||
                 cmdUpper2 == "CODE_EXEC" || cmdUpper2 == "CODE_EXEC_RETURN" ||
-                cmdUpper2 == "SCREENSHOT")
+                cmdUpper2 == "SCREENSHOT" || cmdUpper2 == "UIACTION" || cmdUpper2 == "UISESSION")
                 readTimeoutMs = 15000;
 
             using var cts = new CancellationTokenSource(readTimeoutMs);
@@ -1789,6 +1789,11 @@ class Program
 
                     // Skip the main Unity editor window (contains " - Unity" or "SAFE MODE")
                     if (title.Contains(" - Unity ") || title.Contains(" - SAFE MODE -")) return true;
+
+                    // Skip undocked editor panels (same class as main window)
+                    var classBuf = new StringBuilder(256);
+                    GetClassName(hwnd, classBuf, 256);
+                    if (classBuf.ToString() == "UnityContainerWndClass") return true;
 
                     // Any other visible Unity window is potentially a dialog
                     GetWindowRect(hwnd, out RECT rect);

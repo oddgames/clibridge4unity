@@ -715,6 +715,11 @@ namespace clibridge4unity
                 GetWindowThreadProcessId(wnd, out uint pid);
                 if (pid != unityPid) return true;
 
+                // Skip undocked editor panels (same window class as main window)
+                var classBuf = new StringBuilder(256);
+                GetClassName(wnd, classBuf, 256);
+                if (classBuf.ToString() == "UnityContainerWndClass") return true;
+
                 titleBuf.Clear();
                 GetWindowText(wnd, titleBuf, 256);
                 string title = titleBuf.ToString();
