@@ -954,17 +954,12 @@ class Program
             pipe.Write(msgBytes, 0, msgBytes.Length);
             pipe.Flush();
 
-            // Read response — 5s default, 15s for known slow commands
-            int readTimeoutMs = 5000;
-            string cmdUpper2 = command.ToUpperInvariant();
-            if (cmdUpper2 == "COMPILE" || cmdUpper2 == "REFRESH" || cmdUpper2 == "TEST" ||
-                cmdUpper2 == "CODE_EXEC" || cmdUpper2 == "CODE_EXEC_RETURN" ||
-                cmdUpper2 == "SCREENSHOT" || cmdUpper2 == "UIACTION" || cmdUpper2 == "UISESSION")
-                readTimeoutMs = 15000;
-
+            // Read the server's timeout hint, then read the actual response
+            int readTimeoutMs = 10000; // initial timeout for the hint itself
             using var cts = new CancellationTokenSource(readTimeoutMs);
             var responseBuilder = new StringBuilder();
             byte[] buffer = new byte[4096];
+            bool gotTimeoutHint = false;
             try
             {
                 while (true)
@@ -974,8 +969,29 @@ class Program
                     int bytesRead = readTask.Result;
                     if (bytesRead == 0) break;
                     string chunk = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+                    // Parse timeout hint from server (first message: "__timeout:30\n")
+                    if (!gotTimeoutHint && chunk.StartsWith("__timeout:"))
+                    {
+                        int nlIdx = chunk.IndexOf('\n');
+                        if (nlIdx > 0)
+                        {
+                            string hintStr = chunk.Substring(10, nlIdx - 10);
+                            if (int.TryParse(hintStr, out int hintSec))
+                                readTimeoutMs = hintSec * 1000;
+                            gotTimeoutHint = true;
+                            cts.CancelAfter(readTimeoutMs);
+                            // Process any data after the hint line
+                            chunk = chunk.Substring(nlIdx + 1);
+                            if (chunk.Length == 0) continue;
+                        }
+                    }
+
                     Console.Write(chunk);
                     responseBuilder.Append(chunk);
+
+                    // Reset idle timeout on each chunk (supports streaming commands)
+                    cts.CancelAfter(readTimeoutMs);
                 }
             }
             catch (OperationCanceledException)

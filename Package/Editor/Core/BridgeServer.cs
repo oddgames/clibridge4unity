@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.32";
+        public const string Version = "1.0.33";
 
         private static CancellationTokenSource serverCts;
         private static NamedPipeServerStream currentPipeServer;
@@ -299,11 +299,17 @@ namespace clibridge4unity
                     }
                 }
 
-                // Process command with timeout — fast fail, don't block
+                // Timeout from attribute — no hardcoded fallbacks
                 var cmdInfo = CommandRegistry.GetCommand(command);
-                int timeoutMs = cmdInfo?.RequiresMainThread == true ? 10000 : 25000;
+                int timeoutSec = cmdInfo?.TimeoutSeconds ?? 10;
+                int timeoutMs = timeoutSec * 1000;
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeoutCts.CancelAfter(timeoutMs);
+
+                // Send timeout hint so CLI can set its read timeout dynamically
+                var hintBytes = Encoding.UTF8.GetBytes($"__timeout:{timeoutSec}\n");
+                await pipe.WriteAsync(hintBytes, 0, hintBytes.Length, ct);
+                await pipe.FlushAsync();
 
                 string response;
                 try
@@ -312,7 +318,7 @@ namespace clibridge4unity
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
-                    response = Response.Error($"Command '{command}' timed out after {timeoutMs / 1000}s");
+                    response = Response.Error($"Command '{command}' timed out after {timeoutSec}s");
                 }
 
                 // Send final response (may be empty for streaming commands)

@@ -26,7 +26,8 @@ namespace clibridge4unity
         public string Usage { get; set; }
         public string Category { get; set; }
         public bool RequiresMainThread { get; set; }
-        public bool Streaming { get; set; }
+        public bool IsStreaming { get; set; }
+        public int TimeoutSeconds { get; set; }
         public MethodInfo Method { get; set; }
         public object Instance { get; set; }
     }
@@ -432,7 +433,9 @@ namespace clibridge4unity
                                 Usage = attr.Usage ?? attr.Name,
                                 Category = attr.Category,
                                 RequiresMainThread = attr.RequiresMainThread,
-                                Streaming = attr.Streaming,
+                                IsStreaming = attr.Streaming,
+                                TimeoutSeconds = attr.TimeoutSeconds > 0 ? attr.TimeoutSeconds
+                                    : attr.RequiresMainThread ? 25 : 10,
                                 Method = method,
                                 Instance = method.IsStatic ? null : GetOrCreateInstance(type)
                             };
@@ -647,7 +650,7 @@ namespace clibridge4unity
         {
             var parameters = cmd.Method.GetParameters();
 
-            if (cmd.Streaming)
+            if (cmd.IsStreaming)
             {
                 var streamingTask = (Task)cmd.Method.Invoke(cmd.Instance, new object[] { data, pipe, ct });
                 await streamingTask;
