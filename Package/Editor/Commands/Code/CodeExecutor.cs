@@ -296,13 +296,13 @@ namespace clibridge4unity
             return dict2;
         }
 
-        struct CompileResult
+        internal struct CompileResult
         {
             public Assembly Assembly;
             public string Error;
         }
 
-        private static CompileResult Compile(string fullCode)
+        internal static CompileResult Compile(string fullCode)
         {
             if (useRoslyn)
             {
@@ -430,7 +430,7 @@ namespace clibridge4unity
             return new CompileResult { Assembly = result.CompiledAssembly };
         }
 
-        private static object RunAssembly(Assembly assembly)
+        internal static object RunAssembly(Assembly assembly)
         {
             // Try the generated wrapper class first (from WrapCode)
             var type = assembly.GetType("clibridge4unity.Generated.Runner");
@@ -459,7 +459,7 @@ namespace clibridge4unity
             return method.Invoke(null, null);
         }
 
-        private static string WrapCode(string code)
+        internal static string WrapCode(string code)
         {
             code = code.Trim();
 
@@ -520,7 +520,7 @@ namespace clibridge4unity
             return sb.ToString();
         }
 
-        private static void Initialize()
+        internal static void Initialize()
         {
             string editorPath = Path.GetDirectoryName(UnityEditor.EditorApplication.applicationPath);
 

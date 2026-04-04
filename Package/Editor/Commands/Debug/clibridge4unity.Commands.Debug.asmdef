@@ -1,0 +1,19 @@
+{
+    "name": "clibridge4unity.Commands.Debug",
+    "rootNamespace": "clibridge4unity.Commands",
+    "references": [
+        "clibridge4unity.Core",
+        "clibridge4unity.Commands.Code"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
