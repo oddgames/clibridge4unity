@@ -80,6 +80,8 @@ class Program
     private static extern bool BringWindowToTop(IntPtr hWnd);
     [DllImport("user32.dll")]
     private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
 
@@ -678,6 +680,14 @@ class Program
             return 0;
         }
 
+        // WAKEUP: bring Unity to foreground — CLI-side, no pipe needed
+        // WAKEUP refresh — also sends Ctrl+R to force asset refresh/recompile
+        if (command.Equals("WAKEUP", StringComparison.OrdinalIgnoreCase))
+        {
+            bool refresh = data != null && data.Contains("refresh", StringComparison.OrdinalIgnoreCase);
+            return HandleWakeup(projectPath, refresh);
+        }
+
         // Pre-flight: check if Unity is running for this project (instant, no pipe needed)
         if (unityInfo.State == UnityProcessState.NotRunning)
         {
@@ -1036,6 +1046,7 @@ class Program
         {
             Console.Error.WriteLine($"Error: Pipe connection timed out for command '{command}'.");
             Console.Error.Write(BuildDiagnosticReport(projectPath));
+            Console.Error.WriteLine("action: Try 'clibridge4unity WAKEUP refresh' to wake Unity and force recompile.");
             return 1;
         }
         catch (OperationCanceledException)
@@ -2238,14 +2249,16 @@ class Program
         return 0;
     }
 
-    static int HandleWakeup()
+    static int HandleWakeup(string projectPath, bool sendRefresh = false)
     {
+        string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
+
         IntPtr previousWindow = GetForegroundWindow();
         var titleBuf = new StringBuilder(256);
         GetWindowText(previousWindow, titleBuf, 256);
         string previousTitle = titleBuf.ToString();
 
-        // Find all Unity editor windows
+        // Find Unity editor windows matching this project
         var unityWindows = new List<IntPtr>();
         EnumWindows((hwnd, _) =>
         {
@@ -2253,7 +2266,7 @@ class Program
             var sb = new StringBuilder(256);
             GetWindowText(hwnd, sb, 256);
             string title = sb.ToString();
-            if (title.Contains("Unity") && title.Contains(" - "))
+            if (title.Contains(" - Unity") && title.Contains(projectName, StringComparison.OrdinalIgnoreCase))
             {
                 GetWindowThreadProcessId(hwnd, out uint pid);
                 try
@@ -2269,7 +2282,7 @@ class Program
 
         if (unityWindows.Count == 0)
         {
-            Console.Error.WriteLine("Error: No Unity editor windows found");
+            Console.Error.WriteLine($"Error: No Unity window found for project '{projectName}'");
             return 1;
         }
 
@@ -2294,8 +2307,30 @@ class Program
                 AttachThreadInput(ourThreadId, foregroundThreadId, false);
         }
 
-        Console.Error.WriteLine($"Woke {unityWindows.Count} Unity window(s), waiting 1s...");
-        Thread.Sleep(1000);
+        Console.Error.WriteLine($"Woke {unityWindows.Count} Unity window(s)");
+
+        // Send Ctrl+R to trigger asset refresh/recompile
+        if (sendRefresh)
+        {
+            Thread.Sleep(500); // let Unity process the focus change
+            const byte VK_CONTROL = 0x11;
+            const byte VK_R = 0x52;
+            const uint KEYEVENTF_KEYUP = 0x0002;
+            keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
+            keybd_event(VK_R, 0, 0, UIntPtr.Zero);
+            keybd_event(VK_R, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            Console.Error.WriteLine("Sent Ctrl+R (asset refresh)");
+        }
+
+        Thread.Sleep(500);
+
+        // Don't return focus when refreshing — Unity needs to stay focused to process Ctrl+R
+        if (sendRefresh)
+        {
+            Console.WriteLine($"Woke {unityWindows.Count} Unity window(s) (keeping focus for refresh)");
+            return 0;
+        }
 
         // Return focus to previous window
         if (previousWindow != IntPtr.Zero)
