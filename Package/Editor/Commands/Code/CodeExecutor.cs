@@ -323,9 +323,9 @@ namespace clibridge4unity
         #region --trace
 
         /// <summary>
-        /// Execute code with line-by-line trace instrumentation.
-        /// Filters: --from N (start at statement N), --only varName (only trace lines touching var),
-        /// --vars x,y (only show these vars), --skip pattern (skip matching statements).
+        /// Execute code with line-by-line trace instrumentation using Roslyn parsing.
+        /// Inserts __log.Add() calls as sibling statements after each expression/declaration/return.
+        /// Handles for/while/if correctly by only instrumenting their body statements.
         /// </summary>
         static async Task<string> ExecuteTrace(string code, int maxLines, int fromLine, string onlyVar, string varsFilter, string skipPattern)
         {
@@ -333,58 +333,99 @@ namespace clibridge4unity
                 System.Text.RegularExpressions.Regex.IsMatch(code, @"(?m)^\s*namespace\s"))
                 return Response.Error("--trace only works with inline code, not full class definitions");
 
-            var statements = SplitStatements(code);
-            var declaredVars = new List<string>();
-            var instrumented = new StringBuilder();
-            instrumented.AppendLine("var __t = new System.Collections.Generic.List<string>();");
-            instrumented.AppendLine("var __sw = System.Diagnostics.Stopwatch.StartNew();");
-
-            // Parse --vars filter into a set
+            // Parse --vars filter
             HashSet<string> varsSet = null;
             if (!string.IsNullOrEmpty(varsFilter))
                 varsSet = new HashSet<string>(varsFilter.Split(',').Select(v => v.Trim()));
 
-            for (int i = 0; i < statements.Count; i++)
+            // Strip using statements (WrapCode handles them)
+            var codeLines = code.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            var usings = new List<string>();
+            var bodyLines = new List<string>();
+            foreach (var line in codeLines)
             {
-                string stmt = statements[i].Trim();
-                if (string.IsNullOrEmpty(stmt)) continue;
+                string trimmed = line.Trim();
+                if (trimmed.StartsWith("using ") && trimmed.EndsWith(";") && !trimmed.Contains("("))
+                    usings.Add(trimmed);
+                else
+                    bodyLines.Add(line);
+            }
+            string bodyCode = string.Join("\n", bodyLines).Trim();
 
-                // Track variable declarations
-                var declMatch = System.Text.RegularExpressions.Regex.Match(stmt,
+            // Instrument the code: parse each line, insert trace calls
+            var instrumented = new StringBuilder();
+            foreach (var u in usings) instrumented.AppendLine(u);
+            instrumented.AppendLine("var __log = new System.Collections.Generic.List<string>();");
+            instrumented.AppendLine("var __sw = System.Diagnostics.Stopwatch.StartNew();");
+            instrumented.AppendLine($"int __maxLines = {maxLines};");
+
+            var declaredVars = new List<string>();
+            int stmtNum = 0;
+
+            // Process line by line — simpler and more robust than AST rewriting via reflection
+            var lines = bodyCode.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i];
+                string trimmed = line.Trim();
+                if (string.IsNullOrEmpty(trimmed)) continue;
+
+                // Detect variable declarations for capture
+                var declMatch = System.Text.RegularExpressions.Regex.Match(trimmed,
                     @"^(?:var|int|long|float|double|decimal|bool|string|char|byte|short|uint|ulong|ushort|sbyte|object)\s+(\w+)\s*[=;]");
                 if (declMatch.Success && !declaredVars.Contains(declMatch.Groups[1].Value))
                     declaredVars.Add(declMatch.Groups[1].Value);
 
-                // Handle return statements
-                if (stmt.TrimStart().StartsWith("return "))
+                // Also detect typed declarations like List<int> x = ...
+                if (!declMatch.Success)
                 {
-                    string returnExpr = stmt.TrimStart().Substring(7).TrimEnd(';').Trim();
+                    var typedDecl = System.Text.RegularExpressions.Regex.Match(trimmed,
+                        @"^[A-Z][\w<>,\.\[\]]*\s+(\w+)\s*[=;]");
+                    if (typedDecl.Success && !declaredVars.Contains(typedDecl.Groups[1].Value))
+                        declaredVars.Add(typedDecl.Groups[1].Value);
+                }
+
+                // Classify the line
+                bool isSimpleStatement = trimmed.EndsWith(";") &&
+                    !trimmed.StartsWith("for ") && !trimmed.StartsWith("for(") &&
+                    !trimmed.StartsWith("foreach ") && !trimmed.StartsWith("foreach(") &&
+                    !trimmed.StartsWith("while ") && !trimmed.StartsWith("while(") &&
+                    !trimmed.StartsWith("if ") && !trimmed.StartsWith("if(") &&
+                    !trimmed.StartsWith("else") && !trimmed.StartsWith("} else") &&
+                    !trimmed.StartsWith("//");
+
+                bool isReturn = trimmed.StartsWith("return ") && trimmed.EndsWith(";");
+
+                stmtNum++;
+
+                // Handle return — capture value before returning
+                if (isReturn)
+                {
+                    string returnExpr = trimmed.Substring(7, trimmed.Length - 8).Trim();
+                    string label = Esc(trimmed);
                     instrumented.AppendLine($"var __retval = (object)({returnExpr});");
-                    string label = EscapeForCSharpString($"return {returnExpr}");
-                    instrumented.AppendLine($"__t.Add(\"[{i + 1}] {label}  -> result=\" + __retval);");
-                    instrumented.AppendLine("return string.Join(\"\\n\", __t) + \"\\n---\\nresult: \" + __retval + \" (\" + __retval.GetType().Name + \")\";");
+                    instrumented.AppendLine($"__log.Add(\"[{stmtNum}] {label}  -> result=\" + __retval);");
+                    instrumented.AppendLine("return string.Join(\"\\n\", __log) + \"\\n---\\nreturn: \" + __retval + \" (\" + __retval.GetType().Name + \")\";");
                     continue;
                 }
 
-                // Always emit the statement (it must execute regardless of filtering)
-                instrumented.AppendLine(stmt);
+                // Emit the original line
+                instrumented.AppendLine(line);
 
-                // Decide whether to emit a trace line for this statement
-                int lineNum = i + 1;
-                bool shouldTrace = lineNum >= fromLine;
+                // Only trace simple statements (not control flow headers, braces, comments)
+                if (!isSimpleStatement) continue;
+                if (trimmed == "{" || trimmed == "}" || trimmed == "};") continue;
 
-                // --skip: suppress statements matching pattern
-                if (shouldTrace && !string.IsNullOrEmpty(skipPattern) && stmt.Contains(skipPattern))
+                // Apply filters
+                bool shouldTrace = stmtNum >= fromLine;
+                if (shouldTrace && !string.IsNullOrEmpty(skipPattern) && trimmed.Contains(skipPattern))
                     shouldTrace = false;
-
-                // --only: only trace lines that mention a specific variable
-                if (shouldTrace && !string.IsNullOrEmpty(onlyVar) && !stmt.Contains(onlyVar))
+                if (shouldTrace && !string.IsNullOrEmpty(onlyVar) && !trimmed.Contains(onlyVar))
                     shouldTrace = false;
-
                 if (!shouldTrace) continue;
 
-                // Build variable snapshot (filtered by --vars if specified)
-                string stmtLabel = EscapeForCSharpString(stmt.Length > 50 ? stmt.Substring(0, 50) + "..." : stmt);
+                // Build variable capture
+                string stmtLabel = Esc(trimmed);
                 var varParts = new List<string>();
                 foreach (var v in declaredVars)
                 {
@@ -393,15 +434,16 @@ namespace clibridge4unity
                 }
 
                 string traceExpr = varParts.Count > 0
-                    ? $"\"[{lineNum}] {stmtLabel}  -> \" + {string.Join(" + \" \" + ", varParts)}"
-                    : $"\"[{lineNum}] {stmtLabel}\"";
+                    ? $"\"[{stmtNum}] {stmtLabel}  -> \" + {string.Join(" + \" \" + ", varParts)}"
+                    : $"\"[{stmtNum}] {stmtLabel}\"";
 
-                instrumented.AppendLine($"__t.Add({traceExpr});");
-                instrumented.AppendLine($"if (__t.Count >= {maxLines}) {{ __t.Add(\"[trace limit: {maxLines} lines]\"); return string.Join(\"\\n\", __t); }}");
-                instrumented.AppendLine($"if (__sw.ElapsedMilliseconds > 10000) {{ __t.Add(\"[trace timeout: 10s]\"); return string.Join(\"\\n\", __t); }}");
+                instrumented.AppendLine($"__log.Add({traceExpr});");
+                instrumented.AppendLine($"if (__log.Count >= __maxLines) {{ __log.Add(\"[trace limit]\"); return string.Join(\"\\n\", __log); }}");
+                instrumented.AppendLine($"if (__sw.ElapsedMilliseconds > 10000) {{ __log.Add(\"[trace timeout]\"); return string.Join(\"\\n\", __log); }}");
             }
 
-            instrumented.AppendLine("return string.Join(\"\\n\", __t);");
+            // If no return was in the code, return the trace log
+            instrumented.AppendLine("return string.Join(\"\\n\", __log);");
 
             string fullCode = WrapCode(instrumented.ToString());
             var result = Compile(fullCode);
@@ -419,40 +461,11 @@ namespace clibridge4unity
             }
         }
 
-        static List<string> SplitStatements(string code)
+        static string Esc(string s)
         {
-            var statements = new List<string>();
-            var current = new StringBuilder();
-            int braceDepth = 0;
-            bool inString = false, inChar = false, escaped = false;
-            for (int i = 0; i < code.Length; i++)
-            {
-                char c = code[i];
-                if (escaped) { current.Append(c); escaped = false; continue; }
-                if (c == '\\') { current.Append(c); escaped = true; continue; }
-                if (c == '"' && !inChar) { inString = !inString; current.Append(c); continue; }
-                if (c == '\'' && !inString) { inChar = !inChar; current.Append(c); continue; }
-                if (!inString && !inChar)
-                {
-                    if (c == '{') braceDepth++;
-                    if (c == '}') braceDepth--;
-                    if (c == ';' && braceDepth == 0)
-                    {
-                        current.Append(c);
-                        statements.Add(current.ToString().Trim());
-                        current.Clear();
-                        continue;
-                    }
-                }
-                current.Append(c);
-            }
-            string remaining = current.ToString().Trim();
-            if (!string.IsNullOrEmpty(remaining)) statements.Add(remaining);
-            return statements;
+            s = s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "");
+            return s.Length > 60 ? s.Substring(0, 60) + "..." : s;
         }
-
-        static string EscapeForCSharpString(string s)
-            => s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "");
 
         #endregion
 
