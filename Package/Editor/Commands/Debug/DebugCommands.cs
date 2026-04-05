@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -15,18 +16,25 @@ using Debug = UnityEngine.Debug;
 namespace clibridge4unity.Commands
 {
     /// <summary>
-    /// DEBUG command — Phase 1: Expression evaluation, object inspection, and thread stacks.
-    /// Phase 2 will add Mono soft debugger attach/breakpoint/stepping.
+    /// DEBUG command — runtime inspection, expression evaluation, and execution tracing.
+    /// Phase 1: eval, inspect (reflection tree), trace (instrumented execution), stack.
+    /// Phase 2 (planned): Mono soft debugger attach/breakpoint/stepping.
     /// </summary>
     public static class DebugCommands
     {
+        const int MaxOutputBytes = 10240;
+        const int MaxCollectionItems = 10;
+        const int MaxTraceLines = 500;
+
         [BridgeCommand("DEBUG", "Debug tools: eval, inspect, stack, trace",
             Category = "Code",
-            Usage = "DEBUG eval <expression>       - Evaluate C# expression in Unity's runtime\n" +
-                    "  DEBUG inspect <path>          - Inspect a GameObject by hierarchy path\n" +
-                    "  DEBUG stack                   - Dump managed thread call stacks\n" +
-                    "  DEBUG trace <code>            - Execute code with line-by-line trace output\n" +
-                    "  DEBUG status                  - Debugger status and capabilities",
+            Usage = "DEBUG eval <expression>               - Evaluate C# expression\n" +
+                    "  DEBUG inspect <expression> [depth]     - Inspect object tree (reflection)\n" +
+                    "  DEBUG inspect <expression> depth --private  - Include private members\n" +
+                    "  DEBUG stack                            - Thread call stacks\n" +
+                    "  DEBUG trace <code>                     - Execute with line-by-line trace\n" +
+                    "  DEBUG trace <code> --maxlines 100      - Limit trace output\n" +
+                    "  DEBUG status                           - Debugger capabilities",
             RequiresMainThread = false,
             Streaming = true,
             TimeoutSeconds = 60)]
@@ -38,39 +46,29 @@ namespace clibridge4unity.Commands
             {
                 if (string.IsNullOrWhiteSpace(data))
                 {
-                    await writer.WriteLineAsync("Usage: DEBUG <subcommand> [args]\n" +
-                        "  eval <expression>   - Evaluate C# expression\n" +
-                        "  inspect <path>      - Inspect GameObject\n" +
-                        "  stack               - Thread call stacks\n" +
-                        "  trace <code>        - Execute with line-by-line trace\n" +
-                        "  status              - Debugger capabilities");
+                    await writer.WriteLineAsync(
+                        "Usage: DEBUG <subcommand> [args]\n" +
+                        "  eval <expression>              Evaluate C# expression\n" +
+                        "  inspect <expression> [depth]   Inspect object tree\n" +
+                        "  stack                          Thread call stacks\n" +
+                        "  trace <code>                   Execute with line trace\n" +
+                        "  status                         Debugger info");
                     return;
                 }
 
-                // Parse subcommand
                 int spaceIdx = data.IndexOf(' ');
                 string subcmd = (spaceIdx > 0 ? data.Substring(0, spaceIdx) : data).Trim().ToLowerInvariant();
                 string args = spaceIdx > 0 ? data.Substring(spaceIdx + 1).Trim() : "";
 
                 switch (subcmd)
                 {
-                    case "eval":
-                        await HandleEval(writer, args);
-                        break;
-                    case "inspect":
-                        await HandleInspect(writer, args);
-                        break;
-                    case "stack":
-                        await HandleStack(writer);
-                        break;
-                    case "trace":
-                        await HandleTrace(writer, args);
-                        break;
-                    case "status":
-                        await HandleStatus(writer);
-                        break;
+                    case "eval": await HandleEval(writer, args); break;
+                    case "inspect": await HandleInspect(writer, args); break;
+                    case "stack": await HandleStack(writer); break;
+                    case "trace": await HandleTrace(writer, args); break;
+                    case "status": await HandleStatus(writer); break;
                     default:
-                        await writer.WriteLineAsync($"Unknown subcommand: '{subcmd}'. Use: eval, inspect, stack, trace, status");
+                        await writer.WriteLineAsync($"Unknown: '{subcmd}'. Use: eval, inspect, stack, trace, status");
                         break;
                 }
             }
@@ -80,210 +78,310 @@ namespace clibridge4unity.Commands
             }
         }
 
-        /// <summary>
-        /// Evaluate a C# expression in Unity's runtime context.
-        /// Expressions are compiled with Roslyn and executed on the main thread.
-        /// </summary>
-        private static async Task HandleEval(StreamWriter writer, string expression)
+        #region eval
+
+        static async Task HandleEval(StreamWriter writer, string expression)
         {
             if (string.IsNullOrWhiteSpace(expression))
             {
-                await writer.WriteLineAsync("Usage: DEBUG eval <expression>\n" +
-                    "Examples:\n" +
+                await writer.WriteLineAsync(
+                    "Usage: DEBUG eval <expression>\n" +
                     "  DEBUG eval Camera.main.transform.position\n" +
-                    "  DEBUG eval FindObjectsOfType<Light>().Length\n" +
-                    "  DEBUG eval EditorApplication.isPlaying");
+                    "  DEBUG eval EditorApplication.isPlaying\n" +
+                    "  DEBUG eval GameObject.FindObjectsOfType<Light>().Length");
                 return;
             }
 
-            CodeExecutor.Initialize();
+            var (obj, err) = await CompileAndExecute(expression);
+            if (err != null) { await writer.WriteLineAsync(err); return; }
 
-            string fullCode = CodeExecutor.WrapCode(expression);
-            var result = CodeExecutor.Compile(fullCode);
-            if (result.Error != null)
-            {
-                await writer.WriteLineAsync(result.Error);
-                return;
-            }
-
-            try
-            {
-                var obj = await CommandRegistry.RunOnMainThreadAsync(() =>
-                    CodeExecutor.RunAssembly(result.Assembly));
-
-                await writer.WriteLineAsync(FormatValue(obj));
-            }
-            catch (TargetInvocationException ex)
-            {
-                await writer.WriteLineAsync($"Error: {(ex.InnerException ?? ex).Message}");
-            }
+            string result = FormatValueInline(obj);
+            await writer.WriteLineAsync(result);
         }
 
-        /// <summary>
-        /// Inspect a GameObject by hierarchy path — dumps components, fields, and child objects.
-        /// </summary>
-        private static async Task HandleInspect(StreamWriter writer, string path)
+        #endregion
+
+        #region inspect
+
+        static async Task HandleInspect(StreamWriter writer, string args)
         {
-            if (string.IsNullOrWhiteSpace(path))
+            if (string.IsNullOrWhiteSpace(args))
             {
-                await writer.WriteLineAsync("Usage: DEBUG inspect <gameobject path>\n" +
-                    "Examples:\n" +
-                    "  DEBUG inspect Main Camera\n" +
-                    "  DEBUG inspect Canvas/Panel/Button");
+                await writer.WriteLineAsync(
+                    "Usage: DEBUG inspect <expression> [depth] [--private]\n" +
+                    "  DEBUG inspect Camera.main\n" +
+                    "  DEBUG inspect Camera.main 2\n" +
+                    "  DEBUG inspect Camera.main 2 --private");
                 return;
             }
 
-            var output = await CommandRegistry.RunOnMainThreadAsync(() =>
+            // Parse: expression [depth] [--private]
+            bool includePrivate = args.Contains("--private");
+            string clean = args.Replace("--private", "").Trim();
+
+            // Last token might be depth
+            int maxDepth = 1;
+            var tokens = clean.Split(' ');
+            if (tokens.Length > 1 && int.TryParse(tokens.Last(), out int d))
             {
-                var go = GameObject.Find(path);
-                if (go == null)
-                    return $"GameObject not found: '{path}'";
+                maxDepth = Math.Max(1, Math.Min(d, 5)); // cap at 5
+                clean = string.Join(" ", tokens.Take(tokens.Length - 1));
+            }
 
-                var sb = new StringBuilder();
-                sb.AppendLine($"=== {go.name} ===");
-                sb.AppendLine($"active: {go.activeSelf} (hierarchy: {go.activeInHierarchy})");
-                sb.AppendLine($"layer: {LayerMask.LayerToName(go.layer)} ({go.layer})");
-                sb.AppendLine($"tag: {go.tag}");
-                sb.AppendLine($"position: {go.transform.position}");
-                sb.AppendLine($"rotation: {go.transform.eulerAngles}");
-                sb.AppendLine($"scale: {go.transform.localScale}");
-                sb.AppendLine($"children: {go.transform.childCount}");
-                sb.AppendLine();
+            var (obj, err) = await CompileAndExecute(clean);
+            if (err != null) { await writer.WriteLineAsync(err); return; }
+            if (obj == null) { await writer.WriteLineAsync("(null)"); return; }
 
-                foreach (var comp in go.GetComponents<Component>())
+            var flags = BindingFlags.Public | BindingFlags.Instance;
+            if (includePrivate) flags |= BindingFlags.NonPublic;
+
+            var sb = new StringBuilder();
+            InspectObject(sb, obj, 0, maxDepth, "", flags);
+
+            string output = sb.ToString();
+            if (output.Length > MaxOutputBytes)
+                output = output.Substring(0, MaxOutputBytes) + "\n... (truncated at 10KB)";
+
+            await writer.WriteAsync(output);
+        }
+
+        static void InspectObject(StringBuilder sb, object obj, int depth, int maxDepth, string indent, BindingFlags flags)
+        {
+            if (obj == null) { sb.AppendLine(indent + "(null)"); return; }
+
+            var type = obj.GetType();
+            sb.AppendLine($"{indent}{type.Name} ({type.FullName})");
+
+            if (depth >= maxDepth) return;
+
+            var members = new List<(string name, object value, string typeName, bool isError)>();
+
+            // Properties (non-indexer, readable)
+            foreach (var prop in type.GetProperties(flags))
+            {
+                if (prop.GetIndexParameters().Length > 0) continue;
+                // Skip noisy base properties on Unity objects
+                if (depth == 0 && (prop.Name == "gameObject" || prop.Name == "transform")) continue;
+                try
                 {
-                    if (comp == null) continue;
-                    var type = comp.GetType();
-                    sb.AppendLine($"[{type.Name}]");
+                    var val = prop.GetValue(obj);
+                    members.Add((prop.Name, val, prop.PropertyType.Name, false));
+                }
+                catch { members.Add((prop.Name, null, prop.PropertyType.Name, true)); }
+            }
 
-                    // Dump serialized fields (same as Inspector would show)
-                    var fields = type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    foreach (var field in fields)
-                    {
-                        bool serialized = field.IsPublic ||
-                            field.GetCustomAttribute<SerializeField>() != null;
-                        if (!serialized) continue;
-                        if (field.GetCustomAttribute<HideInInspector>() != null) continue;
+            // Fields
+            foreach (var field in type.GetFields(flags))
+            {
+                try
+                {
+                    var val = field.GetValue(obj);
+                    members.Add((field.Name, val, field.FieldType.Name, false));
+                }
+                catch { members.Add((field.Name, null, field.FieldType.Name, true)); }
+            }
 
-                        try
-                        {
-                            var val = field.GetValue(comp);
-                            sb.AppendLine($"  {field.Name}: {FormatValueCompact(val)} ({field.FieldType.Name})");
-                        }
-                        catch { sb.AppendLine($"  {field.Name}: <error reading>"); }
-                    }
+            int shown = 0;
+            int total = members.Count;
+            string childIndent = indent + "  ";
 
-                    // Public properties (non-indexers, with getters)
-                    var props = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                        .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
-                        .Take(10); // limit to avoid noise
-                    foreach (var prop in props)
-                    {
-                        // Skip common noisy properties
-                        if (prop.Name == "gameObject" || prop.Name == "transform" ||
-                            prop.Name == "tag" || prop.Name == "name") continue;
-                        try
-                        {
-                            var val = prop.GetValue(comp);
-                            sb.AppendLine($"  {prop.Name}: {FormatValueCompact(val)} ({prop.PropertyType.Name})");
-                        }
-                        catch { }
-                    }
-                    sb.AppendLine();
+            foreach (var (name, value, typeName, isError) in members)
+            {
+                if (sb.Length > MaxOutputBytes) break;
+                if (shown >= 30)
+                {
+                    sb.AppendLine($"{indent}... ({total - shown} more)");
+                    break;
                 }
 
-                return sb.ToString().TrimEnd();
-            });
+                string connector = shown < total - 1 ? "├─" : "└─";
+                shown++;
 
-            await writer.WriteLineAsync(output);
+                if (isError)
+                {
+                    sb.AppendLine($"{indent}{connector} {name}: (error reading) ({typeName})");
+                    continue;
+                }
+
+                string formatted = FormatMemberValue(value, depth + 1, maxDepth, childIndent, flags);
+                sb.AppendLine($"{indent}{connector} {name}: {formatted}");
+            }
         }
 
-        /// <summary>
-        /// Dump managed call stacks for all threads.
-        /// </summary>
-        private static async Task HandleStack(StreamWriter writer)
+        static string FormatMemberValue(object val, int depth, int maxDepth, string indent, BindingFlags flags)
         {
-            // Current thread stack
-            var currentStack = new StackTrace(true);
-            await writer.WriteLineAsync($"=== Current Thread ({Thread.CurrentThread.ManagedThreadId}) ===");
-            await writer.WriteLineAsync(FormatStackTrace(currentStack));
+            if (val == null) return "(null)";
+            if (val is string s) return s.Length > 80 ? $"\"{s.Substring(0, 80)}...\"" : $"\"{s}\"";
+            var type = val.GetType();
+            if (type.IsPrimitive || type == typeof(decimal) || type.IsEnum) return $"{val} ({type.Name})";
+            if (type.Namespace == "UnityEngine" && (type.IsValueType || type == typeof(Color)))
+                return $"{val} ({type.Name})";
 
-            // Main thread stack
+            if (val is ICollection col)
+            {
+                if (depth >= maxDepth) return $"[{col.Count} items] ({type.Name})";
+                var sb = new StringBuilder();
+                sb.AppendLine($"[{col.Count} items] ({type.Name})");
+                int i = 0;
+                foreach (var item in col)
+                {
+                    if (i >= MaxCollectionItems) { sb.AppendLine($"{indent}  ... ({col.Count - i} more)"); break; }
+                    sb.AppendLine($"{indent}  [{i}]: {FormatMemberValue(item, depth + 1, maxDepth, indent + "  ", flags)}");
+                    i++;
+                }
+                return sb.ToString().TrimEnd();
+            }
+
+            if (val is UnityEngine.Object uobj)
+            {
+                if (depth >= maxDepth) return $"{uobj.name} ({type.Name})";
+                var sb = new StringBuilder();
+                sb.AppendLine($"{uobj.name} ({type.Name})");
+                InspectObject(sb, val, depth, maxDepth, indent, flags);
+                return sb.ToString().TrimEnd();
+            }
+
+            if (depth >= maxDepth) return $"{type.Name} (depth limit)";
+
+            var sb2 = new StringBuilder();
+            sb2.AppendLine();
+            InspectObject(sb2, val, depth, maxDepth, indent, flags);
+            return sb2.ToString().TrimEnd();
+        }
+
+        #endregion
+
+        #region stack
+
+        static async Task HandleStack(StreamWriter writer)
+        {
+            await writer.WriteLineAsync($"=== Current Thread ({Thread.CurrentThread.ManagedThreadId}) ===");
+            await writer.WriteLineAsync(FormatStackTrace(new StackTrace(true)));
+
             try
             {
-                var mainStack = await CommandRegistry.RunOnMainThreadAsync(() =>
-                {
-                    return new StackTrace(true).ToString();
-                });
-                await writer.WriteLineAsync($"=== Main Thread ===");
+                var mainStack = await CommandRegistry.RunOnMainThreadAsync(() => new StackTrace(true).ToString());
+                await writer.WriteLineAsync($"\n=== Main Thread ===");
                 await writer.WriteLineAsync(mainStack.Trim());
             }
             catch (Exception ex)
             {
-                await writer.WriteLineAsync($"=== Main Thread ===\n  (unavailable: {ex.Message})");
+                await writer.WriteLineAsync($"\n=== Main Thread ===\n  (unavailable: {ex.Message})");
             }
         }
 
-        /// <summary>
-        /// Execute code with line-by-line trace output.
-        /// Injects Console.WriteLine before each statement so you can see execution flow.
-        /// </summary>
-        private static async Task HandleTrace(StreamWriter writer, string code)
+        #endregion
+
+        #region trace
+
+        static async Task HandleTrace(StreamWriter writer, string code)
         {
             if (string.IsNullOrWhiteSpace(code))
             {
-                await writer.WriteLineAsync("Usage: DEBUG trace <code>\n" +
-                    "Executes C# code with line-by-line trace output.\n" +
-                    "Example: DEBUG trace int x = 10; int y = x + 5; Debug.Log(y);");
+                await writer.WriteLineAsync(
+                    "Usage: DEBUG trace <code>\n" +
+                    "  DEBUG trace 'int x = 10; int y = x + 5; return y;'\n" +
+                    "  DEBUG trace @/path/to/file.cs\n" +
+                    "Options: --maxlines 100 --maxtime 5000");
                 return;
+            }
+
+            // Parse options
+            int maxLines = MaxTraceLines;
+            int maxTimeMs = 10000;
+            if (code.Contains("--maxlines"))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(code, @"--maxlines\s+(\d+)");
+                if (match.Success) maxLines = int.Parse(match.Groups[1].Value);
+                code = System.Text.RegularExpressions.Regex.Replace(code, @"--maxlines\s+\d+", "").Trim();
+            }
+            if (code.Contains("--maxtime"))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(code, @"--maxtime\s+(\d+)");
+                if (match.Success) maxTimeMs = int.Parse(match.Groups[1].Value);
+                code = System.Text.RegularExpressions.Regex.Replace(code, @"--maxtime\s+\d+", "").Trim();
             }
 
             // Read from file if @path
             if (code.StartsWith("@"))
             {
                 string filePath = code.Substring(1).Trim();
-                if (File.Exists(filePath))
-                    code = File.ReadAllText(filePath);
+                if (File.Exists(filePath)) code = File.ReadAllText(filePath);
             }
 
             CodeExecutor.Initialize();
 
-            // If it's already a full class, we can't easily instrument it — just compile and run
+            // Full class code — can't instrument, just run
             if (code.Contains("class ") || code.Contains("namespace "))
             {
-                await writer.WriteLineAsync("[trace] Full class code detected — running without instrumentation");
-                var compResult = CodeExecutor.Compile(code);
-                if (compResult.Error != null) { await writer.WriteLineAsync(compResult.Error); return; }
+                await writer.WriteLineAsync("[trace] Full class code — running without instrumentation");
+                var r = CodeExecutor.Compile(code);
+                if (r.Error != null) { await writer.WriteLineAsync(r.Error); return; }
                 try
                 {
-                    var obj = await CommandRegistry.RunOnMainThreadAsync(() =>
-                        CodeExecutor.RunAssembly(compResult.Assembly));
-                    await writer.WriteLineAsync($"[result] {FormatValue(obj)}");
+                    var obj = await CommandRegistry.RunOnMainThreadAsync(() => CodeExecutor.RunAssembly(r.Assembly));
+                    await writer.WriteLineAsync($"[result] {FormatValueInline(obj)}");
                 }
                 catch (Exception ex) { await writer.WriteLineAsync($"[error] {ex.Message}"); }
                 return;
             }
 
-            // Split into statements and instrument each one
+            // Instrument: inject __Trace calls after each statement
             var statements = SplitStatements(code);
-            var traceLog = new List<string>();
+            var instrumented = new StringBuilder();
+            instrumented.AppendLine($"var __trace = new System.Collections.Generic.List<string>();");
+            instrumented.AppendLine($"int __maxLines = {maxLines};");
+            instrumented.AppendLine($"var __sw = System.Diagnostics.Stopwatch.StartNew();");
+            instrumented.AppendLine($"long __maxMs = {maxTimeMs};");
 
-            // Build instrumented code: after each statement, capture its line and any changed variables
-            var sb = new StringBuilder();
-            sb.AppendLine("var __trace = new System.Collections.Generic.List<string>();");
+            // Track declared variables for capture
+            var declaredVars = new List<string>();
 
             for (int i = 0; i < statements.Count; i++)
             {
                 string stmt = statements[i].Trim();
                 if (string.IsNullOrEmpty(stmt)) continue;
 
-                sb.AppendLine(stmt);
-                sb.AppendLine($"__trace.Add(\"[{i + 1}] {EscapeForString(stmt)}\");");
+                // Detect variable declarations: "int x = ...", "var x = ...", "string x = ..."
+                var declMatch = System.Text.RegularExpressions.Regex.Match(stmt,
+                    @"^(?:var|int|long|float|double|decimal|bool|string|char|byte|short|object)\s+(\w+)\s*[=;]");
+                if (declMatch.Success)
+                    declaredVars.Add(declMatch.Groups[1].Value);
+
+                // Also detect typed declarations: "List<int> x = ..."
+                var typedDeclMatch = System.Text.RegularExpressions.Regex.Match(stmt,
+                    @"^[\w\.<>,\[\]\s]+\s+(\w+)\s*[=;]");
+                if (!declMatch.Success && typedDeclMatch.Success &&
+                    !stmt.StartsWith("return ") && !stmt.StartsWith("if ") &&
+                    !stmt.StartsWith("for") && !stmt.StartsWith("while"))
+                    declaredVars.Add(typedDeclMatch.Groups[1].Value);
+
+                // Emit the statement
+                instrumented.AppendLine(stmt);
+
+                // Emit trace capture after each statement
+                string stmtEscaped = EscapeForString(stmt);
+                if (stmtEscaped.Length > 60) stmtEscaped = stmtEscaped.Substring(0, 60) + "...";
+
+                var varCaptures = new StringBuilder();
+                foreach (var v in declaredVars)
+                {
+                    if (varCaptures.Length > 0) varCaptures.Append(" + \" \" + ");
+                    varCaptures.Append($"\"{v}=\" + {v}");
+                }
+
+                string traceExpr = varCaptures.Length > 0
+                    ? $"$\"[{i + 1}] {stmtEscaped}  → \" + {varCaptures}"
+                    : $"\"[{i + 1}] {stmtEscaped}\"";
+
+                instrumented.AppendLine($"__trace.Add({traceExpr});");
+                instrumented.AppendLine($"if (__trace.Count >= __maxLines) throw new System.Exception(\"Trace limit (\" + __maxLines + \" lines)\");");
+                instrumented.AppendLine($"if (__sw.ElapsedMilliseconds > __maxMs) throw new System.Exception(\"Trace timeout (\" + __maxMs + \"ms)\");");
             }
 
-            sb.AppendLine("return string.Join(\"\\n\", __trace);");
+            instrumented.AppendLine("return string.Join(\"\\n\", __trace);");
 
-            string fullCode = CodeExecutor.WrapCode(sb.ToString());
+            string fullCode = CodeExecutor.WrapCode(instrumented.ToString());
             var result = CodeExecutor.Compile(fullCode);
             if (result.Error != null)
             {
@@ -293,25 +391,30 @@ namespace clibridge4unity.Commands
 
             try
             {
-                var obj = await CommandRegistry.RunOnMainThreadAsync(() =>
-                    CodeExecutor.RunAssembly(result.Assembly));
-                string traceOutput = obj?.ToString() ?? "(no output)";
-                await writer.WriteLineAsync(traceOutput);
+                var obj = await CommandRegistry.RunOnMainThreadAsync(() => CodeExecutor.RunAssembly(result.Assembly));
+                await writer.WriteLineAsync(obj?.ToString() ?? "(no output)");
             }
             catch (TargetInvocationException ex)
             {
-                await writer.WriteLineAsync($"[error] {(ex.InnerException ?? ex).Message}");
+                var inner = ex.InnerException ?? ex;
+                // Trace limit/timeout are expected — show partial trace
+                if (inner.Message.StartsWith("Trace limit") || inner.Message.StartsWith("Trace timeout"))
+                    await writer.WriteLineAsync($"[{inner.Message}]");
+                else
+                    await writer.WriteLineAsync($"[error at runtime] {inner.Message}");
             }
         }
 
-        /// <summary>
-        /// Show debugger status and capabilities.
-        /// </summary>
-        private static async Task HandleStatus(StreamWriter writer)
+        #endregion
+
+        #region status
+
+        static async Task HandleStatus(StreamWriter writer)
         {
             var sb = new StringBuilder();
             sb.AppendLine("=== DEBUG Status ===");
-            sb.AppendLine("phase: 1 (expression evaluation)");
+            sb.AppendLine("phase: 1 (expression evaluation + tracing)");
+
             bool roslynOk = false;
             try { CodeExecutor.Initialize(); roslynOk = CodeExecutor.Compile("class T{}").Assembly != null; } catch { }
             sb.AppendLine($"roslyn: {(roslynOk ? "available" : "unavailable")}");
@@ -321,130 +424,113 @@ namespace clibridge4unity.Commands
             sb.AppendLine($"playing: {playing}");
             sb.AppendLine($"compiling: {compiling}");
 
-            // Check if Mono debugger agent is running
-            var args = Environment.GetCommandLineArgs();
-            var debuggerArg = args.FirstOrDefault(a => a.Contains("debugger-agent"));
+            var cmdArgs = Environment.GetCommandLineArgs();
+            var debuggerArg = cmdArgs.FirstOrDefault(a => a.Contains("debugger-agent"));
             sb.AppendLine($"debuggerAgent: {(debuggerArg != null ? "enabled" : "not enabled")}");
-            if (debuggerArg != null)
-                sb.AppendLine($"debuggerArgs: {debuggerArg}");
 
-            // Check for Mono.Debugger.Soft availability
             bool hasSoftDebugger = false;
             try
             {
                 string editorPath = Path.GetDirectoryName(EditorApplication.applicationPath);
-                string softDebuggerPath = Path.Combine(editorPath, "Data", "MonoBleedingEdge", "lib", "mono", "4.5", "Mono.Debugger.Soft.dll");
-                hasSoftDebugger = File.Exists(softDebuggerPath);
+                hasSoftDebugger = File.Exists(Path.Combine(editorPath, "Data", "MonoBleedingEdge", "lib", "mono", "4.5", "Mono.Debugger.Soft.dll"));
             }
             catch { }
             sb.AppendLine($"softDebuggerDll: {(hasSoftDebugger ? "found" : "not found")}");
 
             sb.AppendLine();
-            sb.AppendLine("Available commands:");
-            sb.AppendLine("  DEBUG eval <expr>     - Evaluate expression");
-            sb.AppendLine("  DEBUG inspect <path>  - Inspect GameObject");
-            sb.AppendLine("  DEBUG stack           - Thread stacks");
-            sb.AppendLine("  DEBUG trace <code>    - Execute with trace");
-            sb.AppendLine("  DEBUG status          - This info");
-            sb.AppendLine();
-            sb.AppendLine("Phase 2 (planned): attach, break, step, locals, continue");
+            sb.AppendLine("Commands:");
+            sb.AppendLine("  eval <expr>                   Evaluate expression");
+            sb.AppendLine("  inspect <expr> [depth] [--private]  Object tree");
+            sb.AppendLine("  stack                         Thread stacks");
+            sb.AppendLine("  trace <code> [--maxlines N]   Instrumented execution");
+            sb.AppendLine("  status                        This info");
 
             await writer.WriteAsync(sb.ToString());
         }
 
-        #region Formatting Helpers
+        #endregion
 
-        private static string FormatValue(object obj)
+        #region Helpers
+
+        static async Task<(object result, string error)> CompileAndExecute(string expression)
         {
-            if (obj == null) return "null";
+            CodeExecutor.Initialize();
+
+            string fullCode = CodeExecutor.WrapCode(expression);
+            var compileResult = CodeExecutor.Compile(fullCode);
+            if (compileResult.Error != null)
+                return (null, compileResult.Error);
+
+            try
+            {
+                var asm = compileResult.Assembly;
+                var obj = await CommandRegistry.RunOnMainThreadAsync(() => CodeExecutor.RunAssembly(asm));
+                return (obj, null);
+            }
+            catch (TargetInvocationException ex)
+            {
+                return (null, $"Error: {(ex.InnerException ?? ex).Message}");
+            }
+            catch (Exception ex)
+            {
+                return (null, $"Error: {ex.Message}");
+            }
+        }
+
+        static string FormatValueInline(object obj)
+        {
+            if (obj == null) return "(null)";
             var type = obj.GetType();
-
-            if (type.IsPrimitive || type == typeof(string) || type == typeof(decimal))
+            if (type.IsPrimitive || type == typeof(string) || type == typeof(decimal) || type.IsEnum)
                 return $"{obj} ({type.Name})";
-
             if (obj is UnityEngine.Object uobj)
             {
-                if (obj is GameObject go)
-                    return $"{go.name} [active={go.activeSelf}, components={go.GetComponents<Component>().Length}] (GameObject)";
-                if (obj is Component comp)
-                    return $"{comp.GetType().Name} on '{comp.gameObject.name}' ({type.Name})";
-                return $"{uobj.name} (instance={uobj.GetInstanceID()}) ({type.Name})";
+                if (obj is GameObject go) return $"{go.name} [active={go.activeSelf}, components={go.GetComponents<Component>().Length}] (GameObject)";
+                if (obj is Component comp) return $"{comp.GetType().Name} on '{comp.gameObject.name}' ({type.Name})";
+                return $"{uobj.name} (id={uobj.GetInstanceID()}) ({type.Name})";
             }
-
-            if (obj is System.Collections.IEnumerable enumerable && type != typeof(string))
+            if (obj is ICollection col)
             {
-                int count = 0;
-                var preview = new List<string>();
-                foreach (var item in enumerable)
-                {
-                    if (count < 5)
-                        preview.Add(FormatValueCompact(item));
-                    count++;
-                }
-                string items = string.Join(", ", preview);
-                if (count > 5) items += $", ... ({count} total)";
-                return $"[{items}] ({type.Name})";
+                var items = new List<string>();
+                int i = 0;
+                foreach (var item in col) { if (i++ >= 5) break; items.Add(FormatValueInline(item)); }
+                string preview = string.Join(", ", items);
+                if (col.Count > 5) preview += $", ... ({col.Count} total)";
+                return $"[{preview}] ({type.Name})";
             }
-
-            // Vectors, Quaternions, Colors — use ToString
-            if (type.Namespace == "UnityEngine")
-                return $"{obj} ({type.Name})";
-
+            if (type.Namespace == "UnityEngine") return $"{obj} ({type.Name})";
             return $"{obj} ({type.Name})";
         }
 
-        private static string FormatValueCompact(object obj)
-        {
-            if (obj == null) return "null";
-            if (obj is string s) return s.Length > 50 ? $"\"{s.Substring(0, 50)}...\"" : $"\"{s}\"";
-            if (obj is UnityEngine.Object uobj) return uobj.name;
-            return obj.ToString();
-        }
-
-        private static string FormatStackTrace(StackTrace trace)
+        static string FormatStackTrace(StackTrace trace)
         {
             var sb = new StringBuilder();
             foreach (var frame in trace.GetFrames())
             {
                 var method = frame.GetMethod();
                 if (method == null) continue;
-                string typeName = method.DeclaringType?.Name ?? "?";
                 string file = frame.GetFileName();
                 int line = frame.GetFileLineNumber();
-
-                if (file != null)
-                    sb.AppendLine($"  {typeName}.{method.Name}() at {Path.GetFileName(file)}:{line}");
-                else
-                    sb.AppendLine($"  {typeName}.{method.Name}()");
+                string loc = file != null ? $" at {Path.GetFileName(file)}:{line}" : "";
+                sb.AppendLine($"  {method.DeclaringType?.Name ?? "?"}.{method.Name}(){loc}");
             }
             return sb.ToString().TrimEnd();
         }
 
-        #endregion
-
-        #region Code Helpers
-
-        /// <summary>
-        /// Split code into individual statements by semicolons (respecting strings and braces).
-        /// </summary>
-        private static List<string> SplitStatements(string code)
+        static List<string> SplitStatements(string code)
         {
             var statements = new List<string>();
             var current = new StringBuilder();
             int braceDepth = 0;
-            bool inString = false;
-            bool inChar = false;
-            bool escaped = false;
+            bool inString = false, inChar = false, escaped = false;
 
             for (int i = 0; i < code.Length; i++)
             {
                 char c = code[i];
-
                 if (escaped) { current.Append(c); escaped = false; continue; }
                 if (c == '\\') { current.Append(c); escaped = true; continue; }
                 if (c == '"' && !inChar) { inString = !inString; current.Append(c); continue; }
                 if (c == '\'' && !inString) { inChar = !inChar; current.Append(c); continue; }
-
                 if (!inString && !inChar)
                 {
                     if (c == '{') braceDepth++;
@@ -459,18 +545,13 @@ namespace clibridge4unity.Commands
                 }
                 current.Append(c);
             }
-
             string remaining = current.ToString().Trim();
-            if (!string.IsNullOrEmpty(remaining))
-                statements.Add(remaining);
-
+            if (!string.IsNullOrEmpty(remaining)) statements.Add(remaining);
             return statements;
         }
 
-        private static string EscapeForString(string s)
-        {
-            return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "");
-        }
+        static string EscapeForString(string s)
+            => s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "");
 
         #endregion
     }
