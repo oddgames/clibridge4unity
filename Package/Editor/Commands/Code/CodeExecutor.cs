@@ -362,7 +362,35 @@ namespace clibridge4unity
             var declaredVars = new List<string>();
             int stmtNum = 0;
 
-            // Process line by line — simpler and more robust than AST rewriting via reflection
+            // Normalize: if code is all on one line (semicolon-separated), split into lines
+            if (!bodyCode.Contains('\n') && bodyCode.Contains(';'))
+            {
+                var parts = new List<string>();
+                int depth = 0;
+                bool inStr = false, esc = false;
+                int start = 0;
+                for (int ci = 0; ci < bodyCode.Length; ci++)
+                {
+                    char ch = bodyCode[ci];
+                    if (esc) { esc = false; continue; }
+                    if (ch == '\\') { esc = true; continue; }
+                    if (ch == '"') inStr = !inStr;
+                    if (!inStr)
+                    {
+                        if (ch == '{' || ch == '(') depth++;
+                        if (ch == '}' || ch == ')') depth--;
+                        if (ch == ';' && depth == 0)
+                        {
+                            parts.Add(bodyCode.Substring(start, ci - start + 1).Trim());
+                            start = ci + 1;
+                        }
+                    }
+                }
+                string remainder = bodyCode.Substring(start).Trim();
+                if (!string.IsNullOrEmpty(remainder)) parts.Add(remainder);
+                bodyCode = string.Join("\n", parts);
+            }
+
             var lines = bodyCode.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
             for (int i = 0; i < lines.Length; i++)
             {

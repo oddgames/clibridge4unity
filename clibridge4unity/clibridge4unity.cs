@@ -1015,15 +1015,17 @@ class Program
                 else
                 {
                     // Inline code — fix shell mangling and write to temp file
-                    if (data.Contains("\\\""))
+                    // Strip --flags before writing (they go after @path, not in the file)
+                    string codeForFile = dataForFileCheck;
+                    if (codeForFile.Contains("\\\""))
                     {
-                        data = data.Replace("$\\\"", "$\"");   // $\" → $"  (interpolated strings)
-                        data = data.Replace("\\\"", "\"");     // \" → "    (remaining escaped quotes)
+                        codeForFile = codeForFile.Replace("$\\\"", "$\"");
+                        codeForFile = codeForFile.Replace("\\\"", "\"");
                     }
 
                     string tempFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_code_{Guid.NewGuid():N}.cs");
-                    File.WriteAllText(tempFile, data);
-                    data = $"@{tempFile}";
+                    File.WriteAllText(tempFile, codeForFile);
+                    data = $"@{tempFile}{trailingFlags}";
                 }
             }
 
