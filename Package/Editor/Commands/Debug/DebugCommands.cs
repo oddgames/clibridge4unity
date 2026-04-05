@@ -315,8 +315,11 @@ namespace clibridge4unity.Commands
             bool roslynOk = false;
             try { CodeExecutor.Initialize(); roslynOk = CodeExecutor.Compile("class T{}").Assembly != null; } catch { }
             sb.AppendLine($"roslyn: {(roslynOk ? "available" : "unavailable")}");
-            sb.AppendLine($"playing: {EditorApplication.isPlaying}");
-            sb.AppendLine($"compiling: {EditorApplication.isCompiling}");
+
+            var (playing, compiling) = await CommandRegistry.RunOnMainThreadAsync(() =>
+                (EditorApplication.isPlaying, EditorApplication.isCompiling));
+            sb.AppendLine($"playing: {playing}");
+            sb.AppendLine($"compiling: {compiling}");
 
             // Check if Mono debugger agent is running
             var args = Environment.GetCommandLineArgs();
