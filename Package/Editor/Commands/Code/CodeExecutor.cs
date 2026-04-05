@@ -362,34 +362,8 @@ namespace clibridge4unity
             var declaredVars = new List<string>();
             int stmtNum = 0;
 
-            // Normalize: if code is all on one line (semicolon-separated), split into lines
-            if (!bodyCode.Contains('\n') && bodyCode.Contains(';'))
-            {
-                var parts = new List<string>();
-                int depth = 0;
-                bool inStr = false, esc = false;
-                int start = 0;
-                for (int ci = 0; ci < bodyCode.Length; ci++)
-                {
-                    char ch = bodyCode[ci];
-                    if (esc) { esc = false; continue; }
-                    if (ch == '\\') { esc = true; continue; }
-                    if (ch == '"') inStr = !inStr;
-                    if (!inStr)
-                    {
-                        if (ch == '{' || ch == '(') depth++;
-                        if (ch == '}' || ch == ')') depth--;
-                        if (ch == ';' && depth == 0)
-                        {
-                            parts.Add(bodyCode.Substring(start, ci - start + 1).Trim());
-                            start = ci + 1;
-                        }
-                    }
-                }
-                string remainder = bodyCode.Substring(start).Trim();
-                if (!string.IsNullOrEmpty(remainder)) parts.Add(remainder);
-                bodyCode = string.Join("\n", parts);
-            }
+            // Normalize to one-statement-per-line (handles ; splitting and { } expansion)
+            bodyCode = NormalizeToLines(bodyCode);
 
             var lines = bodyCode.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
             for (int i = 0; i < lines.Length; i++)
@@ -493,6 +467,51 @@ namespace clibridge4unity
         {
             s = s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "");
             return s.Length > 60 ? s.Substring(0, 60) + "..." : s;
+        }
+
+        /// <summary>
+        /// Normalize code to one statement per line.
+        /// Splits semicolons (respecting strings, for-headers, parens).
+        /// Puts { and } on separate lines so compound statement bodies get traced.
+        /// </summary>
+        static string NormalizeToLines(string code)
+        {
+            var result = new StringBuilder();
+            bool inStr = false, inChar = false, esc = false;
+            int parenDepth = 0; // tracks ( ) for for-headers
+
+            for (int i = 0; i < code.Length; i++)
+            {
+                char c = code[i];
+                if (esc) { result.Append(c); esc = false; continue; }
+                if (c == '\\') { result.Append(c); esc = true; continue; }
+                if (c == '"' && !inChar) { inStr = !inStr; result.Append(c); continue; }
+                if (c == '\'' && !inStr) { inChar = !inChar; result.Append(c); continue; }
+
+                if (inStr || inChar) { result.Append(c); continue; }
+
+                if (c == '(') parenDepth++;
+                if (c == ')') parenDepth--;
+
+                if (c == '{')
+                {
+                    result.Append("{\n");
+                    continue;
+                }
+                if (c == '}')
+                {
+                    result.Append("\n}\n");
+                    continue;
+                }
+                if (c == ';' && parenDepth == 0)
+                {
+                    result.Append(";\n");
+                    continue;
+                }
+
+                result.Append(c);
+            }
+            return result.ToString();
         }
 
         #endregion
