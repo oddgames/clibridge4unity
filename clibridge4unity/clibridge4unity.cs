@@ -925,17 +925,27 @@ class Program
                 //   script.cs            — bare filename
                 //   ./script.cs          — relative path
                 //   C:\path\script.cs    — absolute path
-                string fileCandidate = data.StartsWith("@") ? data.Substring(1).Trim() : data.Trim();
-                bool looksLikeFile = data.StartsWith("@")
+                // Strip --flags from file path detection (flags are for the server)
+                string dataForFileCheck = data;
+                string trailingFlags = "";
+                int flagIdx = dataForFileCheck.IndexOf(" --");
+                if (flagIdx > 0)
+                {
+                    trailingFlags = dataForFileCheck.Substring(flagIdx);
+                    dataForFileCheck = dataForFileCheck.Substring(0, flagIdx).Trim();
+                }
+
+                string fileCandidate = dataForFileCheck.StartsWith("@") ? dataForFileCheck.Substring(1).Trim() : dataForFileCheck.Trim();
+                bool looksLikeFile = dataForFileCheck.StartsWith("@")
                     || (fileCandidate.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
                         && !fileCandidate.Contains("\n")
                         && fileCandidate.Length < 260);
 
                 if (looksLikeFile && File.Exists(Path.GetFullPath(fileCandidate)))
                 {
-                    data = $"@{Path.GetFullPath(fileCandidate)}";
+                    data = $"@{Path.GetFullPath(fileCandidate)}{trailingFlags}";
                 }
-                else if (data.StartsWith("@"))
+                else if (dataForFileCheck.StartsWith("@"))
                 {
                     Console.Error.WriteLine($"Error: File not found: {Path.GetFullPath(fileCandidate)}");
                     return 1;

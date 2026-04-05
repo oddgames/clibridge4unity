@@ -329,7 +329,8 @@ namespace clibridge4unity
         /// </summary>
         static async Task<string> ExecuteTrace(string code, int maxLines, int fromLine, string onlyVar, string varsFilter, string skipPattern)
         {
-            if (code.Contains("class ") || code.Contains("namespace "))
+            if (System.Text.RegularExpressions.Regex.IsMatch(code, @"(?m)^\s*(public\s+|internal\s+|static\s+)*class\s") ||
+                System.Text.RegularExpressions.Regex.IsMatch(code, @"(?m)^\s*namespace\s"))
                 return Response.Error("--trace only works with inline code, not full class definitions");
 
             var statements = SplitStatements(code);
@@ -757,8 +758,10 @@ namespace clibridge4unity
         {
             code = code.Trim();
 
-            // If it's complete code (has class/namespace), use as-is
-            if (code.Contains("class ") || code.Contains("namespace "))
+            // If it's complete code (has class/namespace at line start), use as-is
+            // Check line starts to avoid matching "class" inside string literals
+            if (System.Text.RegularExpressions.Regex.IsMatch(code, @"(?m)^\s*(public\s+|internal\s+|static\s+|abstract\s+|sealed\s+)*class\s") ||
+                System.Text.RegularExpressions.Regex.IsMatch(code, @"(?m)^\s*namespace\s"))
                 return code;
 
             // Parse any custom usings from the code
