@@ -876,17 +876,25 @@ class Program
         Console.Error.WriteLine("  --log-filter <filter>   Log filter for --wait: errors (default), warnings, all");
         Console.Error.WriteLine("  --version               Show version information");
         Console.Error.WriteLine();
-        Console.Error.WriteLine("Setup & Update:");
-        Console.Error.WriteLine("  clibridge4unity SETUP                      # Install UPM package + CLAUDE.md");
-        Console.Error.WriteLine("  clibridge4unity UPDATE                     # Self-update CLI + UPM package");
-        Console.Error.WriteLine("  clibridge4unity SERVE [--port N] [--ttl M] # Start local file server (port 8420)");
+        Console.Error.WriteLine("CLI-side commands (no Unity pipe needed):");
+        Console.Error.WriteLine("  SETUP                      Install UPM package + generate CLAUDE.md");
+        Console.Error.WriteLine("  UPDATE                     Self-update CLI + UPM package");
+        Console.Error.WriteLine("  SERVE [--port N] [--ttl M] Start local file server (port 8420)");
+        Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");
+        Console.Error.WriteLine("  WAKEUP refresh             Bring to foreground + force recompile (Ctrl+R)");
+        Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");
+        Console.Error.WriteLine("  SCREENSHOT [view]          Capture Unity window screenshot");
+        Console.Error.WriteLine("  LAST [command|index]       Retrieve previous command result from history");
         Console.Error.WriteLine();
-        Console.Error.WriteLine("Examples:");
-        Console.Error.WriteLine("  clibridge4unity PING                       # Auto-detect project");
-        Console.Error.WriteLine("  clibridge4unity CODE_ANALYZE BridgeServer   # Analyze a class");
-        Console.Error.WriteLine("  clibridge4unity -d C:\\\\MyUnityProject STATUS # Explicit project path");
+        Console.Error.WriteLine("Key bridge commands (requires Unity):");
+        Console.Error.WriteLine("  PING / STATUS / HELP       Connection and status");
+        Console.Error.WriteLine("  CODE_EXEC_RETURN <code>    Execute C# and return result");
+        Console.Error.WriteLine("    --inspect [depth]        Dump result object tree");
+        Console.Error.WriteLine("    --trace [--maxlines N]   Line-by-line execution trace");
+        Console.Error.WriteLine("  TEST [filter]              Run tests (streaming with progress/ETA)");
+        Console.Error.WriteLine("  TEST list [filter]         List available tests");
         Console.Error.WriteLine();
-        Console.Error.WriteLine("The Unity project is auto-detected from the current directory.");
+        Console.Error.WriteLine("Run with -h inside a Unity project for the full command list.");
     }
 
     static string AutoDetectProjectPath()
