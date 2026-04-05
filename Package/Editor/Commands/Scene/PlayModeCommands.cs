@@ -39,6 +39,8 @@ namespace clibridge4unity
                 if (EditorApplication.isPlaying)
                     return Response.Success("Already in play mode");
 
+                SessionState.SetString(SessionKeys.PlayModeStartTime,
+                    System.DateTime.Now.Ticks.ToString());
                 EditorApplication.isPlaying = true;
                 return Response.Success("Entering play mode");
             }

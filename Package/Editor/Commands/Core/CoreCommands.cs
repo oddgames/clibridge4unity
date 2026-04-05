@@ -147,6 +147,24 @@ namespace clibridge4unity
                 compileErrorCount = compileErrorMessages.Count;
             }
 
+            // Play mode duration
+            string playModeDuration = null;
+            if (EditorApplication.isPlaying)
+            {
+                string startStr = SessionState.GetString(SessionKeys.PlayModeStartTime, "0");
+                if (long.TryParse(startStr, out var startTicks) && startTicks > 0)
+                {
+                    var elapsed = System.DateTime.Now - new System.DateTime(startTicks);
+                    playModeDuration = elapsed.TotalMinutes >= 1
+                        ? $"{(int)elapsed.TotalMinutes}m {elapsed.Seconds}s"
+                        : $"{(int)elapsed.TotalSeconds}s";
+                }
+            }
+
+            // Current scene
+            string currentScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+            string currentScenePath = UnityEngine.SceneManagement.SceneManager.GetActiveScene().path;
+
             return Response.SuccessWithData(new
             {
                 bridgeVersion = BridgeServer.Version,
@@ -158,6 +176,9 @@ namespace clibridge4unity
                 consoleWarnings,
                 isPlaying = EditorApplication.isPlaying,
                 isPaused = EditorApplication.isPaused,
+                playModeDuration,
+                currentScene,
+                currentScenePath,
                 scriptsModified = ScriptsModifiedSinceCompile(),
                 lastCompileRequest = lastCompileRequestStr,
                 lastCompileFinished = lastCompileStr,
