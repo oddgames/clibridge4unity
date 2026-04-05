@@ -312,7 +312,9 @@ namespace clibridge4unity.Commands
             var sb = new StringBuilder();
             sb.AppendLine("=== DEBUG Status ===");
             sb.AppendLine("phase: 1 (expression evaluation)");
-            sb.AppendLine($"roslyn: {(CodeExecutor.Compile("class T{}").Assembly != null ? "available" : "unavailable")}");
+            bool roslynOk = false;
+            try { CodeExecutor.Initialize(); roslynOk = CodeExecutor.Compile("class T{}").Assembly != null; } catch { }
+            sb.AppendLine($"roslyn: {(roslynOk ? "available" : "unavailable")}");
             sb.AppendLine($"playing: {EditorApplication.isPlaying}");
             sb.AppendLine($"compiling: {EditorApplication.isCompiling}");
 
