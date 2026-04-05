@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.38";
+        public const string Version = "1.0.39";
 
         private static CancellationTokenSource serverCts;
         private static NamedPipeServerStream currentPipeServer;

@@ -143,7 +143,9 @@ namespace clibridge4unity
             Category = "Code",
             Usage = "CODE_EXEC_RETURN <c# code>\n" +
                     "  CODE_EXEC_RETURN <expr> --inspect [depth] [--private]\n" +
-                    "  CODE_EXEC_RETURN <code> --trace [--maxlines N]",
+                    "  CODE_EXEC_RETURN <code> --trace [--maxlines N] [--from N]\n" +
+                    "  CODE_EXEC_RETURN <code> --trace --only varName\n" +
+                    "  CODE_EXEC_RETURN <code> --trace --vars x,y --skip print",
             RequiresMainThread = false,
             TimeoutSeconds = 30)]
         public static async Task<string> ExecuteReturn(string code)
@@ -161,6 +163,10 @@ namespace clibridge4unity
                 code = ExtractFlag(code, "--private", out includePrivate);
                 code = ExtractIntFlag(code, "--inspect", out inspect, out inspectDepth, 1);
                 code = ExtractIntFlag(code, "--maxlines", out _, out maxTraceLines, 500);
+                code = ExtractIntFlag(code, "--from", out _, out int traceFrom, 0);
+                code = ExtractStringFlag(code, "--only", out string traceOnly);
+                code = ExtractStringFlag(code, "--vars", out string traceVars);
+                code = ExtractStringFlag(code, "--skip", out string traceSkip);
                 code = ExtractFlag(code, "--trace", out trace);
                 code = code.Trim();
 
@@ -168,7 +174,7 @@ namespace clibridge4unity
 
                 // Trace mode: instrument code before compiling
                 if (trace)
-                    return await ExecuteTrace(code, maxTraceLines);
+                    return await ExecuteTrace(code, maxTraceLines, traceFrom, traceOnly, traceVars, traceSkip);
 
                 string fullCode = WrapCode(code);
                 int codeHash = fullCode.GetHashCode();
@@ -313,53 +319,78 @@ namespace clibridge4unity
 
         #region --trace
 
-        static async Task<string> ExecuteTrace(string code, int maxLines)
+        /// <summary>
+        /// Execute code with line-by-line trace instrumentation.
+        /// Filters: --from N (start at statement N), --only varName (only trace lines touching var),
+        /// --vars x,y (only show these vars), --skip pattern (skip matching statements).
+        /// </summary>
+        static async Task<string> ExecuteTrace(string code, int maxLines, int fromLine, string onlyVar, string varsFilter, string skipPattern)
         {
-            // Full class code — can't instrument
             if (code.Contains("class ") || code.Contains("namespace "))
                 return Response.Error("--trace only works with inline code, not full class definitions");
 
-            // Split into statements and instrument
             var statements = SplitStatements(code);
             var declaredVars = new List<string>();
             var instrumented = new StringBuilder();
             instrumented.AppendLine("var __t = new System.Collections.Generic.List<string>();");
             instrumented.AppendLine("var __sw = System.Diagnostics.Stopwatch.StartNew();");
 
+            // Parse --vars filter into a set
+            HashSet<string> varsSet = null;
+            if (!string.IsNullOrEmpty(varsFilter))
+                varsSet = new HashSet<string>(varsFilter.Split(',').Select(v => v.Trim()));
+
             for (int i = 0; i < statements.Count; i++)
             {
                 string stmt = statements[i].Trim();
                 if (string.IsNullOrEmpty(stmt)) continue;
 
-                // Track new variable declarations
+                // Track variable declarations
                 var declMatch = System.Text.RegularExpressions.Regex.Match(stmt,
                     @"^(?:var|int|long|float|double|decimal|bool|string|char|byte|short|uint|ulong|ushort|sbyte|object)\s+(\w+)\s*[=;]");
                 if (declMatch.Success && !declaredVars.Contains(declMatch.Groups[1].Value))
                     declaredVars.Add(declMatch.Groups[1].Value);
 
-                // Handle return statements — capture result before returning
+                // Handle return statements
                 if (stmt.TrimStart().StartsWith("return "))
                 {
                     string returnExpr = stmt.TrimStart().Substring(7).TrimEnd(';').Trim();
-                    instrumented.AppendLine($"var __retval = {returnExpr};");
+                    instrumented.AppendLine($"var __retval = (object)({returnExpr});");
                     string label = EscapeForCSharpString($"return {returnExpr}");
                     instrumented.AppendLine($"__t.Add(\"[{i + 1}] {label}  -> result=\" + __retval);");
-                    instrumented.AppendLine("return string.Join(\"\\n\", __t) + \"\\n---\\nresult: \" + __retval + \" (\" + __retval?.GetType()?.Name + \")\";");
+                    instrumented.AppendLine("return string.Join(\"\\n\", __t) + \"\\n---\\nresult: \" + __retval + \" (\" + __retval.GetType().Name + \")\";");
                     continue;
                 }
 
-                // Emit the statement
+                // Always emit the statement (it must execute regardless of filtering)
                 instrumented.AppendLine(stmt);
 
-                // Build variable snapshot
+                // Decide whether to emit a trace line for this statement
+                int lineNum = i + 1;
+                bool shouldTrace = lineNum >= fromLine;
+
+                // --skip: suppress statements matching pattern
+                if (shouldTrace && !string.IsNullOrEmpty(skipPattern) && stmt.Contains(skipPattern))
+                    shouldTrace = false;
+
+                // --only: only trace lines that mention a specific variable
+                if (shouldTrace && !string.IsNullOrEmpty(onlyVar) && !stmt.Contains(onlyVar))
+                    shouldTrace = false;
+
+                if (!shouldTrace) continue;
+
+                // Build variable snapshot (filtered by --vars if specified)
                 string stmtLabel = EscapeForCSharpString(stmt.Length > 50 ? stmt.Substring(0, 50) + "..." : stmt);
                 var varParts = new List<string>();
                 foreach (var v in declaredVars)
+                {
+                    if (varsSet != null && !varsSet.Contains(v)) continue;
                     varParts.Add($"\"{v}=\" + {v}");
+                }
 
                 string traceExpr = varParts.Count > 0
-                    ? $"\"[{i + 1}] {stmtLabel}  -> \" + {string.Join(" + \" \" + ", varParts)}"
-                    : $"\"[{i + 1}] {stmtLabel}\"";
+                    ? $"\"[{lineNum}] {stmtLabel}  -> \" + {string.Join(" + \" \" + ", varParts)}"
+                    : $"\"[{lineNum}] {stmtLabel}\"";
 
                 instrumented.AppendLine($"__t.Add({traceExpr});");
                 instrumented.AppendLine($"if (__t.Count >= {maxLines}) {{ __t.Add(\"[trace limit: {maxLines} lines]\"); return string.Join(\"\\n\", __t); }}");
@@ -422,6 +453,19 @@ namespace clibridge4unity
         #endregion
 
         #region Flag parsing
+
+        static string ExtractStringFlag(string input, string flag, out string value)
+        {
+            value = null;
+            if (!input.Contains(flag)) return input;
+            var match = System.Text.RegularExpressions.Regex.Match(input, flag.Replace("-", @"\-") + @"\s+(\S+)");
+            if (match.Success)
+            {
+                value = match.Groups[1].Value;
+                return input.Replace(match.Value, "").Trim();
+            }
+            return input.Replace(flag, "").Trim();
+        }
 
         static string ExtractFlag(string input, string flag, out bool found)
         {
