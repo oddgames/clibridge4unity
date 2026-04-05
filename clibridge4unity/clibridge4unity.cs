@@ -1602,12 +1602,20 @@ class Program
         var info = DetectUnityProcess(projectPath);
 
         // Process state
-        sb.AppendLine($"state: {info.State}");
+        bool isSafeMode = info.OpenProjects.Any(t => t.Contains("SAFE MODE", StringComparison.OrdinalIgnoreCase));
+        sb.AppendLine($"state: {(isSafeMode ? "SafeMode" : info.State.ToString())}");
         if (info.OpenProjects.Count > 0)
         {
             sb.AppendLine($"unityWindows ({info.OpenProjects.Count}):");
             foreach (var title in info.OpenProjects)
                 sb.AppendLine($"  - {title}");
+        }
+        if (isSafeMode)
+        {
+            sb.AppendLine("--- SAFE MODE ---");
+            sb.AppendLine("Unity is in Safe Mode due to compile errors.");
+            sb.AppendLine("action: Fix compile errors in Unity Editor, exit Safe Mode, then retry.");
+            return sb.ToString();
         }
 
         // Import/busy status

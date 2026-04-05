@@ -183,6 +183,8 @@ namespace clibridge4unity
             // If already compiling (e.g. after exiting play mode), just wait for it
             if (!EditorApplication.isCompiling)
             {
+                // Force asset refresh first — detects package folder renames, new/deleted files
+                AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
                 CompilationPipeline.RequestScriptCompilation();
                 EditorApplication.QueuePlayerLoopUpdate();
             }

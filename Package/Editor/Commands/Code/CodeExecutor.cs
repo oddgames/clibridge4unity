@@ -394,7 +394,8 @@ namespace clibridge4unity
                     !trimmed.StartsWith("while ") && !trimmed.StartsWith("while(") &&
                     !trimmed.StartsWith("if ") && !trimmed.StartsWith("if(") &&
                     !trimmed.StartsWith("else") && !trimmed.StartsWith("} else") &&
-                    !trimmed.StartsWith("//");
+                    !trimmed.StartsWith("//") &&
+                    !trimmed.Contains("=>"); // skip lambdas — __log isn't in scope
 
                 bool isReturn = trimmed.StartsWith("return ") && trimmed.EndsWith(";");
 
