@@ -141,8 +141,11 @@ namespace clibridge4unity
 
         [BridgeCommand("CODE_EXEC_RETURN", "Compile and execute C# code (waits for result, 25s timeout)",
             Category = "Code",
-            Usage = "CODE_EXEC_RETURN <c# code>",
-            RequiresMainThread = false)]
+            Usage = "CODE_EXEC_RETURN <c# code>\n" +
+                    "  CODE_EXEC_RETURN <expr> --inspect [depth] [--private]\n" +
+                    "  CODE_EXEC_RETURN <code> --trace [--maxlines N]",
+            RequiresMainThread = false,
+            TimeoutSeconds = 30)]
         public static async Task<string> ExecuteReturn(string code)
         {
             try
@@ -151,12 +154,25 @@ namespace clibridge4unity
                 if (string.IsNullOrEmpty(code))
                     return Response.Error("Code required.\nExample: CODE_EXEC_RETURN 1+1");
 
+                // Parse flags from end of code
+                bool inspect = false, includePrivate = false, trace = false;
+                int inspectDepth = 1, maxTraceLines = 500;
+
+                code = ExtractFlag(code, "--private", out includePrivate);
+                code = ExtractIntFlag(code, "--inspect", out inspect, out inspectDepth, 1);
+                code = ExtractIntFlag(code, "--maxlines", out _, out maxTraceLines, 500);
+                code = ExtractFlag(code, "--trace", out trace);
+                code = code.Trim();
+
                 if (!initialized) Initialize();
+
+                // Trace mode: instrument code before compiling
+                if (trace)
+                    return await ExecuteTrace(code, maxTraceLines);
 
                 string fullCode = WrapCode(code);
                 int codeHash = fullCode.GetHashCode();
 
-                // Compile on background thread (NOT main thread - compilation can be slow)
                 Assembly assembly;
                 if (!cachedAssemblies.TryGetValue(codeHash, out assembly))
                 {
@@ -167,27 +183,16 @@ namespace clibridge4unity
                     cachedAssemblies[codeHash] = assembly;
                 }
 
-                // Execute on main thread (Unity API access requires it)
                 var asm = assembly;
                 string desc = code.Length > 80 ? $"CODE_EXEC_RETURN|{code.Substring(0, 80)}..." : $"CODE_EXEC_RETURN|{code}";
                 var result = await CommandRegistry.RunOnMainThreadAsync<object>(() => RunAssembly(asm), desc);
-                string serialized = SerializeResult(result);
 
-                // Small results inline, large results go to file
-                if (serialized.Length <= 2000)
-                    return Response.Success(serialized);
+                // Inspect mode: reflection tree dump
+                if (inspect)
+                    return Response.Success(InspectObject(result, inspectDepth, includePrivate));
 
-                string outputDir = Path.Combine(
-                    Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(),
-                    "clibridge4unity_output");
-                Directory.CreateDirectory(outputDir);
-                string outputFile = Path.Combine(outputDir, $"exec_result_{DateTime.Now:HHmmss}.txt");
-                File.WriteAllText(outputFile, serialized);
-
-                // Return summary + file path
-                string type = result?.GetType().Name ?? "null";
-                string preview = serialized.Length > 200 ? serialized.Substring(0, 200) + "..." : serialized;
-                return Response.Success($"type: {type}\nlength: {serialized.Length}\npreview: {preview}\noutput: {outputFile}");
+                // Default: serialize result with type annotation
+                return FormatResult(result);
             }
             catch (TargetInvocationException ex)
             {
@@ -198,6 +203,248 @@ namespace clibridge4unity
                 return Response.Exception(ex);
             }
         }
+
+        static string FormatResult(object result)
+        {
+            if (result == null)
+                return Response.Success("(null)");
+
+            string serialized = SerializeResult(result);
+            string typeName = result.GetType().Name;
+
+            if (serialized.Length <= 2000)
+                return Response.Success($"{serialized} ({typeName})");
+
+            string outputDir = Path.Combine(
+                Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(),
+                "clibridge4unity_output");
+            Directory.CreateDirectory(outputDir);
+            string outputFile = Path.Combine(outputDir, $"exec_result_{DateTime.Now:HHmmss}.txt");
+            File.WriteAllText(outputFile, serialized);
+
+            string preview = serialized.Length > 200 ? serialized.Substring(0, 200) + "..." : serialized;
+            return Response.Success($"type: {typeName}\nlength: {serialized.Length}\npreview: {preview}\noutput: {outputFile}");
+        }
+
+        #region --inspect
+
+        static string InspectObject(object obj, int maxDepth, bool includePrivate)
+        {
+            if (obj == null) return "(null)";
+            var sb = new StringBuilder();
+            var flags = BindingFlags.Public | BindingFlags.Instance;
+            if (includePrivate) flags |= BindingFlags.NonPublic;
+            InspectObjectTree(sb, obj, 0, Math.Min(maxDepth, 5), "", flags);
+            string output = sb.ToString().TrimEnd();
+            if (output.Length > 10240)
+                output = output.Substring(0, 10240) + "\n... (truncated at 10KB)";
+            return output;
+        }
+
+        static void InspectObjectTree(StringBuilder sb, object obj, int depth, int maxDepth, string indent, BindingFlags flags)
+        {
+            if (obj == null) { sb.AppendLine(indent + "(null)"); return; }
+            var type = obj.GetType();
+            sb.AppendLine($"{indent}{type.Name} ({type.FullName})");
+            if (depth >= maxDepth) return;
+
+            var members = new List<(string name, object value, string typeName, bool isError)>();
+
+            foreach (var prop in type.GetProperties(flags))
+            {
+                if (prop.GetIndexParameters().Length > 0) continue;
+                if (depth == 0 && (prop.Name == "gameObject" || prop.Name == "transform")) continue;
+                try { members.Add((prop.Name, prop.GetValue(obj), prop.PropertyType.Name, false)); }
+                catch { members.Add((prop.Name, null, prop.PropertyType.Name, true)); }
+            }
+            foreach (var field in type.GetFields(flags))
+            {
+                try { members.Add((field.Name, field.GetValue(obj), field.FieldType.Name, false)); }
+                catch { members.Add((field.Name, null, field.FieldType.Name, true)); }
+            }
+
+            int shown = 0;
+            string childIndent = indent + "  ";
+            foreach (var (name, value, typeName, isError) in members)
+            {
+                if (sb.Length > 10240) break;
+                if (shown >= 30) { sb.AppendLine($"{indent}... ({members.Count - shown} more)"); break; }
+                string connector = shown < members.Count - 1 ? "|--" : "\\--";
+                shown++;
+                if (isError) { sb.AppendLine($"{indent}{connector} {name}: (error) ({typeName})"); continue; }
+                sb.AppendLine($"{indent}{connector} {name}: {FormatMemberValue(value, depth + 1, maxDepth, childIndent, flags)}");
+            }
+        }
+
+        static string FormatMemberValue(object val, int depth, int maxDepth, string indent, BindingFlags flags)
+        {
+            if (val == null) return "(null)";
+            if (val is string s) return s.Length > 80 ? $"\"{s.Substring(0, 80)}...\"" : $"\"{s}\"";
+            var type = val.GetType();
+            if (type.IsPrimitive || type == typeof(decimal) || type.IsEnum) return $"{val} ({type.Name})";
+            if (type.Namespace == "UnityEngine" && (type.IsValueType || type == typeof(Color)))
+                return $"{val} ({type.Name})";
+
+            if (val is ICollection col)
+            {
+                if (depth >= maxDepth) return $"[{col.Count} items] ({type.Name})";
+                var csb = new StringBuilder($"[{col.Count} items] ({type.Name})\n");
+                int i = 0;
+                foreach (var item in col)
+                {
+                    if (i >= 10) { csb.AppendLine($"{indent}  ... ({col.Count - i} more)"); break; }
+                    csb.AppendLine($"{indent}  [{i}]: {FormatMemberValue(item, depth + 1, maxDepth, indent + "  ", flags)}");
+                    i++;
+                }
+                return csb.ToString().TrimEnd();
+            }
+
+            if (val is UnityEngine.Object uobj)
+                return depth >= maxDepth ? $"{uobj.name} ({type.Name})" : $"{uobj.name} ({type.Name})";
+
+            if (depth >= maxDepth) return $"{type.Name} (depth limit)";
+
+            var sb2 = new StringBuilder("\n");
+            InspectObjectTree(sb2, val, depth, maxDepth, indent, flags);
+            return sb2.ToString().TrimEnd();
+        }
+
+        #endregion
+
+        #region --trace
+
+        static async Task<string> ExecuteTrace(string code, int maxLines)
+        {
+            // Full class code — can't instrument
+            if (code.Contains("class ") || code.Contains("namespace "))
+                return Response.Error("--trace only works with inline code, not full class definitions");
+
+            // Split into statements and instrument
+            var statements = SplitStatements(code);
+            var declaredVars = new List<string>();
+            var instrumented = new StringBuilder();
+            instrumented.AppendLine("var __t = new System.Collections.Generic.List<string>();");
+            instrumented.AppendLine("var __sw = System.Diagnostics.Stopwatch.StartNew();");
+
+            for (int i = 0; i < statements.Count; i++)
+            {
+                string stmt = statements[i].Trim();
+                if (string.IsNullOrEmpty(stmt)) continue;
+
+                // Track new variable declarations
+                var declMatch = System.Text.RegularExpressions.Regex.Match(stmt,
+                    @"^(?:var|int|long|float|double|decimal|bool|string|char|byte|short|uint|ulong|ushort|sbyte|object)\s+(\w+)\s*[=;]");
+                if (declMatch.Success && !declaredVars.Contains(declMatch.Groups[1].Value))
+                    declaredVars.Add(declMatch.Groups[1].Value);
+
+                // Handle return statements — capture result before returning
+                if (stmt.TrimStart().StartsWith("return "))
+                {
+                    string returnExpr = stmt.TrimStart().Substring(7).TrimEnd(';').Trim();
+                    instrumented.AppendLine($"var __retval = {returnExpr};");
+                    string label = EscapeForCSharpString($"return {returnExpr}");
+                    instrumented.AppendLine($"__t.Add(\"[{i + 1}] {label}  -> result=\" + __retval);");
+                    instrumented.AppendLine("return string.Join(\"\\n\", __t) + \"\\n---\\nresult: \" + __retval + \" (\" + __retval?.GetType()?.Name + \")\";");
+                    continue;
+                }
+
+                // Emit the statement
+                instrumented.AppendLine(stmt);
+
+                // Build variable snapshot
+                string stmtLabel = EscapeForCSharpString(stmt.Length > 50 ? stmt.Substring(0, 50) + "..." : stmt);
+                var varParts = new List<string>();
+                foreach (var v in declaredVars)
+                    varParts.Add($"\"{v}=\" + {v}");
+
+                string traceExpr = varParts.Count > 0
+                    ? $"\"[{i + 1}] {stmtLabel}  -> \" + {string.Join(" + \" \" + ", varParts)}"
+                    : $"\"[{i + 1}] {stmtLabel}\"";
+
+                instrumented.AppendLine($"__t.Add({traceExpr});");
+                instrumented.AppendLine($"if (__t.Count >= {maxLines}) {{ __t.Add(\"[trace limit: {maxLines} lines]\"); return string.Join(\"\\n\", __t); }}");
+                instrumented.AppendLine($"if (__sw.ElapsedMilliseconds > 10000) {{ __t.Add(\"[trace timeout: 10s]\"); return string.Join(\"\\n\", __t); }}");
+            }
+
+            instrumented.AppendLine("return string.Join(\"\\n\", __t);");
+
+            string fullCode = WrapCode(instrumented.ToString());
+            var result = Compile(fullCode);
+            if (result.Error != null) return result.Error;
+
+            try
+            {
+                var asm = result.Assembly;
+                var obj = await CommandRegistry.RunOnMainThreadAsync<object>(() => RunAssembly(asm));
+                return Response.Success(obj?.ToString() ?? "(no output)");
+            }
+            catch (TargetInvocationException ex)
+            {
+                return Response.Exception(ex.InnerException ?? ex);
+            }
+        }
+
+        static List<string> SplitStatements(string code)
+        {
+            var statements = new List<string>();
+            var current = new StringBuilder();
+            int braceDepth = 0;
+            bool inString = false, inChar = false, escaped = false;
+            for (int i = 0; i < code.Length; i++)
+            {
+                char c = code[i];
+                if (escaped) { current.Append(c); escaped = false; continue; }
+                if (c == '\\') { current.Append(c); escaped = true; continue; }
+                if (c == '"' && !inChar) { inString = !inString; current.Append(c); continue; }
+                if (c == '\'' && !inString) { inChar = !inChar; current.Append(c); continue; }
+                if (!inString && !inChar)
+                {
+                    if (c == '{') braceDepth++;
+                    if (c == '}') braceDepth--;
+                    if (c == ';' && braceDepth == 0)
+                    {
+                        current.Append(c);
+                        statements.Add(current.ToString().Trim());
+                        current.Clear();
+                        continue;
+                    }
+                }
+                current.Append(c);
+            }
+            string remaining = current.ToString().Trim();
+            if (!string.IsNullOrEmpty(remaining)) statements.Add(remaining);
+            return statements;
+        }
+
+        static string EscapeForCSharpString(string s)
+            => s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "");
+
+        #endregion
+
+        #region Flag parsing
+
+        static string ExtractFlag(string input, string flag, out bool found)
+        {
+            found = input.Contains(flag);
+            return found ? input.Replace(flag, "").Trim() : input;
+        }
+
+        static string ExtractIntFlag(string input, string flag, out bool found, out int value, int defaultValue)
+        {
+            value = defaultValue;
+            found = input.Contains(flag);
+            if (!found) return input;
+
+            var match = System.Text.RegularExpressions.Regex.Match(input, flag.Replace("-", @"\-") + @"\s+(\d+)");
+            if (match.Success)
+            {
+                value = int.Parse(match.Groups[1].Value);
+                return input.Replace(match.Value, "").Trim();
+            }
+            return input.Replace(flag, "").Trim();
+        }
+
+        #endregion
 
         static string SerializeResult(object obj)
         {
