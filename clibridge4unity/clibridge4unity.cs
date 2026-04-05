@@ -680,6 +680,38 @@ class Program
             return 0;
         }
 
+        // LAST: retrieve previous command result — CLI-side, no pipe needed
+        if (command.Equals("LAST", StringComparison.OrdinalIgnoreCase))
+        {
+            string histDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".clibridge4unity", "history");
+            if (!Directory.Exists(histDir)) { Console.WriteLine("No command history."); return 0; }
+
+            // If data is a number, get that specific entry; otherwise get latest
+            string filter = string.IsNullOrWhiteSpace(data) ? null : data.Trim();
+            var files = Directory.GetFiles(histDir, "*.txt")
+                .OrderByDescending(f => File.GetLastWriteTime(f)).ToArray();
+
+            if (filter != null && filter.All(char.IsDigit))
+            {
+                int idx = int.Parse(filter);
+                if (idx >= 0 && idx < files.Length)
+                    Console.Write(File.ReadAllText(files[idx]));
+                else
+                    Console.Error.WriteLine($"History index {idx} out of range (0-{files.Length - 1})");
+                return 0;
+            }
+
+            // Filter by command name
+            if (filter != null)
+                files = files.Where(f => Path.GetFileName(f).Contains(filter, StringComparison.OrdinalIgnoreCase)).ToArray();
+
+            if (files.Length == 0) { Console.WriteLine("No matching history."); return 0; }
+            Console.Write(File.ReadAllText(files[0]));
+            return 0;
+        }
+
         // WAKEUP: bring Unity to foreground — CLI-side, no pipe needed
         // WAKEUP refresh — also sends Ctrl+R to force asset refresh/recompile
         if (command.Equals("WAKEUP", StringComparison.OrdinalIgnoreCase))
@@ -880,6 +912,28 @@ class Program
         return null;
     }
 
+    static void SaveCommandHistory(string command, string data, string response)
+    {
+        try
+        {
+            string histDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".clibridge4unity", "history");
+            Directory.CreateDirectory(histDir);
+
+            string timestamp = DateTime.Now.ToString("HHmmss");
+            string filename = $"{timestamp}_{command}.txt";
+            File.WriteAllText(Path.Combine(histDir, filename), response);
+
+            // Keep only last 20 entries
+            var files = Directory.GetFiles(histDir, "*.txt")
+                .OrderByDescending(f => File.GetLastWriteTime(f)).ToArray();
+            for (int i = 20; i < files.Length; i++)
+                try { File.Delete(files[i]); } catch { }
+        }
+        catch { }
+    }
+
     static string GeneratePipeName(string projectPath)
     {
         // Must match Unity server's pipe name generation exactly
@@ -1049,6 +1103,9 @@ class Program
                 _lastResponseContainedMainThreadTimeout = true;
                 return 1;
             }
+
+            // Save result to history for retrieval via LAST command
+            SaveCommandHistory(command, data, response);
 
             return 0;
         }

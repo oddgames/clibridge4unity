@@ -141,49 +141,15 @@ namespace clibridge4unity
         /// </summary>
         public static List<string> GetCompileErrorsFromConsole()
         {
-            var result = new List<string>();
-            try
+            // Return errors from CompilationPipeline (cleared on each compile start)
+            // instead of scanning the console log which contains stale errors
+            lock (_compileErrorLock)
             {
-                var logEntries = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntries");
-                if (logEntries == null) return result;
-
-                var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public;
-                var startGetting = logEntries.GetMethod("StartGettingEntries", flags);
-                var endGetting = logEntries.GetMethod("EndGettingEntries", flags);
-                var getEntry = logEntries.GetMethod("GetEntryInternal", flags);
-                var getCount = logEntries.GetMethod("GetCount", flags);
-                var logEntryType = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntry");
-
-                if (startGetting == null || getCount == null || getEntry == null || logEntryType == null)
-                    return result;
-
-                startGetting.Invoke(null, null);
-                try
-                {
-                    int count = (int)getCount.Invoke(null, null);
-                    for (int i = count - 1; i >= 0 && i >= count - 100; i--)
-                    {
-                        var entry = System.Activator.CreateInstance(logEntryType);
-                        if ((bool)getEntry.Invoke(null, new object[] { i, entry }))
-                        {
-                            var msg = logEntryType.GetField("message")?.GetValue(entry)?.ToString();
-                            if (msg != null && msg.Contains("error CS"))
-                            {
-                                string firstLine = msg.Split('\n')[0];
-                                if (!result.Contains(firstLine))
-                                    result.Add(firstLine);
-                                if (result.Count >= 20) break;
-                            }
-                        }
-                    }
-                }
-                finally
-                {
-                    endGetting?.Invoke(null, null);
-                }
+                var result = new List<string>();
+                foreach (var err in _compileErrors)
+                    result.Add(err.message.Split('\n')[0]);
+                return result;
             }
-            catch { }
-            return result;
         }
 
         /// <summary>

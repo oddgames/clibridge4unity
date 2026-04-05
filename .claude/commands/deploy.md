@@ -27,7 +27,11 @@ Use the Edit tool to update the old version → new version in each file:
 6. `install.ps1` — `.\install.ps1 -Version X.Y.Z`
 
 ### 3. Quick doc check
-Scan README.md, CLAUDE.md, SUMMARY.md for stale command lists or counts. Only edit if actually wrong.
+Verify these are up to date (only edit if actually wrong):
+1. `CLAUDE.md` commands section — must list ALL bridge commands including flags (--inspect, --trace, etc.)
+2. `CLAUDE.md` CLI-side commands — must list WAKEUP, DISMISS, SCREENSHOT, SETUP, UPDATE
+3. `SUMMARY.md` — command count must match actual
+4. Run `grep -c "BridgeCommand" Package/Editor/Commands/**/*.cs` to count actual commands
 
 ### 4. Run the deploy script
 The script handles: build → verify version → package → git commit+push → tag → release → upload → verify → update local CLI.
