@@ -152,11 +152,10 @@ namespace clibridge4unity
         {
             try
             {
-                code = ResolveCode(code);
                 if (string.IsNullOrEmpty(code))
                     return Response.Error("Code required.\nExample: CODE_EXEC_RETURN 1+1");
 
-                // Parse flags from end of code
+                // Parse flags BEFORE resolving file paths (flags come after @path)
                 bool inspect = false, includePrivate = false, trace = false;
                 int inspectDepth = 1, maxTraceLines = 500;
 
@@ -169,6 +168,10 @@ namespace clibridge4unity
                 code = ExtractStringFlag(code, "--skip", out string traceSkip);
                 code = ExtractFlag(code, "--trace", out trace);
                 code = code.Trim();
+
+                code = ResolveCode(code);
+                if (string.IsNullOrEmpty(code))
+                    return Response.Error("Code required.\nExample: CODE_EXEC_RETURN 1+1");
 
                 if (!initialized) Initialize();
 
