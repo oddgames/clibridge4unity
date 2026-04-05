@@ -93,6 +93,16 @@ class Program
     private const string GITHUB_REPO = "oddgames/clibridge4unity";
     private const string UPM_PACKAGE_NAME = "au.com.oddgames.clibridge4unity";
 
+    // Exit codes — distinct codes let AI agents branch on failure type without parsing stderr
+    const int EXIT_SUCCESS = 0;           // Command succeeded
+    const int EXIT_COMMAND_ERROR = 1;     // Command ran but failed (e.g., "not found")
+    const int EXIT_USAGE_ERROR = 2;       // Invalid arguments or usage
+    const int EXIT_CONNECTION = 10;       // Pipe connection timeout (Unity not running/responsive)
+    const int EXIT_COMPILE_ERROR = 11;    // Unity has compile errors (commands blocked)
+    const int EXIT_PLAY_MODE = 12;        // Play mode conflict (need STOP first)
+    const int EXIT_SAFE_MODE = 13;        // Unity in Safe Mode (scripts can't run)
+    const int EXIT_TIMEOUT = 14;          // Command response timed out
+
     // Track if last response indicated main thread timeout
     private static bool _lastResponseContainedMainThreadTimeout;
     private static long _preCompileLogId;
@@ -361,13 +371,13 @@ class Program
             if (string.IsNullOrEmpty(latestVersion))
             {
                 Console.Error.WriteLine("Error: Could not determine latest version.");
-                return 1;
+                return EXIT_COMMAND_ERROR;
             }
 
             if (!Version.TryParse(latestVersion, out var latest) || !Version.TryParse(CLI_VERSION, out var current))
             {
                 Console.Error.WriteLine($"Error: Could not parse versions (current={CLI_VERSION}, latest={latestVersion})");
-                return 1;
+                return EXIT_COMMAND_ERROR;
             }
 
             if (latest <= current)
@@ -375,7 +385,7 @@ class Program
                 Console.WriteLine($"CLI already up to date (v{CLI_VERSION}).");
                 // Still check manifest — CLI may be updated but manifest lagging
                 UpdateManifestTag(CLI_VERSION);
-                return 0;
+                return EXIT_SUCCESS;
             }
 
             Console.WriteLine($"Updating v{CLI_VERSION} → v{latestVersion}...");
@@ -400,7 +410,7 @@ class Program
             {
                 Console.Error.WriteLine("Error: Could not find exe in release assets.");
                 Console.Error.WriteLine($"  Run: irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
-                return 1;
+                return EXIT_COMMAND_ERROR;
             }
 
             // Download to temp file
@@ -430,13 +440,13 @@ class Program
             Console.WriteLine($"  {exePath}");
 
             UpdateManifestTag(latestVersion);
-            return 0;
+            return EXIT_SUCCESS;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error: {ex.GetType().Name}: {ex.Message}");
             Console.Error.WriteLine($"  Run: irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
-            return 1;
+            return EXIT_COMMAND_ERROR;
         }
     }
 
@@ -501,14 +511,14 @@ class Program
                 if (argIndex + 1 >= args.Length)
                 {
                     Console.Error.WriteLine("Error: -d requires a Unity project path");
-                    return 1;
+                    return EXIT_USAGE_ERROR;
                 }
                 projectPath = args[++argIndex];
                 // Validate it's a Unity project
                 if (!Directory.Exists(Path.Combine(projectPath, "Assets")))
                 {
                     Console.Error.WriteLine($"Error: Not a Unity project (no Assets folder): {projectPath}");
-                    return 1;
+                    return EXIT_USAGE_ERROR;
                 }
                 argIndex++;
             }
@@ -519,7 +529,7 @@ class Program
                 if (projectPath == null)
                 {
                     PrintUsage();
-                    return 1;
+                    return EXIT_USAGE_ERROR;
                 }
                 return SendCommand(GeneratePipeName(projectPath), projectPath, "HELP", "");
             }
@@ -528,7 +538,7 @@ class Program
                 Console.WriteLine($"clibridge4unity version {CLI_VERSION}");
                 // --version is allowed to block briefly to fetch and show update info
                 FetchAndShowUpdate();
-                return 0;
+                return EXIT_SUCCESS;
             }
             else if (arg == "--wait" || arg == "-w")
             {
@@ -540,7 +550,7 @@ class Program
                 if (argIndex + 1 >= args.Length)
                 {
                     Console.Error.WriteLine("Error: --log-filter requires a filter value (errors, warnings, all)");
-                    return 1;
+                    return EXIT_USAGE_ERROR;
                 }
                 logFilter = args[++argIndex];
                 argIndex++;
@@ -561,7 +571,7 @@ class Program
         if (command == null)
         {
             PrintUsage();
-            return 1;
+            return EXIT_USAGE_ERROR;
         }
 
         // Background update check — only for commands that take long enough for it to matter
@@ -593,7 +603,7 @@ class Program
         {
             Console.Error.WriteLine("Error: Could not detect Unity project.");
             Console.Error.WriteLine("       Run from a Unity project directory or use -d <path>.");
-            return 1;
+            return EXIT_USAGE_ERROR;
         }
 
         // Initialize path shortening for Editor.log parsing and error output
@@ -629,7 +639,7 @@ class Program
             if (dialogs.Count == 0)
             {
                 Console.WriteLine("No dialogs detected.");
-                return 0;
+                return EXIT_SUCCESS;
             }
 
             string targetButton = string.IsNullOrWhiteSpace(data) ? null : data.Trim().Trim('"');
@@ -677,7 +687,7 @@ class Program
                 Console.WriteLine($"Clicked \"{targetButton}\" on {dialogs.Count} dialog(s).");
             else
                 Console.WriteLine($"Sent WM_CLOSE to {dialogs.Count} dialog(s).");
-            return 0;
+            return EXIT_SUCCESS;
         }
 
         // LAST: retrieve previous command result — CLI-side, no pipe needed
@@ -686,7 +696,7 @@ class Program
             string histDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 ".clibridge4unity", "history");
-            if (!Directory.Exists(histDir)) { Console.WriteLine("No command history."); return 0; }
+            if (!Directory.Exists(histDir)) { Console.WriteLine("No command history."); return EXIT_SUCCESS; }
 
             // If data is a number, get that specific entry; otherwise get latest
             string filter = string.IsNullOrWhiteSpace(data) ? null : data.Trim();
@@ -700,16 +710,16 @@ class Program
                     Console.Write(File.ReadAllText(files[idx]));
                 else
                     Console.Error.WriteLine($"History index {idx} out of range (0-{files.Length - 1})");
-                return 0;
+                return EXIT_SUCCESS;
             }
 
             // Filter by command name
             if (filter != null)
                 files = files.Where(f => Path.GetFileName(f).Contains(filter, StringComparison.OrdinalIgnoreCase)).ToArray();
 
-            if (files.Length == 0) { Console.WriteLine("No matching history."); return 0; }
+            if (files.Length == 0) { Console.WriteLine("No matching history."); return EXIT_SUCCESS; }
             Console.Write(File.ReadAllText(files[0]));
-            return 0;
+            return EXIT_SUCCESS;
         }
 
         // WAKEUP: bring Unity to foreground — CLI-side, no pipe needed
@@ -726,7 +736,7 @@ class Program
             Console.Error.WriteLine("Error: Unity is not running.");
             Console.Error.WriteLine($"       No Unity process found for project: {Path.GetFileName(Path.GetFullPath(projectPath))}");
             Console.Error.WriteLine("       Open Unity Editor with this project first.");
-            return 1;
+            return EXIT_CONNECTION;
         }
         if (unityInfo.State == UnityProcessState.DifferentProject)
         {
@@ -738,7 +748,7 @@ class Program
                 Console.Error.WriteLine($"       Status: {unityInfo.ImportStatus}");
             PrintDialogInfo(unityInfo.Dialogs);
             Console.Error.WriteLine($"       Open this project in Unity or use -d to specify the correct path.");
-            return 1;
+            return EXIT_CONNECTION;
         }
         if (unityInfo.State == UnityProcessState.Importing)
         {
@@ -768,7 +778,7 @@ class Program
                 Console.Error.WriteLine($"       estimatedWait: {estimate}");
             else
                 Console.Error.WriteLine($"       estimatedWait: unknown (no compile history yet)");
-            return 1;
+            return EXIT_TIMEOUT;
         }
         // When importing, show any compile errors found in logs
         if (unityInfo.RecentErrors.Count > 0)
@@ -851,7 +861,7 @@ class Program
         int result = SendCommand(pipeName, projectPath, command, data);
 
         // If main thread timed out, just nudge — don't steal focus
-        if (result == 1 && _lastResponseContainedMainThreadTimeout)
+        if (result != EXIT_SUCCESS && _lastResponseContainedMainThreadTimeout)
         {
             _lastResponseContainedMainThreadTimeout = false;
             WakeUnityEditor(projectPath);
@@ -893,6 +903,16 @@ class Program
         Console.Error.WriteLine("    --trace [--maxlines N]   Line-by-line execution trace");
         Console.Error.WriteLine("  TEST [filter]              Run tests (streaming with progress/ETA)");
         Console.Error.WriteLine("  TEST list [filter]         List available tests");
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("Exit codes:");
+        Console.Error.WriteLine("  0    Success");
+        Console.Error.WriteLine("  1    Command error (ran but failed)");
+        Console.Error.WriteLine("  2    Invalid usage / bad arguments");
+        Console.Error.WriteLine("  10   Connection failed (Unity not running)");
+        Console.Error.WriteLine("  11   Compile errors (commands blocked)");
+        Console.Error.WriteLine("  12   Play mode conflict (STOP first)");
+        Console.Error.WriteLine("  13   Safe Mode (fix errors in editor)");
+        Console.Error.WriteLine("  14   Command timed out");
         Console.Error.WriteLine();
         Console.Error.WriteLine("Run with -h inside a Unity project for the full command list.");
     }
@@ -1010,7 +1030,7 @@ class Program
                 else if (dataForFileCheck.StartsWith("@"))
                 {
                     Console.Error.WriteLine($"Error: File not found: {Path.GetFullPath(fileCandidate)}");
-                    return 1;
+                    return EXIT_USAGE_ERROR;
                 }
                 else
                 {
@@ -1082,13 +1102,13 @@ class Program
             {
                 Console.Error.WriteLine($"\nError: Command '{command}' timed out after {readTimeoutMs / 1000}s.");
                 Console.Error.Write(BuildDiagnosticReport(projectPath));
-                return 1;
+                return EXIT_TIMEOUT;
             }
             catch (AggregateException ex) when (ex.InnerException is OperationCanceledException)
             {
                 Console.Error.WriteLine($"\nError: Command '{command}' timed out after {readTimeoutMs / 1000}s.");
                 Console.Error.Write(BuildDiagnosticReport(projectPath));
-                return 1;
+                return EXIT_TIMEOUT;
             }
 
             // Check if response indicates we need to wait for reconnection
@@ -1111,38 +1131,38 @@ class Program
             if (response.Contains("Main thread timed out"))
             {
                 _lastResponseContainedMainThreadTimeout = true;
-                return 1;
+                return EXIT_TIMEOUT;
             }
 
             // Save result to history for retrieval via LAST command
             SaveCommandHistory(command, data, response);
 
-            return 0;
+            return EXIT_SUCCESS;
         }
         catch (TimeoutException)
         {
             Console.Error.WriteLine($"Error: Pipe connection timed out for command '{command}'.");
             Console.Error.Write(BuildDiagnosticReport(projectPath));
             Console.Error.WriteLine("action: Try 'clibridge4unity WAKEUP refresh' to wake Unity and force recompile.");
-            return 1;
+            return EXIT_CONNECTION;
         }
         catch (OperationCanceledException)
         {
             Console.Error.WriteLine($"Error: Command '{command}' timed out.");
             Console.Error.Write(BuildDiagnosticReport(projectPath));
-            return 1;
+            return EXIT_TIMEOUT;
         }
         catch (IOException ex)
         {
             Console.Error.WriteLine($"Error: Pipe broken during '{command}': {ex.Message}");
             Console.Error.Write(BuildDiagnosticReport(projectPath));
-            return 1;
+            return EXIT_CONNECTION;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error: {ex.Message}");
             Console.Error.Write(BuildDiagnosticReport(projectPath));
-            return 1;
+            return EXIT_COMMAND_ERROR;
         }
     }
 
@@ -1202,7 +1222,7 @@ class Program
 
                 // Return non-zero if there were errors
                 if (HasErrors(logResponse))
-                    return 1;
+                    return EXIT_COMPILE_ERROR;
             }
         }
         catch (Exception ex)
@@ -1396,14 +1416,14 @@ class Program
                         Console.Error.WriteLine(statusResponse);
 
                     Console.Error.WriteLine("\nFix the errors above, then run COMPILE.");
-                    return 1;
+                    return EXIT_COMPILE_ERROR;
                 }
 
                 // Check if Unity entered play mode (shouldn't compile during play)
                 if (statusResponse.Contains("isPlaying: True"))
                 {
                     Console.Error.WriteLine($"\n[CLI] Unity entered play mode — cannot compile. Use STOP first.");
-                    return 1;
+                    return EXIT_PLAY_MODE;
                 }
 
                 // Parse status to check if still compiling
@@ -1440,7 +1460,7 @@ class Program
                         }
                     }
 
-                    return 0;
+                    return EXIT_SUCCESS;
                 }
                 else
                 {
@@ -1463,7 +1483,7 @@ class Program
                             // Already re-triggered and waited another 15s. Accept as done.
                             Console.WriteLine($"[CLI] No compilation needed (Unity reports no changes).");
                             Console.WriteLine(statusResponse);
-                            return 0;
+                            return EXIT_SUCCESS;
                         }
                     }
                     else
@@ -1510,7 +1530,7 @@ class Program
         Console.Error.WriteLine($"\n[CLI] Error: Timeout after {timeoutSeconds} seconds waiting for compilation");
         Console.Error.WriteLine($"[CLI] Total connection attempts: {attemptCount}");
         Console.Error.WriteLine($"[CLI] Reconnected at least once: {hasConnectedOnce}");
-        return 1;
+        return EXIT_TIMEOUT;
     }
 
     static bool HasCompileErrors(string statusResponse, out int errorCount)
@@ -2307,11 +2327,24 @@ class Program
         md.AppendLine("clibridge4unity LAST TEST                 # Show last TEST result");
         md.AppendLine("```");
         md.AppendLine();
+        md.AppendLine("## Exit Codes");
+        md.AppendLine();
+        md.AppendLine("| Code | Meaning | Action |");
+        md.AppendLine("|------|---------|--------|");
+        md.AppendLine("| 0 | Success | — |");
+        md.AppendLine("| 1 | Command error | Check error message, fix and retry |");
+        md.AppendLine("| 2 | Invalid usage | Check arguments |");
+        md.AppendLine("| 10 | Connection failed | Run `WAKEUP refresh`, check Unity is running |");
+        md.AppendLine("| 11 | Compile errors | Fix code errors, then `COMPILE` |");
+        md.AppendLine("| 12 | Play mode conflict | Run `STOP` first |");
+        md.AppendLine("| 13 | Safe Mode | Fix compile errors in Unity editor |");
+        md.AppendLine("| 14 | Command timed out | Retry, or run `WAKEUP refresh` |");
+        md.AppendLine();
         md.AppendLine("## Troubleshooting");
         md.AppendLine();
-        md.AppendLine("- **Pipe timeout**: Run `WAKEUP refresh` — Unity may be backgrounded or needs recompile");
-        md.AppendLine("- **Safe Mode**: Unity has compile errors preventing scripts from running. Fix errors in editor.");
-        md.AppendLine("- **\"Cannot compile during play mode\"**: Run `STOP` first, then `COMPILE`");
+        md.AppendLine("- **Exit 10 (connection)**: Run `WAKEUP refresh` — Unity may be backgrounded or needs recompile");
+        md.AppendLine("- **Exit 13 (Safe Mode)**: Unity has compile errors preventing scripts from running. Fix in editor.");
+        md.AppendLine("- **Exit 12 (play mode)**: Run `STOP` first, then `COMPILE`");
         md.AppendLine("- **Stale results**: The bridge server restarts on every Unity recompile — state is fresh");
         md.AppendLine("- **DIAG always works**: Even when main thread is blocked, DIAG responds");
         md.AppendLine();
@@ -2385,7 +2418,7 @@ class Program
         }
 
         Console.WriteLine($"Claude Code will now know about clibridge4unity in this project.");
-        return 0;
+        return EXIT_SUCCESS;
     }
 
     static int HandleWakeup(string projectPath, bool sendRefresh = false)
@@ -2422,7 +2455,7 @@ class Program
         if (unityWindows.Count == 0)
         {
             Console.Error.WriteLine($"Error: No Unity window found for project '{projectName}'");
-            return 1;
+            return EXIT_CONNECTION;
         }
 
         // Attach to foreground thread to bypass SetForegroundWindow restrictions
@@ -2468,7 +2501,7 @@ class Program
         if (sendRefresh)
         {
             Console.WriteLine($"Woke {unityWindows.Count} Unity window(s) (keeping focus for refresh)");
-            return 0;
+            return EXIT_SUCCESS;
         }
 
         // Return focus to previous window
@@ -2491,7 +2524,7 @@ class Program
         }
 
         Console.WriteLine($"Woke {unityWindows.Count} Unity window(s), focus returned to '{previousTitle}'");
-        return 0;
+        return EXIT_SUCCESS;
     }
 
     static int HandleScreenshot(string projectPath)
@@ -2526,7 +2559,7 @@ class Program
         if (hwnd == IntPtr.Zero)
         {
             Console.Error.WriteLine("Error: Could not find Unity editor window");
-            return 1;
+            return EXIT_CONNECTION;
         }
 
         // Get window dimensions
@@ -2536,7 +2569,7 @@ class Program
         if (width <= 0 || height <= 0)
         {
             Console.Error.WriteLine($"Error: Invalid window rect: {width}x{height}");
-            return 1;
+            return EXIT_COMMAND_ERROR;
         }
 
         // PrintWindow capture (works even when Unity is in background)
@@ -2575,7 +2608,7 @@ class Program
         Console.WriteLine($"output: {outputPath}");
 
         ShowNotification("Screenshot", $"Captured {width}x{height}", outputPath);
-        return 0;
+        return EXIT_SUCCESS;
     }
 
     static void ShowNotification(string title, string message, string imagePath = null)
@@ -2827,7 +2860,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         if (!File.Exists(manifestPath))
         {
             Console.Error.WriteLine($"Error: {manifestPath} not found. Is this a Unity project?");
-            return 1;
+            return EXIT_COMMAND_ERROR;
         }
 
         string manifest = File.ReadAllText(manifestPath);
@@ -2840,7 +2873,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             if (manifest.Contains(gitUrl))
             {
                 Console.WriteLine($"[OK] UPM package already installed (v{CLI_VERSION})");
-                return 0;
+                return EXIT_SUCCESS;
             }
 
             // Package exists but at different version - update it
@@ -2857,7 +2890,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
                 $"\"{UPM_PACKAGE_NAME}\": \"{gitUrl}\"");
             File.WriteAllText(manifestPath, manifest);
             Console.WriteLine($"[OK] Updated UPM package to v{CLI_VERSION}");
-            return 0;
+            return EXIT_SUCCESS;
         }
 
         // Package not present - add it
@@ -2869,13 +2902,13 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         if (depsIdx < 0)
         {
             Console.Error.WriteLine("Error: Could not find \"dependencies\" in manifest.json");
-            return 1;
+            return EXIT_COMMAND_ERROR;
         }
         int braceIdx = manifest.IndexOf('{', depsIdx);
         if (braceIdx < 0)
         {
             Console.Error.WriteLine("Error: Malformed manifest.json");
-            return 1;
+            return EXIT_COMMAND_ERROR;
         }
 
         // Detect indentation from the next line
@@ -2890,7 +2923,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         File.WriteAllText(manifestPath, manifest);
         Console.WriteLine($"[OK] Added UPM package v{CLI_VERSION}");
         Console.WriteLine($"     Unity will import the package on next focus/refresh.");
-        return 0;
+        return EXIT_SUCCESS;
     }
 
     static string GetPackageGitUrl()
