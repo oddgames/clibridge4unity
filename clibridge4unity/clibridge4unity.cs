@@ -722,6 +722,12 @@ class Program
             return EXIT_SUCCESS;
         }
 
+        // OPEN: launch or restart Unity with this project — CLI-side, no pipe needed
+        if (command.Equals("OPEN", StringComparison.OrdinalIgnoreCase))
+        {
+            return HandleOpen(projectPath, unityInfo);
+        }
+
         // WAKEUP: bring Unity to foreground — CLI-side, no pipe needed
         // WAKEUP refresh — also sends Ctrl+R to force asset refresh/recompile
         if (command.Equals("WAKEUP", StringComparison.OrdinalIgnoreCase))
@@ -733,7 +739,7 @@ class Program
         // Pre-flight: check if Unity is running for this project (instant, no pipe needed)
         if (unityInfo.State == UnityProcessState.NotRunning)
         {
-            Console.Error.WriteLine("Error: Unity is not running.");
+            Console.Error.WriteLine("Error: Unity is not running. Use 'clibridge4unity OPEN' to launch Unity.");
             Console.Error.WriteLine($"       No Unity process found for project: {Path.GetFileName(Path.GetFullPath(projectPath))}");
             Console.Error.WriteLine("       Open Unity Editor with this project first.");
             return EXIT_CONNECTION;
@@ -895,6 +901,7 @@ class Program
         Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");
         Console.Error.WriteLine("  SCREENSHOT [view]          Capture Unity window screenshot");
         Console.Error.WriteLine("  LAST [command|index]       Retrieve previous command result from history");
+        Console.Error.WriteLine("  OPEN                       Launch Unity (or restart if in Safe Mode)");
         Console.Error.WriteLine();
         Console.Error.WriteLine("Key bridge commands (requires Unity):");
         Console.Error.WriteLine("  PING / STATUS / HELP       Connection and status");
@@ -935,6 +942,146 @@ class Program
             string parent = Directory.GetParent(dir)?.FullName;
             if (parent == dir) break;
             dir = parent;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Launch or restart Unity with the specified project.
+    /// Reads ProjectVersion.txt to find the required Unity version, locates it via Unity Hub.
+    /// If Unity is already running with this project, kills it first (handles Safe Mode).
+    /// </summary>
+    static int HandleOpen(string projectPath, UnityProcessInfo unityInfo)
+    {
+        string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
+
+        // Read required Unity version from ProjectVersion.txt
+        string versionFile = Path.Combine(projectPath, "ProjectSettings", "ProjectVersion.txt");
+        if (!File.Exists(versionFile))
+        {
+            Console.Error.WriteLine($"Error: Not a Unity project (no ProjectSettings/ProjectVersion.txt)");
+            return EXIT_USAGE_ERROR;
+        }
+
+        string requiredVersion = null;
+        foreach (var line in File.ReadLines(versionFile))
+        {
+            if (line.StartsWith("m_EditorVersion:"))
+            {
+                requiredVersion = line.Substring("m_EditorVersion:".Length).Trim();
+                break;
+            }
+        }
+
+        if (string.IsNullOrEmpty(requiredVersion))
+        {
+            Console.Error.WriteLine("Error: Cannot read Unity version from ProjectVersion.txt");
+            return EXIT_COMMAND_ERROR;
+        }
+
+        // Find Unity editor executable
+        string unityExe = FindUnityEditor(requiredVersion);
+        if (unityExe == null)
+        {
+            Console.Error.WriteLine($"Error: Unity {requiredVersion} not found.");
+            Console.Error.WriteLine("  Searched: C:\\Program Files\\Unity\\Hub\\Editor\\");
+            return EXIT_COMMAND_ERROR;
+        }
+
+        // If Unity is already running with this project, kill it first
+        if (unityInfo.State == UnityProcessState.Running ||
+            unityInfo.State == UnityProcessState.Importing)
+        {
+            Console.Error.WriteLine($"Closing Unity ({projectName})...");
+            foreach (uint pid in unityInfo.Pids)
+            {
+                try
+                {
+                    var proc = Process.GetProcessById((int)pid);
+                    proc.Kill();
+                    proc.WaitForExit(10000);
+                }
+                catch { }
+            }
+            // Wait for process to fully exit
+            System.Threading.Thread.Sleep(2000);
+        }
+
+        // Launch Unity
+        string fullProjectPath = Path.GetFullPath(projectPath);
+        Console.Error.WriteLine($"Launching Unity {requiredVersion} with {projectName}...");
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = unityExe,
+            Arguments = $"-projectPath \"{fullProjectPath}\"",
+            UseShellExecute = false,
+            CreateNoWindow = false
+        };
+
+        try
+        {
+            Process.Start(startInfo);
+            Console.WriteLine($"Unity {requiredVersion} launched for {projectName}");
+            Console.WriteLine("Waiting for bridge to start...");
+
+            // Wait for bridge pipe to become available
+            string pipeName = GeneratePipeName(projectPath);
+            for (int i = 0; i < 60; i++) // up to 60 seconds
+            {
+                System.Threading.Thread.Sleep(2000);
+                try
+                {
+                    using var testPipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
+                    testPipe.Connect(1000);
+                    Console.WriteLine($"Bridge connected after {(i + 1) * 2}s");
+                    return EXIT_SUCCESS;
+                }
+                catch { }
+
+                if (i % 5 == 4)
+                    Console.Error.Write(".");
+            }
+
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Unity launched but bridge not yet available. Run PING to check.");
+            return EXIT_SUCCESS;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error launching Unity: {ex.Message}");
+            return EXIT_COMMAND_ERROR;
+        }
+    }
+
+    static string FindUnityEditor(string version)
+    {
+        // Search Unity Hub installation paths
+        string[] searchPaths = {
+            Path.Combine("C:", "Program Files", "Unity", "Hub", "Editor"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Unity", "Hub", "Editor"),
+        };
+
+        foreach (var basePath in searchPaths)
+        {
+            if (!Directory.Exists(basePath)) continue;
+
+            // Exact version match
+            string versionPath = Path.Combine(basePath, version, "Editor", "Unity.exe");
+            if (File.Exists(versionPath)) return versionPath;
+
+            // Try without the revision suffix (e.g., 6000.3.10f1 -> 6000.3.10)
+            string baseVersion = version.Split('f', 'a', 'b', 'p')[0];
+            foreach (var dir in Directory.GetDirectories(basePath))
+            {
+                string dirName = Path.GetFileName(dir);
+                if (dirName.StartsWith(baseVersion))
+                {
+                    string exe = Path.Combine(dir, "Editor", "Unity.exe");
+                    if (File.Exists(exe)) return exe;
+                }
+            }
         }
 
         return null;
@@ -1779,6 +1926,7 @@ class Program
         public string HeartbeatState;     // from heartbeat file: ready, compiling, reloading, etc.
         public int HeartbeatCompileTimeAvg; // avg compile time from heartbeat file
         public bool MatchedByCommandLine; // true if project matched via -projectPath arg, not window title
+        public HashSet<uint> Pids = new HashSet<uint>();  // Unity process IDs for this project
     }
 
     /// <summary>
@@ -1942,6 +2090,9 @@ class Program
             }
         }
         catch { }
+
+        // Store discovered PIDs
+        info.Pids = unityPids;
 
         // Determine state: lockfile is most reliable, then command line match, then window title
         if (!lockfileHeld && !foundProject)
@@ -2325,6 +2476,7 @@ class Program
         md.AppendLine("clibridge4unity DISMISS Yes               # Click specific button on dialog");
         md.AppendLine("clibridge4unity LAST                     # Show last command result");
         md.AppendLine("clibridge4unity LAST TEST                 # Show last TEST result");
+        md.AppendLine("clibridge4unity OPEN                     # Launch Unity (or restart from Safe Mode)");
         md.AppendLine("```");
         md.AppendLine();
         md.AppendLine("## Exit Codes");
@@ -2343,7 +2495,7 @@ class Program
         md.AppendLine("## Troubleshooting");
         md.AppendLine();
         md.AppendLine("- **Exit 10 (connection)**: Run `WAKEUP refresh` — Unity may be backgrounded or needs recompile");
-        md.AppendLine("- **Exit 13 (Safe Mode)**: Unity has compile errors preventing scripts from running. Fix in editor.");
+        md.AppendLine("- **Exit 13 (Safe Mode)**: Run `OPEN` to restart Unity and clear Safe Mode");
         md.AppendLine("- **Exit 12 (play mode)**: Run `STOP` first, then `COMPILE`");
         md.AppendLine("- **Stale results**: The bridge server restarts on every Unity recompile — state is fresh");
         md.AppendLine("- **DIAG always works**: Even when main thread is blocked, DIAG responds");
