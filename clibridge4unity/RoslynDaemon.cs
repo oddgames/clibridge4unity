@@ -105,7 +105,7 @@ static class RoslynDaemon
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
-            RedirectStandardError = true,
+            RedirectStandardError = false, // Don't redirect — let stderr flow freely to avoid buffer deadlock
         };
 
         try

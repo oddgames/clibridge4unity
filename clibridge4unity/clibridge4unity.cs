@@ -906,8 +906,11 @@ class Program
                 }
             }
 
-            // Fallback: single-pass Roslyn (no daemon available)
+            // Fallback: single-pass Roslyn, and start daemon in background for next time
             Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass analysis");
+            // Fire-and-forget daemon start so next query is fast
+            Task.Run(() => RoslynDaemon.StartBackground(projectPath));
+
             string fallbackResult = command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase)
                 ? RoslynAnalyzer.Analyze(projectPath, data ?? "")
                 : RoslynAnalyzer.Search(projectPath, data ?? "");
