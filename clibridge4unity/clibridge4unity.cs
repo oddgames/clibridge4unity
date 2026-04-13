@@ -2888,13 +2888,11 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             return EXIT_SUCCESS;
 
         // Always deny — Roslyn offline analysis works without Unity
-        string reason = $"For C# code searches, use clibridge4unity instead of grep:\n" +
-                        $"  clibridge4unity CODE_SEARCH class:{pattern}\n" +
-                        $"  clibridge4unity CODE_SEARCH method:{pattern}\n" +
-                        $"  clibridge4unity CODE_SEARCH field:{pattern}\n" +
+        string reason = $"For C# code searches, use clibridge4unity CODE_ANALYZE instead of grep:\n" +
                         $"  clibridge4unity CODE_ANALYZE {pattern}\n" +
-                        $"CODE_SEARCH/CODE_ANALYZE use Roslyn + reflection for type info, signatures, " +
-                        $"file locations, inheritance, and connections. Works with or without Unity running.";
+                        $"CODE_ANALYZE returns the full connection graph: inheritance, who references it, " +
+                        $"who passes it as a parameter, who returns it, GetComponent calls, methods, fields, " +
+                        $"and raw grep matches — all in ~200ms. Always prefer CODE_ANALYZE over grep for C# code.";
 
         Console.Error.Write(reason);
         return 2; // exit 2 = deny/block

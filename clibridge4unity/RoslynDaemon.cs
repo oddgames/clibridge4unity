@@ -113,15 +113,28 @@ static class RoslynDaemon
             var proc = Process.Start(psi);
             if (proc == null) return null;
 
-            // Wait for daemon to start (check PID file appears + health check passes)
-            string pipeName = GeneratePipeName(projectPath);
-            for (int i = 0; i < 100; i++) // up to 10 seconds
+            // Read stdout for "pipe:<name>" signal (daemon writes this when ready)
+            string pipeName = null;
+            var readTask = Task.Run(() =>
             {
-                Thread.Sleep(100);
-                string check = GetRunningPipe(projectPath);
-                if (check != null) return check;
-            }
-            return null;
+                try
+                {
+                    string line;
+                    while ((line = proc.StandardOutput.ReadLine()) != null)
+                    {
+                        if (line.StartsWith("pipe:"))
+                        {
+                            pipeName = line.Substring(5).Trim();
+                            break;
+                        }
+                    }
+                }
+                catch { }
+            });
+
+            // Wait up to 15 seconds for the daemon to parse + start
+            readTask.Wait(TimeSpan.FromSeconds(15));
+            return pipeName;
         }
         catch { return null; }
     }
@@ -176,6 +189,11 @@ static class RoslynDaemon
             Console.Error.WriteLine("Error: Assets/ directory not found.");
             return 1;
         }
+
+        // Write PID file immediately so clients know we're starting
+        string daemonDir = GetDaemonDir(projectPath);
+        Directory.CreateDirectory(daemonDir);
+        File.WriteAllText(GetPidFile(projectPath), Process.GetCurrentProcess().Id.ToString());
 
         var sw = Stopwatch.StartNew();
 
@@ -234,11 +252,7 @@ static class RoslynDaemon
         };
         watcher.EnableRaisingEvents = true;
 
-        // Phase 3: Write PID file and start pipe server
-        string daemonDir = GetDaemonDir(projectPath);
-        Directory.CreateDirectory(daemonDir);
-        File.WriteAllText(GetPidFile(projectPath), Process.GetCurrentProcess().Id.ToString());
-
+        // Phase 3: Start pipe server (PID file already written at startup)
         string pipeName = GeneratePipeName(projectPath);
         Console.Error.WriteLine($"Daemon started: {pipeName}");
         Console.Error.WriteLine($"  {trees.Count} files indexed, watching for changes");
