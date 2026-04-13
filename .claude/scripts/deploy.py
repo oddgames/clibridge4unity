@@ -28,7 +28,7 @@ def main():
     os.chdir(root)
 
     exe_path = os.path.join(root, "clibridge4unity/bin/Release/net8.0/win-x64/publish/clibridge4unity.exe")
-    tools_path = os.path.join(root, "Package/Tools/win-x64/clibridge4unity.exe")
+    # CLI exe is installed via GitHub Releases, NOT bundled in the UPM package
 
     # Step 1: Build
     print(f"\n=== Building v{version} ===")
@@ -49,9 +49,6 @@ def main():
 
     # Step 3: Package
     print(f"\n=== Packaging ===")
-    shutil.copy2(exe_path, tools_path)
-    print(f"  Copied exe to {tools_path}")
-
     zip_path = os.path.join(tempfile.gettempdir(), "clibridge4unity-win-x64.zip")
     run(f'powershell -NoProfile -Command "Compress-Archive -Path \'{exe_path}\' -DestinationPath \'{zip_path}\' -Force"')
     print(f"  Created: {zip_path}")
