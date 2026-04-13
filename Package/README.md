@@ -20,6 +20,16 @@ This downloads the CLI, installs it to `~/.clibridge4unity/`, and adds it to you
 
 Download `clibridge4unity` from [Releases](https://github.com/oddgames/clibridge4unity/releases), place it somewhere on your PATH.
 
+### Unity Package (UPM)
+
+The Unity package is installed automatically by `clibridge4unity SETUP`. To install manually via Unity Package Manager, use this git URL:
+
+```
+https://github.com/oddgames/clibridge4unity.git?path=Package#v1.0.54
+```
+
+**Important:** The `?path=Package` suffix is required — the `package.json` lives in the `Package/` subdirectory, not the repo root. Without it, Unity will report "Repository does not contain a package manifest."
+
 ### Build from Source
 
 ```bash
@@ -37,7 +47,7 @@ clibridge4unity SETUP
 ```
 
 This does three things:
-1. Adds the UPM package to your Unity project's `Packages/manifest.json` (via git URL, version-matched)
+1. Adds the UPM package to your Unity project's `Packages/manifest.json` (via git URL with `?path=Package`, version-matched)
 2. Checks Unity Editor connectivity
 3. Generates a `CLAUDE.md` with tool documentation for AI-assisted development
 
