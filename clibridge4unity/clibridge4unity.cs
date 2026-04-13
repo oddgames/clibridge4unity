@@ -579,7 +579,7 @@ class Program
         string cmdUpper = command.ToUpperInvariant();
         if (cmdUpper != "PING" && cmdUpper != "PROBE" && cmdUpper != "DIAG" &&
             cmdUpper != "DISMISS" && cmdUpper != "SCREENSHOT" && cmdUpper != "UPDATE" &&
-            cmdUpper != "SERVE" && cmdUpper != "HOOK")
+            cmdUpper != "SERVE" && cmdUpper != "HOOK" && cmdUpper != "DAEMON")
         {
             CheckForUpdateInBackground();
         }
@@ -594,6 +594,18 @@ class Program
         if (cmdUpper == "SERVE")
         {
             return ReportServer.Run(data);
+        }
+
+        // DAEMON: Roslyn analysis daemon (no Unity needed)
+        if (cmdUpper == "DAEMON")
+        {
+            projectPath = projectPath ?? AutoDetectProjectPath();
+            if (projectPath == null)
+            {
+                Console.Error.WriteLine("Error: Could not detect Unity project.");
+                return EXIT_USAGE_ERROR;
+            }
+            return RoslynDaemon.Run(projectPath, data);
         }
 
         // HOOK: Claude Code PreToolUse hook handler — reads JSON from stdin, no pipe/project needed
@@ -869,15 +881,38 @@ class Program
             catch { }
         }
 
-        // CODE_SEARCH / CODE_ANALYZE: try Roslyn first (no pipe needed), pipe as enrichment
+        // CODE_SEARCH / CODE_ANALYZE: daemon → single-pass Roslyn fallback
         if (command.Equals("CODE_SEARCH", StringComparison.OrdinalIgnoreCase) ||
             command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase))
         {
-            string roslynResult = command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase)
+            string endpoint = command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase) ? "analyze" : "search";
+
+            // Try daemon first
+            string daemonPipe = RoslynDaemon.GetRunningPipe(projectPath);
+            if (daemonPipe == null)
+            {
+                // Auto-start daemon in background
+                Console.Error.WriteLine("[roslyn] Starting daemon...");
+                daemonPipe = RoslynDaemon.StartBackground(projectPath);
+            }
+
+            if (daemonPipe != null)
+            {
+                string dResult = RoslynDaemon.Query(daemonPipe, endpoint, data ?? "");
+                if (dResult != null)
+                {
+                    Console.WriteLine(dResult);
+                    return dResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+                }
+            }
+
+            // Fallback: single-pass Roslyn (no daemon available)
+            Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass analysis");
+            string fallbackResult = command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase)
                 ? RoslynAnalyzer.Analyze(projectPath, data ?? "")
                 : RoslynAnalyzer.Search(projectPath, data ?? "");
-            Console.WriteLine(roslynResult);
-            return roslynResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+            Console.WriteLine(fallbackResult);
+            return fallbackResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
         }
 
         int result = SendCommand(pipeName, projectPath, command, data);
@@ -3535,6 +3570,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
                                         Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax m => m.Identifier.Text + "()",
                                         Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax t => t.Identifier.Text,
                                         Microsoft.CodeAnalysis.CSharp.Syntax.PropertyDeclarationSyntax p => p.Identifier.Text,
+                                        Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax f => f.Declaration.Variables.First().Identifier.Text,
                                         _ => "?"
                                     };
                                     results.Add($"[{attr.Name}] on {parentName} — {rel}:{aLine}");
