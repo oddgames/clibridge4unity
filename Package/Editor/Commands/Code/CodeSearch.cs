@@ -346,15 +346,48 @@ namespace clibridge4unity
 
                 // Parse the query: ClassName, ClassName.MemberName, or Namespace.ClassName.MemberName
                 var result = ParseMemberQuery(query);
-                if (result.Type == null)
-                    return $"Error: Type not found: {result.TypeName}";
 
-                // If we have a member name, analyze just that member
-                if (!string.IsNullOrEmpty(result.MemberName))
-                    return AnalyzeMember(result.Type, result.MemberName);
+                string analysisResult = null;
+                if (result.Type != null)
+                {
+                    if (!string.IsNullOrEmpty(result.MemberName))
+                        analysisResult = AnalyzeMember(result.Type, result.MemberName);
+                    else
+                        analysisResult = AnalyzeType(result.Type);
+                }
 
-                // Otherwise analyze the full type
-                return AnalyzeType(result.Type);
+                // Append raw source grep — always useful as a supplement
+                // Use the last segment as the search term (member name or type name)
+                var searchTerm = query.Contains('.') ? query.Split('.').Last() : query;
+                var grepResults = SearchContentAllFolders(searchTerm);
+
+                var sb = new StringBuilder();
+                if (analysisResult != null)
+                {
+                    sb.Append(analysisResult);
+                    if (grepResults.Count > 0)
+                    {
+                        sb.AppendLine();
+                        sb.AppendLine();
+                        sb.AppendLine($"--- Source references for '{searchTerm}' ({grepResults.Count} matches) ---");
+                        foreach (var line in grepResults.Take(20))
+                            sb.AppendLine(line);
+                    }
+                }
+                else if (grepResults.Count > 0)
+                {
+                    // No reflection match, but found in source
+                    sb.AppendLine($"Type '{result.TypeName}' not found via reflection, but found in source:");
+                    sb.AppendLine();
+                    foreach (var line in grepResults.Take(30))
+                        sb.AppendLine(line);
+                }
+                else
+                {
+                    return $"Error: '{query}' not found via reflection or source search";
+                }
+
+                return sb.ToString().TrimEnd();
             }
             catch (Exception ex)
             {
@@ -1519,6 +1552,7 @@ namespace clibridge4unity
         private static List<string> SearchContentAllFolders(string term)
         {
             var results = new List<string>();
+            var classPattern = new Regex(@"^\s*(?:public|private|internal|static|abstract|sealed|partial)\s+.*?\b(?:class|struct|interface|enum)\s+(\w+)", RegexOptions.Compiled);
 
             foreach (var file in GetAllSourceFiles())
             {
@@ -1529,12 +1563,19 @@ namespace clibridge4unity
                     {
                         var relativePath = ToRelativePath(file);
                         var lines = content.Split('\n');
+                        string currentClass = null;
                         for (int i = 0; i < lines.Length; i++)
                         {
+                            // Track enclosing class/struct/interface
+                            var classMatch = classPattern.Match(lines[i]);
+                            if (classMatch.Success)
+                                currentClass = classMatch.Groups[1].Value;
+
                             if (lines[i].Contains(term))
                             {
                                 var lineContent = lines[i].Trim();
-                                results.Add($"{relativePath}:L{i + 1}: {lineContent.Substring(0, Math.Min(80, lineContent.Length))}");
+                                var prefix = currentClass != null ? $"{relativePath}({currentClass}):L{i + 1}" : $"{relativePath}:L{i + 1}";
+                                results.Add($"{prefix}: {lineContent.Substring(0, Math.Min(80, lineContent.Length))}");
                                 if (results.Count >= 50) return results;
                             }
                         }

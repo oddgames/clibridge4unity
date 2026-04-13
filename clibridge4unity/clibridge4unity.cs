@@ -579,7 +579,7 @@ class Program
         string cmdUpper = command.ToUpperInvariant();
         if (cmdUpper != "PING" && cmdUpper != "PROBE" && cmdUpper != "DIAG" &&
             cmdUpper != "DISMISS" && cmdUpper != "SCREENSHOT" && cmdUpper != "UPDATE" &&
-            cmdUpper != "SERVE")
+            cmdUpper != "SERVE" && cmdUpper != "HOOK")
         {
             CheckForUpdateInBackground();
         }
@@ -596,6 +596,11 @@ class Program
             return ReportServer.Run(data);
         }
 
+        // HOOK: Claude Code PreToolUse hook handler — reads JSON from stdin, no pipe/project needed
+        if (cmdUpper == "HOOK")
+        {
+            return HandleHook();
+        }
 
         // Auto-detect project path if not specified
         projectPath = projectPath ?? AutoDetectProjectPath();
@@ -2799,9 +2804,208 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             Console.WriteLine("[!!] Unity Editor not responding — start Unity and re-run SETUP to generate full docs");
         }
 
-        // Step 3: Generate CLAUDE.md (reuse existing INSTALL logic)
+        // Step 3: Install Claude Code hooks
+        Console.WriteLine();
+        InstallHooks(projectPath);
+
+        // Step 4: Generate CLAUDE.md (reuse existing INSTALL logic)
         Console.WriteLine();
         return HandleInstall(pipeName, projectPath, data);
+    }
+
+    static int HandleHook()
+    {
+        // Read hook JSON from stdin
+        string input;
+        try { input = Console.In.ReadToEnd(); }
+        catch { return EXIT_SUCCESS; }
+
+        if (string.IsNullOrWhiteSpace(input))
+            return EXIT_SUCCESS;
+
+        // Scope to tool_input section for field extraction
+        int toolInputIdx = input.IndexOf("\"tool_input\"");
+        string toolInput = toolInputIdx >= 0 ? input.Substring(toolInputIdx) : input;
+
+        string pattern = HookExtractJsonString(toolInput, "pattern");
+        string glob = HookExtractJsonString(toolInput, "glob");
+        string type = HookExtractJsonString(toolInput, "type");
+
+        if (string.IsNullOrEmpty(pattern))
+            return EXIT_SUCCESS;
+
+        // Check if targeting C# files
+        bool isCs = (glob != null && (glob.Contains(".cs") || glob.Contains("*.cs"))) ||
+                    (type != null && type == "cs");
+
+        if (!isCs)
+            return EXIT_SUCCESS;
+
+        // Deny and redirect to CODE_SEARCH / CODE_ANALYZE
+        string reason = $"For C# code searches, use clibridge4unity instead of grep:\n" +
+                        $"  clibridge4unity CODE_SEARCH class:{pattern}\n" +
+                        $"  clibridge4unity CODE_SEARCH method:{pattern}\n" +
+                        $"  clibridge4unity CODE_SEARCH field:{pattern}\n" +
+                        $"  clibridge4unity CODE_ANALYZE {pattern}\n" +
+                        $"CODE_SEARCH/CODE_ANALYZE use reflection + source parsing — they return type info, signatures, " +
+                        $"file locations, inheritance, and doc comments. Much richer than grep for C# code.";
+
+        Console.Error.Write(reason);
+        return 2; // exit 2 = deny/block
+    }
+
+    /// <summary>Quick JSON string value extractor for hook input — no dependency on JSON library.</summary>
+    static string HookExtractJsonString(string json, string key)
+    {
+        string needle = $"\"{key}\"";
+        int idx = json.IndexOf(needle);
+        if (idx < 0) return null;
+        int colonIdx = json.IndexOf(':', idx + needle.Length);
+        if (colonIdx < 0) return null;
+        int quoteStart = json.IndexOf('"', colonIdx + 1);
+        if (quoteStart < 0) return null;
+        int quoteEnd = json.IndexOf('"', quoteStart + 1);
+        if (quoteEnd < 0) return null;
+        return json.Substring(quoteStart + 1, quoteEnd - quoteStart - 1);
+    }
+
+    static void InstallHooks(string projectPath)
+    {
+        string claudeDir = Path.Combine(projectPath, ".claude");
+        string settingsPath = Path.Combine(claudeDir, "settings.json");
+
+        Directory.CreateDirectory(claudeDir);
+
+        // The hook command — just calls the CLI itself, no Python needed
+        string hookCommand = "clibridge4unity HOOK";
+
+        string hookEntry = "{\n" +
+            "  \"hooks\": {\n" +
+            "    \"PreToolUse\": [\n" +
+            "      {\n" +
+            "        \"matcher\": \"Grep\",\n" +
+            "        \"hooks\": [\n" +
+            "          {\n" +
+            "            \"type\": \"command\",\n" +
+            $"            \"command\": \"{hookCommand}\"\n" +
+            "          }\n" +
+            "        ]\n" +
+            "      }\n" +
+            "    ]\n" +
+            "  }\n" +
+            "}";
+
+        try
+        {
+            if (File.Exists(settingsPath))
+            {
+                string existing = File.ReadAllText(settingsPath);
+                if (existing.Contains("clibridge4unity HOOK"))
+                {
+                    Console.WriteLine("[OK] Claude Code hooks already configured");
+                    return;
+                }
+
+                // Replace old Python hook with CLI hook
+                if (existing.Contains("suggest-code-search"))
+                {
+                    existing = existing.Replace("suggest-code-search.py", "INVALID");
+                    // Simpler: just rewrite with clean config
+                    File.WriteAllText(settingsPath, hookEntry);
+                    Console.WriteLine("[OK] Upgraded hooks from Python to CLI (clibridge4unity HOOK)");
+                    return;
+                }
+
+                // Merge into existing settings
+                if (existing.Contains("\"hooks\""))
+                {
+                    if (existing.Contains("\"PreToolUse\""))
+                    {
+                        int preToolIdx = existing.IndexOf("\"PreToolUse\"");
+                        int arrStart = existing.IndexOf('[', preToolIdx);
+                        if (arrStart >= 0)
+                        {
+                            string entry =
+                                "\n      {\n" +
+                                "        \"matcher\": \"Grep\",\n" +
+                                "        \"hooks\": [\n" +
+                                "          {\n" +
+                                "            \"type\": \"command\",\n" +
+                                $"            \"command\": \"{hookCommand}\"\n" +
+                                "          }\n" +
+                                "        ]\n" +
+                                "      },";
+                            existing = existing.Insert(arrStart + 1, entry);
+                            File.WriteAllText(settingsPath, existing);
+                            Console.WriteLine("[OK] Added Grep hook to existing PreToolUse hooks");
+                        }
+                    }
+                    else
+                    {
+                        int hooksIdx = existing.IndexOf("\"hooks\"");
+                        int braceStart = existing.IndexOf('{', hooksIdx + 7);
+                        if (braceStart >= 0)
+                        {
+                            string entry =
+                                "\n    \"PreToolUse\": [\n" +
+                                "      {\n" +
+                                "        \"matcher\": \"Grep\",\n" +
+                                "        \"hooks\": [\n" +
+                                "          {\n" +
+                                "            \"type\": \"command\",\n" +
+                                $"            \"command\": \"{hookCommand}\"\n" +
+                                "          }\n" +
+                                "        ]\n" +
+                                "      }\n" +
+                                "    ],";
+                            existing = existing.Insert(braceStart + 1, entry);
+                            File.WriteAllText(settingsPath, existing);
+                            Console.WriteLine("[OK] Added PreToolUse hooks to existing settings");
+                        }
+                    }
+                }
+                else
+                {
+                    int firstBrace = existing.IndexOf('{');
+                    if (firstBrace >= 0)
+                    {
+                        string entry =
+                            "\n  \"hooks\": {\n" +
+                            "    \"PreToolUse\": [\n" +
+                            "      {\n" +
+                            "        \"matcher\": \"Grep\",\n" +
+                            "        \"hooks\": [\n" +
+                            "          {\n" +
+                            "            \"type\": \"command\",\n" +
+                            $"            \"command\": \"{hookCommand}\"\n" +
+                            "          }\n" +
+                            "        ]\n" +
+                            "      }\n" +
+                            "    ]\n" +
+                            "  },";
+                        existing = existing.Insert(firstBrace + 1, entry);
+                        File.WriteAllText(settingsPath, existing);
+                        Console.WriteLine("[OK] Added hooks to existing .claude/settings.json");
+                    }
+                }
+            }
+            else
+            {
+                File.WriteAllText(settingsPath, hookEntry);
+                Console.WriteLine("[OK] Created .claude/settings.json with hooks");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Warning: Could not configure hooks ({ex.Message})");
+        }
+
+        // Clean up old Python hook script if present
+        string oldScript = Path.Combine(claudeDir, "hooks", "suggest-code-search.py");
+        if (File.Exists(oldScript))
+        {
+            try { File.Delete(oldScript); } catch { }
+        }
     }
 
     static int EnsureUpmPackage(string projectPath)

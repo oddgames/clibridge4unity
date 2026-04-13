@@ -200,7 +200,6 @@ namespace clibridge4unity
             }
             catch { }
             return fallback;
-            }
         }
 
         /// <summary>
