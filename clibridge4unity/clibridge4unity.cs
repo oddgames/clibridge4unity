@@ -779,20 +779,19 @@ class Program
         if (unityInfo.State == UnityProcessState.NotRunning)
         {
             Console.Error.WriteLine("Error: Unity is not running. Use 'clibridge4unity OPEN' to launch Unity.");
-            Console.Error.WriteLine($"       No Unity process found for project: {Path.GetFileName(Path.GetFullPath(projectPath))}");
+            Console.Error.WriteLine($"       No Unity process found for project: {Path.GetFullPath(projectPath)}");
             Console.Error.WriteLine("       Open Unity Editor with this project first.");
             return EXIT_CONNECTION;
         }
         if (unityInfo.State == UnityProcessState.DifferentProject)
         {
             Console.Error.WriteLine($"Error: Unity is running but not with this project.");
-            Console.Error.WriteLine($"       Expected project: {Path.GetFileName(Path.GetFullPath(projectPath))}");
-            foreach (var title in unityInfo.OpenProjects)
-                Console.Error.WriteLine($"       Unity has open: {title}");
+            Console.Error.WriteLine($"       Expected workspace: {Path.GetFullPath(projectPath)}");
+            PrintUnityWorkspaceList(unityInfo.AllWorkspaces, unityInfo.OpenProjects);
             if (!string.IsNullOrEmpty(unityInfo.ImportStatus))
                 Console.Error.WriteLine($"       Status: {unityInfo.ImportStatus}");
             PrintDialogInfo(unityInfo.Dialogs);
-            Console.Error.WriteLine($"       Open this project in Unity or use -d to specify the correct path.");
+            Console.Error.WriteLine($"       Open this workspace in Unity, or re-run with -d <path> pointing at one of the above.");
             return EXIT_CONNECTION;
         }
         if (unityInfo.State == UnityProcessState.Importing)
@@ -2008,6 +2007,31 @@ class Program
         public RECT Rect;
     }
 
+    static void PrintUnityWorkspaceList(List<UnityWorkspaceInfo> workspaces, List<string> fallbackTitles)
+    {
+        if (workspaces != null && workspaces.Count > 0)
+        {
+            Console.Error.WriteLine($"       Running Unity workspaces ({workspaces.Count}):");
+            foreach (var w in workspaces.OrderBy(w => w.ProjectPath ?? ""))
+            {
+                Console.Error.WriteLine($"         {w.ProjectPath}");
+                if (!string.IsNullOrEmpty(w.WindowTitle))
+                    Console.Error.WriteLine($"           pid {w.Pid} — {w.WindowTitle}");
+                else
+                    Console.Error.WriteLine($"           pid {w.Pid}");
+            }
+            return;
+        }
+
+        // WMI failed — fall back to whatever window titles we caught.
+        if (fallbackTitles != null && fallbackTitles.Count > 0)
+        {
+            Console.Error.WriteLine($"       Unity windows seen ({fallbackTitles.Count}):");
+            foreach (var t in fallbackTitles)
+                Console.Error.WriteLine($"         {t}");
+        }
+    }
+
     static void PrintDialogInfo(List<DialogInfo> dialogs)
     {
         if (dialogs == null || dialogs.Count == 0) return;
@@ -2069,6 +2093,141 @@ class Program
         public int HeartbeatCompileTimeAvg; // avg compile time from heartbeat file
         public bool MatchedByCommandLine; // true if project matched via -projectPath arg, not window title
         public HashSet<uint> Pids = new HashSet<uint>();  // Unity process IDs for this project
+        public List<UnityWorkspaceInfo> AllWorkspaces = new List<UnityWorkspaceInfo>(); // every Unity instance on this machine
+    }
+
+    /// <summary>
+    /// Summary of one running Unity instance. The workspace path (from `-projectPath`)
+    /// is the stable identifier we show to the user when they're connected to the wrong Unity.
+    /// </summary>
+    class UnityWorkspaceInfo
+    {
+        public uint Pid;
+        public string ProjectPath;  // from command-line -projectPath (authoritative)
+        public string WindowTitle;  // e.g. "MyProject - Main - Windows, Mac, Linux - Unity 6000.3.1f1"
+    }
+
+    /// <summary>
+    /// Enumerate every non-batch Unity.exe process on the machine with its project path
+    /// (read via WMI from the `-projectPath` command-line arg) and main-window title.
+    /// Used to tell the user exactly which Unity instances are open when auto-detect misses.
+    /// </summary>
+    static List<UnityWorkspaceInfo> EnumerateUnityWorkspaces()
+    {
+        var results = new List<UnityWorkspaceInfo>();
+        var byPid = new Dictionary<uint, UnityWorkspaceInfo>();
+
+        try
+        {
+            foreach (var proc in Process.GetProcessesByName("Unity"))
+            {
+                try
+                {
+                    uint pid = (uint)proc.Id;
+                    var info = new UnityWorkspaceInfo { Pid = pid };
+                    if (proc.MainWindowHandle != IntPtr.Zero && !string.IsNullOrEmpty(proc.MainWindowTitle))
+                        info.WindowTitle = proc.MainWindowTitle;
+                    byPid[pid] = info;
+                }
+                catch { }
+            }
+        }
+        catch { return results; }
+
+        if (byPid.Count == 0) return results;
+
+        // Get command-lines via `wmic` rather than System.Management — the latter's static
+        // initializer throws when this app is published as a single-file trimmed binary.
+        var cmdLines = ReadUnityCommandLines();
+        foreach (var (pid, cmdLine) in cmdLines)
+        {
+            // Skip AssetImportWorker / CLI child processes — they're not standalone editors
+            if (cmdLine.Contains("-batchMode", StringComparison.OrdinalIgnoreCase)) continue;
+
+            if (!byPid.TryGetValue(pid, out var info))
+            {
+                info = new UnityWorkspaceInfo { Pid = pid };
+                byPid[pid] = info;
+            }
+
+            var m = System.Text.RegularExpressions.Regex.Match(
+                cmdLine,
+                @"-(?:projectpath|createProject)\s+(?:""([^""]+)""|(\S+))",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (m.Success)
+            {
+                string path = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+                try { info.ProjectPath = Path.GetFullPath(path); }
+                catch { info.ProjectPath = path; }
+            }
+        }
+
+        // Only include instances we got a project path for — the secondary Unity 6 scripting
+        // runtime processes don't have -projectPath and would just add noise.
+        foreach (var info in byPid.Values)
+            if (!string.IsNullOrEmpty(info.ProjectPath))
+                results.Add(info);
+
+        return results;
+    }
+
+    /// <summary>
+    /// Returns (pid, commandLine) for every Unity.exe process, obtained via `wmic`.
+    /// Works around System.Management being broken under trimmed single-file publish.
+    /// </summary>
+    static List<(uint pid, string cmdLine)> ReadUnityCommandLines()
+    {
+        var results = new List<(uint, string)>();
+        bool diag = Environment.GetEnvironmentVariable("CLIBRIDGE_DEBUG") == "1";
+
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "wmic",
+                Arguments = "process where \"name='Unity.exe'\" get ProcessId,CommandLine /format:list",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            using var p = Process.Start(psi);
+            if (p == null) return results;
+            string output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(5000);
+
+            // wmic /format:list emits key=value blocks separated by blank lines.
+            string currentCmd = null;
+            uint currentPid = 0;
+            foreach (var rawLine in output.Split('\n'))
+            {
+                var line = rawLine.TrimEnd('\r');
+                if (line.Length == 0)
+                {
+                    if (currentCmd != null && currentPid != 0)
+                        results.Add((currentPid, currentCmd));
+                    currentCmd = null; currentPid = 0;
+                    continue;
+                }
+                int eq = line.IndexOf('=');
+                if (eq < 0) continue;
+                string key = line.Substring(0, eq);
+                string value = line.Substring(eq + 1);
+                if (key.Equals("CommandLine", StringComparison.OrdinalIgnoreCase)) currentCmd = value;
+                else if (key.Equals("ProcessId", StringComparison.OrdinalIgnoreCase)) uint.TryParse(value, out currentPid);
+            }
+            // Flush the last block (file may not end with a blank line).
+            if (currentCmd != null && currentPid != 0)
+                results.Add((currentPid, currentCmd));
+
+            if (diag) Console.Error.WriteLine($"[CLIBRIDGE_DEBUG] wmic returned {results.Count} Unity.exe rows");
+        }
+        catch (Exception ex)
+        {
+            if (diag) Console.Error.WriteLine($"[CLIBRIDGE_DEBUG] wmic failed: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        return results;
     }
 
     /// <summary>
@@ -2142,9 +2301,12 @@ class Program
             catch (UnauthorizedAccessException) { lockfileHeld = true; }
         }
 
-        // Collect ALL Unity PIDs and enumerate windows across all of them
-        // (Unity 6 uses separate processes for UI and scripting runtime)
-        var unityPids = new HashSet<uint>();
+        // Discover Unity processes, but only keep PIDs that belong to THIS project.
+        // With multiple Unity instances open, collecting all PIDs would leak the
+        // other project's dialogs (e.g. a concurrent IL2CPP build) into our report.
+        // (Unity 6 uses separate processes for UI and scripting runtime.)
+        var allUnityPids = new HashSet<uint>();
+        var unityPids = new HashSet<uint>(); // filtered: only this project's PIDs
         bool foundProject = false;
         string fullProjectPath = Path.GetFullPath(projectPath).TrimEnd('\\', '/');
 
@@ -2154,47 +2316,43 @@ class Program
             {
                 try
                 {
-                    unityPids.Add((uint)proc.Id);
+                    allUnityPids.Add((uint)proc.Id);
                     if (proc.MainWindowHandle != IntPtr.Zero && !string.IsNullOrEmpty(proc.MainWindowTitle))
                     {
                         info.OpenProjects.Add(proc.MainWindowTitle);
                         if (proc.MainWindowTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase))
+                        {
                             foundProject = true;
+                            unityPids.Add((uint)proc.Id);
+                        }
                     }
                 }
                 catch { }
             }
 
-            // Fallback: match by command line -projectPath when window title isn't available yet
-            // (Unity has no window title during early loading, import, upgrade dialogs)
-            if (!foundProject && unityPids.Count > 0)
+            // Command-line pass: match by `-projectPath`. Needed when the window title
+            // isn't available yet (early load, import, upgrade dialog) AND to catch Unity 6's
+            // secondary scripting-runtime process for this project. Uses `wmic` because
+            // System.Management is unreliable under trimmed single-file publish.
+            if (allUnityPids.Count > 0)
             {
-                try
+                foreach (var (pid, cmdLine) in ReadUnityCommandLines())
                 {
-                    using var searcher = new System.Management.ManagementObjectSearcher(
-                        "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'Unity.exe'");
-                    foreach (var obj in searcher.Get())
+                    if (cmdLine.Contains("-batchMode", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (cmdLine.Contains(fullProjectPath, StringComparison.OrdinalIgnoreCase) ||
+                        cmdLine.Contains(fullProjectPath.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
                     {
-                        string cmdLine = obj["CommandLine"]?.ToString() ?? "";
-                        // Match -projectPath (or -projectpath) followed by the path
-                        // Skip AssetImportWorker processes (-batchMode -noUpm)
-                        if (cmdLine.Contains("-batchMode", StringComparison.OrdinalIgnoreCase))
-                            continue;
-                        if (cmdLine.Contains(fullProjectPath, StringComparison.OrdinalIgnoreCase) ||
-                            cmdLine.Contains(fullProjectPath.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
+                        unityPids.Add(pid);
+                        if (!foundProject)
                         {
                             foundProject = true;
-                            uint pid = (uint)(int)obj["ProcessId"];
-                            unityPids.Add(pid);
                             info.MatchedByCommandLine = true;
-                            break;
                         }
                     }
                 }
-                catch { } // WMI may fail in restricted environments
             }
 
-            // Enumerate all visible windows from Unity PIDs to find dialogs
+            // Enumerate visible windows, but ONLY from PIDs matched to this project.
             if (unityPids.Count > 0)
             {
                 var seenHwnds = new HashSet<IntPtr>();
@@ -2239,7 +2397,10 @@ class Program
         // Determine state: lockfile is most reliable, then command line match, then window title
         if (!lockfileHeld && !foundProject)
         {
-            info.State = unityPids.Count > 0 ? UnityProcessState.DifferentProject : UnityProcessState.NotRunning;
+            // No Unity matched this project — enumerate every running workspace so the
+            // user can see exactly which instances exist (and why we couldn't find theirs).
+            info.AllWorkspaces = EnumerateUnityWorkspaces();
+            info.State = allUnityPids.Count > 0 ? UnityProcessState.DifferentProject : UnityProcessState.NotRunning;
             return info;
         }
 
