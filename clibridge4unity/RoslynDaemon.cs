@@ -62,14 +62,24 @@ static class RoslynDaemon
         catch { return null; }
     }
 
-    /// <summary>Query the daemon via named pipe.</summary>
+    /// <summary>Query the daemon via named pipe. Retries once on transient failure.</summary>
     public static string Query(string pipeName, string endpoint, string query)
     {
-        return QueryInternal(pipeName, endpoint, query, 30000);
+        var result = QueryInternal(pipeName, endpoint, query, 30000, out string error);
+        if (result != null) return result;
+
+        // One retry — covers the brief window after a listener finishes and before
+        // a sibling listener re-arms under heavy concurrent load.
+        Thread.Sleep(100);
+        result = QueryInternal(pipeName, endpoint, query, 30000, out error);
+        if (result == null && error != null)
+            Console.Error.WriteLine($"[roslyn] daemon query failed: {error}");
+        return result;
     }
 
-    static string QueryInternal(string pipeName, string endpoint, string query, int timeoutMs)
+    static string QueryInternal(string pipeName, string endpoint, string query, int timeoutMs, out string error)
     {
+        error = null;
         try
         {
             using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
@@ -89,7 +99,11 @@ static class RoslynDaemon
 
             return sb.ToString();
         }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            error = $"{ex.GetType().Name}: {ex.Message} (pipe={pipeName})";
+            return null;
+        }
     }
 
     /// <summary>Start the daemon as a background process. Returns pipe name or null.</summary>
@@ -145,6 +159,25 @@ static class RoslynDaemon
         try { File.Delete(GetPipeFile(projectPath)); } catch { }
     }
 
+    /// <summary>Kill the daemon process (if alive) and remove its state files. Used to recover from a stuck daemon.</summary>
+    public static void KillAndCleanup(string projectPath)
+    {
+        string pidFile = GetPidFile(projectPath);
+        if (File.Exists(pidFile))
+        {
+            try
+            {
+                if (int.TryParse(File.ReadAllText(pidFile).Trim(), out int pid))
+                {
+                    try { Process.GetProcessById(pid).Kill(entireProcessTree: true); }
+                    catch { /* already gone */ }
+                }
+            }
+            catch { }
+        }
+        CleanupFiles(projectPath);
+    }
+
     // ─── Server side ─────────────────────────────────────────────────
 
     /// <summary>Run the daemon (blocking).</summary>
@@ -156,7 +189,7 @@ static class RoslynDaemon
         {
             string pipe = GetRunningPipe(projectPath);
             if (pipe == null) { Console.WriteLine("No daemon running."); return 0; }
-            QueryInternal(pipe, "shutdown", "", 2000);
+            QueryInternal(pipe, "shutdown", "", 2000, out _);
             CleanupFiles(projectPath);
             Console.WriteLine("Daemon stopped.");
             return 0;
@@ -262,10 +295,11 @@ static class RoslynDaemon
         Console.WriteLine($"pipe:{pipeName}");
         Console.Out.Flush();
 
-        var lastActivity = DateTime.UtcNow;
+        long lastActivityTicks = DateTime.UtcNow.Ticks;
         var shutdownCts = new CancellationTokenSource();
 
-        // Handle connections concurrently — always have a listener ready
+        // Handle a single connection end-to-end. The listener task stays "busy" on this connection
+        // until it completes; other listeners in the pool continue serving new clients in parallel.
         async Task HandleConnection(NamedPipeServerStream server)
         {
             try
@@ -314,49 +348,81 @@ static class RoslynDaemon
                 await server.WriteAsync(responseBytes, 0, responseBytes.Length);
                 server.Flush();
             }
-            catch { }
-            finally
-            {
-                server.Dispose();
-            }
-        }
-
-        while (!shutdownCts.IsCancellationRequested)
-        {
-            if ((DateTime.UtcNow - lastActivity).TotalMinutes > TTL_MINUTES)
-            {
-                Console.Error.WriteLine("Idle timeout — shutting down.");
-                break;
-            }
-
-            try
-            {
-                var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut,
-                    NamedPipeServerStream.MaxAllowedServerInstances);
-
-                var connectTask = server.WaitForConnectionAsync(shutdownCts.Token);
-                try
-                {
-                    connectTask.Wait(TimeSpan.FromSeconds(10));
-                }
-                catch (OperationCanceledException) { server.Dispose(); break; }
-                catch (AggregateException ae) when (ae.InnerException is OperationCanceledException) { server.Dispose(); break; }
-
-                if (!connectTask.IsCompleted)
-                {
-                    server.Dispose();
-                    continue;
-                }
-
-                lastActivity = DateTime.UtcNow;
-                _ = Task.Run(() => HandleConnection(server)); // handle concurrently
-            }
-            catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[daemon] Error: {ex.Message}");
+                Console.Error.WriteLine($"[daemon] connection error: {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                try { if (server.IsConnected) server.Disconnect(); } catch { }
+                try { server.Dispose(); } catch { }
             }
         }
+
+        // One persistent listener: accept → handle inline → loop. Multiple of these run in parallel
+        // so there is always at least one free listener available for new clients.
+        async Task RunListener(int id)
+        {
+            while (!shutdownCts.IsCancellationRequested)
+            {
+                NamedPipeServerStream server = null;
+                try
+                {
+                    server = new NamedPipeServerStream(
+                        pipeName,
+                        PipeDirection.InOut,
+                        NamedPipeServerStream.MaxAllowedServerInstances,
+                        PipeTransmissionMode.Byte,
+                        PipeOptions.Asynchronous);
+
+                    await server.WaitForConnectionAsync(shutdownCts.Token);
+                    Interlocked.Exchange(ref lastActivityTicks, DateTime.UtcNow.Ticks);
+
+                    // Handle inline — this listener is "busy" until the client is served.
+                    // Siblings in the pool keep accepting.
+                    var toHandle = server;
+                    server = null; // ownership transferred to HandleConnection
+                    await HandleConnection(toHandle);
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[daemon] listener {id} error: {ex.GetType().Name}: {ex.Message}");
+                    try { server?.Dispose(); } catch { }
+                    // Brief backoff so a persistent failure doesn't spin the CPU.
+                    try { await Task.Delay(500, shutdownCts.Token); }
+                    catch (OperationCanceledException) { return; }
+                }
+            }
+        }
+
+        // Idle-timeout watcher: shuts the daemon down after TTL_MINUTES of no activity.
+        async Task IdleWatcher()
+        {
+            while (!shutdownCts.IsCancellationRequested)
+            {
+                try { await Task.Delay(TimeSpan.FromMinutes(1), shutdownCts.Token); }
+                catch (OperationCanceledException) { return; }
+
+                long ticks = Interlocked.Read(ref lastActivityTicks);
+                var idle = DateTime.UtcNow - new DateTime(ticks, DateTimeKind.Utc);
+                if (idle.TotalMinutes > TTL_MINUTES)
+                {
+                    Console.Error.WriteLine("Idle timeout — shutting down.");
+                    shutdownCts.Cancel();
+                    return;
+                }
+            }
+        }
+
+        const int LISTENER_POOL_SIZE = 4;
+        var listenerTasks = new Task[LISTENER_POOL_SIZE + 1];
+        for (int i = 0; i < LISTENER_POOL_SIZE; i++)
+            listenerTasks[i] = RunListener(i);
+        listenerTasks[LISTENER_POOL_SIZE] = IdleWatcher();
+
+        try { Task.WaitAll(listenerTasks); }
+        catch (AggregateException) { /* cancellation */ }
 
         watcher.EnableRaisingEvents = false;
         watcher.Dispose();

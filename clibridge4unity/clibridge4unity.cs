@@ -943,6 +943,21 @@ class Program
                     Console.WriteLine(dResult);
                     return dResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
                 }
+
+                // Daemon claimed to be running but won't answer — it's stuck.
+                // Kill it and start fresh before falling through to single-pass.
+                Console.Error.WriteLine("[roslyn] Daemon unresponsive — killing and restarting");
+                RoslynDaemon.KillAndCleanup(projectPath);
+                daemonPipe = RoslynDaemon.StartBackground(projectPath);
+                if (daemonPipe != null)
+                {
+                    string retry = RoslynDaemon.Query(daemonPipe, "analyze", data ?? "");
+                    if (retry != null)
+                    {
+                        Console.WriteLine(retry);
+                        return retry.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+                    }
+                }
             }
 
             // Fallback: single-pass Roslyn, and start daemon in background for next time
@@ -1277,9 +1292,29 @@ class Program
                         && !fileCandidate.Contains("\n")
                         && fileCandidate.Length < 260);
 
+                // Strong indicator: input is clearly *shaped* like a file path (drive letter, /, ./, ~/, \\).
+                // If so, and the file doesn't exist, we must NOT silently treat the path string as inline C#.
+                bool looksLikePathShape = dataForFileCheck.StartsWith("@")
+                    || System.Text.RegularExpressions.Regex.IsMatch(fileCandidate, @"^[A-Za-z]:[\\/]")
+                    || fileCandidate.StartsWith("/")
+                    || fileCandidate.StartsWith("./")
+                    || fileCandidate.StartsWith("../")
+                    || fileCandidate.StartsWith("~/")
+                    || fileCandidate.StartsWith(@"\\");
+
                 if (looksLikeFile && File.Exists(Path.GetFullPath(fileCandidate)))
                 {
                     data = $"@{Path.GetFullPath(fileCandidate)}{trailingFlags}";
+                }
+                else if (looksLikePathShape && fileCandidate.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Path-shaped + .cs suffix but file doesn't exist — this is almost certainly
+                    // a bad path rather than inline C# code that happens to look like a path.
+                    // Refuse instead of compiling the path string as source (which produces
+                    // confusing CS1056 '\' errors inside the wrapped Runner).
+                    Console.Error.WriteLine($"Error: File not found: {Path.GetFullPath(fileCandidate)}");
+                    Console.Error.WriteLine($"       (If you meant to execute inline C#, remove the .cs suffix or pipe the code via @path.)");
+                    return EXIT_USAGE_ERROR;
                 }
                 else if (dataForFileCheck.StartsWith("@"))
                 {
