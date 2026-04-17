@@ -2445,6 +2445,9 @@ class Program
         md.AppendLine("clibridge4unity CODE_EXEC_RETURN /tmp/snippet.cs");
         md.AppendLine("```");
         md.AppendLine();
+        md.AppendLine("**Put the temp .cs file OUTSIDE the Unity project** (`$TEMP`, `/tmp`, `~/.cache`, etc.) —");
+        md.AppendLine("writing it under `Assets/` or `Packages/` will trigger a Unity asset import + recompile, which kills the pipe.");
+        md.AppendLine();
         md.AppendLine("Flags: `--inspect [depth]` dumps the result tree, `--trace` emits line-by-line execution, `--vars x,y` filters.");
         md.AppendLine();
         md.AppendLine("## CODE_ANALYZE — offline code search (works without Unity)");

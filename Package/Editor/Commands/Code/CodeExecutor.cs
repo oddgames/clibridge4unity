@@ -66,7 +66,10 @@ namespace clibridge4unity
 
         [BridgeCommand("CODE_EXEC", "Compile and execute C# code (fire-and-forget)",
             Category = "Code",
-            Usage = "CODE_EXEC <c# code>\n  CODE_EXEC @/path/to/tempfile.cs  (read code from file)",
+            Usage = "CODE_EXEC <c# code>\n" +
+                    "  CODE_EXEC @/path/to/tempfile.cs  (read code from file — preferred for multi-line / $\"…\")\n" +
+                    "  NOTE: put the temp .cs file OUTSIDE the Unity project (e.g. $TEMP, /tmp, ~/.cache) —\n" +
+                    "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
             RequiresMainThread = false)]
         public static async Task<string> Execute(string code)
         {
@@ -142,10 +145,13 @@ namespace clibridge4unity
         [BridgeCommand("CODE_EXEC_RETURN", "Compile and execute C# code (waits for result, 25s timeout)",
             Category = "Code",
             Usage = "CODE_EXEC_RETURN <c# code>\n" +
+                    "  CODE_EXEC_RETURN @/path/to/tempfile.cs  (read code from file — preferred for multi-line / $\"…\")\n" +
                     "  CODE_EXEC_RETURN <expr> --inspect [depth] [--private]\n" +
                     "  CODE_EXEC_RETURN <code> --trace [--maxlines N] [--from N]\n" +
                     "  CODE_EXEC_RETURN <code> --trace --only varName\n" +
-                    "  CODE_EXEC_RETURN <code> --trace --vars x,y --skip print",
+                    "  CODE_EXEC_RETURN <code> --trace --vars x,y --skip print\n" +
+                    "  NOTE: put the temp .cs file OUTSIDE the Unity project (e.g. $TEMP, /tmp, ~/.cache) —\n" +
+                    "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
             RequiresMainThread = false,
             TimeoutSeconds = 30)]
         public static async Task<string> ExecuteReturn(string code)
