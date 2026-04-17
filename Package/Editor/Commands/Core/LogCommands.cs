@@ -307,20 +307,21 @@ namespace clibridge4unity
         private const int DefaultLogCount = 20;
 
         private static readonly string[] LogFlags = { "errors", "warnings", "verbose", "raw", "all", "clear" };
-        private static readonly string[] LogOptions = { "last", "since" };
+        private static readonly string[] LogOptions = { "last", "since", "filter", "grep" };
 
         [BridgeCommand("LOG", "Get Unity console logs",
             Category = "Core",
-            Usage = "LOG [type] [format] [count]\n" +
+            Usage = "LOG [type] [format] [count] [filter]\n" +
                     "  LOG                    - Last 20 entries (compact)\n" +
                     "  LOG errors             - Errors/exceptions (last 20)\n" +
                     "  LOG errors verbose     - Errors with full stack traces\n" +
                     "  LOG raw                - Full traces, no path shortening\n" +
                     "  LOG last:N             - Exact N entries\n" +
                     "  LOG since:ID           - Since ID\n" +
+                    "  LOG --filter text      - Substring search in messages + stacks\n" +
                     "  LOG all                - All entries (no cap)\n" +
                     "  LOG clear              - Clear buffer\n" +
-                    "  Combinable in any order: errors|warnings + verbose|raw + last:N|since:ID|all")]
+                    "  Combinable in any order: errors|warnings + verbose|raw + last:N|since:ID|all + --filter text")]
         public static string GetLogs(string data)
         {
             FlushPendingWrites();
@@ -341,6 +342,16 @@ namespace clibridge4unity
                 entries = entries.Where(e => e.Type == LogType.Error || e.Type == LogType.Exception || e.Type == LogType.Assert).ToList();
             else if (args.Has("warnings"))
                 entries = entries.Where(e => e.Type != LogType.Log).ToList();
+
+            // Text filter (--filter or filter:text or grep:text — substring match on message + stack)
+            string filterText = args.Get("filter") ?? args.Get("grep");
+            if (!string.IsNullOrEmpty(filterText))
+            {
+                entries = entries.Where(e =>
+                    (e.Message != null && e.Message.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                    (e.StackTrace != null && e.StackTrace.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) >= 0)
+                ).ToList();
+            }
 
             // Range filter
             if (args.Options.ContainsKey("since"))

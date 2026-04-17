@@ -188,6 +188,11 @@ namespace clibridge4unity
                 string arg = data.Trim();
                 int width = 1280, height = 720;
 
+                // Strip --output flag (handled CLI-side, ignore here)
+                int outIdx = arg.IndexOf("--output ", System.StringComparison.OrdinalIgnoreCase);
+                if (outIdx >= 0)
+                    arg = arg.Substring(0, outIdx).Trim();
+
                 // Parse trailing resolution: "camera 1920x1080" or "Player 800x600"
                 string target = arg;
                 int lastSpace = arg.LastIndexOf(' ');
@@ -259,15 +264,20 @@ namespace clibridge4unity
 
         private static string RenderGameObject(string name, int width, int height, string outputDir)
         {
-            // Find the GameObject
-            var go = GameObject.Find(name);
+            // Find the GameObject — try multiple strategies
+            var go = GameObject.Find(name); // active objects by path
             if (go == null)
             {
-                // Try fuzzy: search all root objects
+                // Search all root objects (includes inactive) — path match then recursive name match
+                string searchName = name.Contains("/") ? name.Substring(name.LastIndexOf('/') + 1) : name;
                 foreach (var root in UnityEngine.SceneManagement.SceneManager.GetActiveScene().GetRootGameObjects())
                 {
+                    if (root.name == name) { go = root; break; }
                     var found = root.transform.Find(name);
                     if (found != null) { go = found.gameObject; break; }
+                    // Recursive name search (finds inactive children too)
+                    var byName = FindChildByNameRecursive(root.transform, searchName);
+                    if (byName != null) { go = byName; break; }
                 }
             }
             if (go == null)
@@ -365,6 +375,18 @@ namespace clibridge4unity
             if (create)
                 return EditorWindow.GetWindow(gameViewType, false, "Game", false);
 
+            return null;
+        }
+
+        private static GameObject FindChildByNameRecursive(Transform parent, string name)
+        {
+            for (int i = 0; i < parent.childCount; i++)
+            {
+                var child = parent.GetChild(i);
+                if (child.name == name) return child.gameObject;
+                var found = FindChildByNameRecursive(child, name);
+                if (found != null) return found;
+            }
             return null;
         }
     }

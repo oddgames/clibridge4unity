@@ -324,15 +324,26 @@ namespace clibridge4unity
                 {
                     var root = stage.prefabContentsRoot;
                     var sb = new StringBuilder();
+
+                    // Count total nodes first to warn on huge prefabs
+                    int totalNodes = CountNodes(root.transform);
+                    int maxNodes = 200;
+
                     sb.AppendLine($"Prefab: {prefabPath}");
                     sb.AppendLine($"Root: {root.name}");
+                    sb.AppendLine($"Nodes: {totalNodes}");
+                    if (totalNodes > maxNodes && string.IsNullOrEmpty(filterComponent))
+                        sb.AppendLine($"WARNING: Large prefab ({totalNodes} nodes). Showing first {maxNodes}. Use --filter to narrow: PREFAB_HIERARCHY {{\"prefab\":\"...\",\"filter\":\"ComponentName\"}}");
                     sb.AppendLine();
 
                     // Build hierarchy
                     if (string.IsNullOrEmpty(filterComponent))
                     {
                         sb.AppendLine("Full Hierarchy:");
-                        BuildHierarchy(root.transform, sb, 0, null);
+                        int nodeCount = 0;
+                        BuildHierarchy(root.transform, sb, 0, null, maxNodes, ref nodeCount);
+                        if (nodeCount >= maxNodes)
+                            sb.AppendLine($"  ... ({totalNodes - maxNodes} more nodes truncated)");
                     }
                     else
                     {
@@ -484,10 +495,12 @@ namespace clibridge4unity
             return null;
         }
 
-        private static void BuildHierarchy(Transform t, StringBuilder sb, int depth, string filterComponent)
+        private static void BuildHierarchy(Transform t, StringBuilder sb, int depth, string filterComponent,
+            int maxNodes = int.MaxValue, ref int nodeCount)
         {
-            if (depth > 20) return; // Prevent infinite recursion
+            if (depth > 20 || nodeCount >= maxNodes) return;
 
+            nodeCount++;
             var indent = new string(' ', depth * 2);
             sb.Append($"{indent}{t.name}");
 
@@ -507,8 +520,17 @@ namespace clibridge4unity
             // Recurse to children
             foreach (Transform child in t)
             {
-                BuildHierarchy(child, sb, depth + 1, filterComponent);
+                if (nodeCount >= maxNodes) break;
+                BuildHierarchy(child, sb, depth + 1, filterComponent, maxNodes, ref nodeCount);
             }
+        }
+
+        private static int CountNodes(Transform t)
+        {
+            int count = 1;
+            foreach (Transform child in t)
+                count += CountNodes(child);
+            return count;
         }
 
         private static void FindObjectsWithComponent(Transform t, string componentName, List<GameObject> results)

@@ -264,9 +264,10 @@ namespace clibridge4unity
         /// Searches code using query syntax.
         /// Queries: class:Name, method:Name, field:Name, inherits:Type, attribute:Name, refs:Symbol
         /// </summary>
-        [BridgeCommand("CODE_SEARCH", "Search code by type, method, field, or inheritance",
+        [BridgeCommand("CODE_SEARCH", "Alias for CODE_ANALYZE with a kind-prefixed query (deprecated — use CODE_ANALYZE directly)",
             Category = "Code",
-            Usage = "CODE_SEARCH class:Name | method:Name | field:Name | inherits:Type | attribute:Name | refs:Symbol")]
+            Usage = "CODE_SEARCH class:Name | method:Name | field:Name | inherits:Type | attribute:Name | refs:Symbol\n" +
+                    "  (Prefer: CODE_ANALYZE method:Name — same behaviour)")]
         public static string Search(string query)
         {
             try
@@ -331,14 +332,25 @@ namespace clibridge4unity
         /// Supports: stack traces, "ClassName", "ClassName.MethodName", "ClassName.fieldName"
         /// Searches both Assets and Packages folders automatically.
         /// </summary>
-        [BridgeCommand("CODE_ANALYZE", "Analyze a class, member, or stack trace",
+        [BridgeCommand("CODE_ANALYZE", "Analyze a class, member, or stack trace (also handles method:/field:/inherits:/attribute: prefixes)",
             Category = "Code",
-            Usage = "CODE_ANALYZE ClassName | CODE_ANALYZE ClassName.MethodName | CODE_ANALYZE <stack trace>")]
+            Usage = "CODE_ANALYZE ClassName | ClassName.Member | method:Name | field:Name | inherits:Type | attribute:Name | <stack trace>")]
         public static string Analyze(string query)
         {
             try
             {
                 query = query.Trim();
+
+                // Prefix queries → dispatch to Search (unified CODE_ANALYZE entry point)
+                int colonIdx = query.IndexOf(':');
+                if (colonIdx > 0 && query.IndexOf(' ') < 0)
+                {
+                    string prefix = query.Substring(0, colonIdx).ToLowerInvariant();
+                    if (prefix == "method" || prefix == "field" || prefix == "property" ||
+                        prefix == "inherits" || prefix == "extends" || prefix == "attribute" ||
+                        prefix == "class" || prefix == "type")
+                        return Search(query);
+                }
 
                 // Check if it's a stack trace (contains " at " or line numbers like ":line 42")
                 if (query.Contains(" at ") || Regex.IsMatch(query, @":\d+\)") || query.Contains(".cs:"))

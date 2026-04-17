@@ -802,6 +802,16 @@ namespace clibridge4unity
         }
 
         /// <summary>
+        /// Returns how many seconds since the last main thread tick, or -1 if no ticks yet.
+        /// Safe to call from any thread.
+        /// </summary>
+        public static double GetHeartbeatStaleness()
+        {
+            if (_timerTickCount == 0) return -1;
+            return (DateTime.Now - _lastTimerTick).TotalSeconds;
+        }
+
+        /// <summary>
         /// Returns heartbeat diagnostics. Safe to call from any thread.
         /// </summary>
         public static string GetHeartbeatInfo()

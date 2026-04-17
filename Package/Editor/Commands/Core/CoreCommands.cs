@@ -36,11 +36,18 @@ namespace clibridge4unity
             catch { return true; } // If scan fails, assume modified
         }
 
-        [BridgeCommand("PING", "Test connection",
+        [BridgeCommand("PING", "Test connection (includes main thread health)",
             Category = "Core",
             Usage = "PING")]
         public static string Ping()
         {
+            var staleness = CommandRegistry.GetHeartbeatStaleness();
+            if (staleness < 0)
+                return "Pong (WARNING: no heartbeat ticks yet — Unity may still be initializing)";
+            if (staleness > 5.0)
+                return $"Pong (WARNING: main thread unresponsive — last heartbeat {staleness:F1}s ago. Run DIAG for details.)";
+            if (staleness > 1.0)
+                return $"Pong (main thread slow — {staleness:F1}s since last tick)";
             return Response.Success("Pong");
         }
 

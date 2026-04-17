@@ -275,10 +275,13 @@ namespace clibridge4unity
         [BridgeCommand("INSPECTOR", "Inspect a scene GameObject or any asset (prefab, material, shader, ScriptableObject, etc.)",
             Category = "Component",
             Usage = "INSPECTOR Canvas/Panel                              (scene GameObject)\n" +
+                    "  INSPECTOR Canvas/Panel --depth 2                    (recurse 2 levels)\n" +
+                    "  INSPECTOR Canvas/Panel --children                   (recurse all children)\n" +
                     "  INSPECTOR Assets/Prefabs/My.prefab                  (prefab asset)\n" +
                     "  INSPECTOR Assets/Materials/My.mat                   (material)\n" +
                     "  INSPECTOR Assets/Data/Config.asset                  (ScriptableObject)\n" +
-                    "  INSPECTOR {\"gameObject\":\"Panel\",\"component\":\"Image\"}  (filter component)",
+                    "  INSPECTOR {\"gameObject\":\"Panel\",\"component\":\"Image\"}  (filter component)\n" +
+                    "  INSPECTOR {\"gameObject\":\"Panel\",\"depth\":2}         (JSON form)",
             RequiresMainThread = true)]
         public static string Inspector(string data)
         {
@@ -286,16 +289,20 @@ namespace clibridge4unity
             {
                 string targetPath;
                 string filterComponent = null;
+                int depth = 0;
 
                 if (data.TrimStart().StartsWith("{"))
                 {
                     var json = JObject.Parse(data);
                     targetPath = json["gameObject"]?.ToString() ?? json["asset"]?.ToString();
                     filterComponent = json["component"]?.ToString();
+                    var depthToken = json["depth"];
+                    if (depthToken != null) depth = depthToken.ToObject<int>();
+                    if (json["children"]?.ToObject<bool>() == true) depth = int.MaxValue;
                 }
                 else
                 {
-                    targetPath = data.Trim();
+                    targetPath = ParseInspectorFlags(data.Trim(), out depth);
                 }
 
                 if (string.IsNullOrEmpty(targetPath))
@@ -314,42 +321,86 @@ namespace clibridge4unity
                     return Response.Error($"GameObject not found: {targetPath}");
 
                 var sb = new System.Text.StringBuilder();
-                sb.AppendLine($"GameObject: {targetPath}");
-                sb.AppendLine($"active: {go.activeSelf}");
-                sb.AppendLine($"layer: {LayerMask.LayerToName(go.layer)}");
-                sb.AppendLine($"tag: {go.tag}");
-                sb.AppendLine("---");
-
-                var components = go.GetComponents<Component>();
-                foreach (var comp in components)
-                {
-                    if (comp == null) continue;
-                    string typeName = comp.GetType().Name;
-
-                    if (!string.IsNullOrEmpty(filterComponent) &&
-                        !typeName.Equals(filterComponent, StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    sb.AppendLine($"[{typeName}]");
-
-                    // Use SerializedObject to read all visible fields (same as Unity Inspector)
-                    var so = new SerializedObject(comp);
-                    var prop = so.GetIterator();
-                    if (prop.NextVisible(true))
-                    {
-                        do
-                        {
-                            sb.AppendLine($"  {prop.name}: {GetPropertyValue(prop)}");
-                        } while (prop.NextVisible(false));
-                    }
-                    sb.AppendLine();
-                }
-
+                AppendGameObjectInspection(sb, go, filterComponent, depth, 0, targetPath);
                 return sb.ToString().TrimEnd();
             }
             catch (Exception ex)
             {
                 return Response.Exception(ex);
+            }
+        }
+
+        /// <summary>
+        /// Strip trailing `--depth N` / `--children` flags from the data string and return the bare path.
+        /// </summary>
+        private static string ParseInspectorFlags(string input, out int depth)
+        {
+            depth = 0;
+            if (string.IsNullOrEmpty(input)) return input;
+
+            var tokens = input.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            var pathParts = new System.Collections.Generic.List<string>();
+            for (int i = 0; i < tokens.Length; i++)
+            {
+                string t = tokens[i];
+                if (t.Equals("--children", StringComparison.OrdinalIgnoreCase))
+                {
+                    depth = int.MaxValue;
+                }
+                else if (t.Equals("--depth", StringComparison.OrdinalIgnoreCase) && i + 1 < tokens.Length
+                      && int.TryParse(tokens[i + 1], out int d))
+                {
+                    depth = Math.Max(0, d);
+                    i++;
+                }
+                else
+                {
+                    pathParts.Add(t);
+                }
+            }
+            return string.Join(" ", pathParts);
+        }
+
+        /// <summary>
+        /// Render a GameObject and (optionally) its descendants up to `maxDepth` levels deep.
+        /// Indent by `currentDepth * 2` spaces to show hierarchy.
+        /// </summary>
+        private static void AppendGameObjectInspection(System.Text.StringBuilder sb, GameObject go,
+            string filterComponent, int maxDepth, int currentDepth, string displayPath)
+        {
+            string indent = new string(' ', currentDepth * 2);
+            sb.AppendLine($"{indent}GameObject: {displayPath ?? go.name}");
+            sb.AppendLine($"{indent}active: {go.activeSelf}  layer: {LayerMask.LayerToName(go.layer)}  tag: {go.tag}");
+
+            var components = go.GetComponents<Component>();
+            foreach (var comp in components)
+            {
+                if (comp == null) continue;
+                string typeName = comp.GetType().Name;
+
+                if (!string.IsNullOrEmpty(filterComponent) &&
+                    !typeName.Equals(filterComponent, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                sb.AppendLine($"{indent}[{typeName}]");
+                var so = new SerializedObject(comp);
+                var prop = so.GetIterator();
+                if (prop.NextVisible(true))
+                {
+                    do
+                    {
+                        sb.AppendLine($"{indent}  {prop.name}: {GetPropertyValue(prop)}");
+                    } while (prop.NextVisible(false));
+                }
+            }
+
+            if (currentDepth >= maxDepth) return;
+
+            foreach (Transform child in go.transform)
+            {
+                sb.AppendLine();
+                AppendGameObjectInspection(sb, child.gameObject, filterComponent,
+                    maxDepth, currentDepth + 1, child.name);
             }
         }
 

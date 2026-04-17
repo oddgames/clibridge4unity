@@ -372,7 +372,32 @@ static class RoslynDaemon
     static string HandleAnalyze(ConcurrentDictionary<string, SyntaxTree> trees, ConcurrentDictionary<string, string> fileTexts, string projectPath, string query)
     {
         if (string.IsNullOrWhiteSpace(query))
-            return "Error: No query provided. Usage: CODE_ANALYZE ClassName or CODE_ANALYZE ClassName.MemberName";
+            return "Error: No query. Usage: CODE_ANALYZE ClassName | ClassName.Member | method:Name | field:Name | inherits:Type | attribute:Name";
+
+        query = query.Trim();
+
+        // Prefix dispatch: method:/field:/property:/inherits:/attribute: → listing via HandleSearch.
+        // class:/type: → strip prefix, do deep analysis on the term.
+        int colonIdx = query.IndexOf(':');
+        if (colonIdx > 0 && query.IndexOf(' ') < 0)
+        {
+            string prefix = query.Substring(0, colonIdx).ToLowerInvariant();
+            string term = query.Substring(colonIdx + 1).Trim();
+            switch (prefix)
+            {
+                case "class":
+                case "type":
+                    query = term;
+                    break;
+                case "method":
+                case "field":
+                case "property":
+                case "inherits":
+                case "extends":
+                case "attribute":
+                    return HandleSearch(trees, fileTexts, projectPath, $"{prefix}:{term}");
+            }
+        }
 
         // Support dotted member queries: ClassName.MemberName
         string className = query;

@@ -656,6 +656,28 @@ class Program
             if (dialogs.Count == 0)
             {
                 Console.WriteLine("No dialogs detected.");
+                // If Unity is busy (importing/compiling), provide context
+                if (unityInfo.State == UnityProcessState.Importing)
+                {
+                    Console.WriteLine($"Unity appears busy: {unityInfo.ImportStatus ?? "importing/compiling"}");
+                    Console.WriteLine("Main thread may be blocked by Unity internals (asset import, shader compile, GC) with no dismissible dialog.");
+                    Console.WriteLine("Suggestions: (1) wait for Unity to finish, (2) run DIAG for heartbeat info, (3) check Unity Editor manually.");
+                }
+                else
+                {
+                    // Try a quick DIAG via pipe to check heartbeat
+                    try
+                    {
+                        string diagResult = SendCommandGetResponse(pipeName, "DIAG", "");
+                        if (diagResult != null && diagResult.Contains("mainThreadResponsive: no"))
+                        {
+                            Console.WriteLine("WARNING: Main thread is unresponsive (no dialog to dismiss).");
+                            Console.WriteLine("Unity may be stuck in asset pipeline, layout rebuild, or GC.");
+                            Console.WriteLine("Suggestions: (1) wait, (2) check Unity Editor manually.");
+                        }
+                    }
+                    catch { } // pipe not available — no extra info
+                }
                 return EXIT_SUCCESS;
             }
 
@@ -834,24 +856,43 @@ class Program
         if (command.Equals("SCREENSHOT", StringComparison.OrdinalIgnoreCase))
         {
             string view = data?.Trim() ?? "";
+
+            // Parse --output <path> flag (strip from data before routing)
+            string outputOverride = null;
+            int outIdx = view.IndexOf("--output ", StringComparison.OrdinalIgnoreCase);
+            if (outIdx >= 0)
+            {
+                outputOverride = view.Substring(outIdx + "--output ".Length).Trim();
+                view = view.Substring(0, outIdx).Trim();
+            }
+
             string viewLower = view.ToLowerInvariant();
             // "game" routes to server (can create the tab + render camera)
             // Other known views use fast CLI-side Win32 capture
             string[] cliViews = { "", "editor", "scene", "inspector", "hierarchy", "console", "project", "profiler" };
             if (Array.Exists(cliViews, v => v == viewLower))
             {
-                return HandleScreenshot(projectPath);
+                int rc = HandleScreenshot(projectPath);
+                if (rc == EXIT_SUCCESS && outputOverride != null)
+                    CopyScreenshotOutput(outputOverride);
+                return rc;
             }
 
             // Server-side render — try pipe, fallback to CLI capture
             try
             {
-                return SendCommand(pipeName, projectPath, "SCREENSHOT", data);
+                int rc = SendCommand(pipeName, projectPath, "SCREENSHOT", view);
+                if (rc == EXIT_SUCCESS && outputOverride != null)
+                    CopyScreenshotOutput(outputOverride);
+                return rc;
             }
             catch
             {
                 Console.Error.WriteLine("Warning: Could not connect to Unity for server-side render. Falling back to window capture.");
-                return HandleScreenshot(projectPath);
+                int rc = HandleScreenshot(projectPath);
+                if (rc == EXIT_SUCCESS && outputOverride != null)
+                    CopyScreenshotOutput(outputOverride);
+                return rc;
             }
         }
 
@@ -881,24 +922,22 @@ class Program
             catch { }
         }
 
-        // CODE_SEARCH / CODE_ANALYZE: daemon → single-pass Roslyn fallback
+        // CODE_SEARCH / CODE_ANALYZE: unified — both go through the `analyze` endpoint.
+        // CODE_SEARCH is kept as an alias; the prefix in the query (method:/field:/etc.) drives behaviour.
         if (command.Equals("CODE_SEARCH", StringComparison.OrdinalIgnoreCase) ||
             command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase))
         {
-            string endpoint = command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase) ? "analyze" : "search";
-
             // Try daemon first
             string daemonPipe = RoslynDaemon.GetRunningPipe(projectPath);
             if (daemonPipe == null)
             {
-                // Auto-start daemon in background
                 Console.Error.WriteLine("[roslyn] Starting daemon...");
                 daemonPipe = RoslynDaemon.StartBackground(projectPath);
             }
 
             if (daemonPipe != null)
             {
-                string dResult = RoslynDaemon.Query(daemonPipe, endpoint, data ?? "");
+                string dResult = RoslynDaemon.Query(daemonPipe, "analyze", data ?? "");
                 if (dResult != null)
                 {
                     Console.WriteLine(dResult);
@@ -908,19 +947,33 @@ class Program
 
             // Fallback: single-pass Roslyn, and start daemon in background for next time
             Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass analysis");
-            // Fire-and-forget daemon start so next query is fast
             Task.Run(() => RoslynDaemon.StartBackground(projectPath));
 
-            string fallbackResult = command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase)
-                ? RoslynAnalyzer.Analyze(projectPath, data ?? "")
-                : RoslynAnalyzer.Search(projectPath, data ?? "");
+            string fallbackResult = RoslynAnalyzer.Analyze(projectPath, data ?? "");
             Console.WriteLine(fallbackResult);
             return fallbackResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
         }
 
+        // ASSET_SEARCH: server-side Unity Search + CLI-side scene/prefab YAML grep
+        if (command.Equals("ASSET_SEARCH", StringComparison.OrdinalIgnoreCase))
+        {
+            return HandleAssetSearch(pipeName, projectPath, data);
+        }
+
         int result = SendCommand(pipeName, projectPath, command, data);
 
-        // If main thread timed out, just nudge — don't steal focus
+        // Auto-retry once on main thread timeout — Unity may have just been momentarily busy
+        // (e.g., finishing asset import, GC pause). Wait 3s and try again.
+        if (result == EXIT_TIMEOUT && _lastResponseContainedMainThreadTimeout)
+        {
+            _lastResponseContainedMainThreadTimeout = false;
+            Console.Error.WriteLine("Retrying in 3s (main thread was busy)...");
+            WakeUnityEditor(projectPath);
+            Thread.Sleep(3000);
+            result = SendCommand(pipeName, projectPath, command, data);
+        }
+
+        // If still timed out after retry, just nudge — don't steal focus
         if (result != EXIT_SUCCESS && _lastResponseContainedMainThreadTimeout)
         {
             _lastResponseContainedMainThreadTimeout = false;
@@ -2362,13 +2415,18 @@ class Program
     /// </summary>
     static int HandleInstall(string pipeName, string projectPath, string data)
     {
-        // Build concise CLAUDE.md content — capabilities overview + pointer to full help
         var md = new StringBuilder();
-        md.AppendLine("# Unity Bridge (clibridge4unity) - Tool Reference");
+        md.AppendLine("# Unity Bridge (clibridge4unity)");
         md.AppendLine();
-        md.AppendLine("`clibridge4unity` is a CLI tool that controls the Unity Editor via named pipes. Run commands from the project directory. Run `clibridge4unity -h` for full usage, or `clibridge4unity HELP` for live command list from Unity.");
+        md.AppendLine("CLI for Unity Editor automation. Run `clibridge4unity -h` for full usage.");
         md.AppendLine();
-        md.AppendLine("**Capabilities:** scene hierarchy & GameObject CRUD, component inspection & modification, compile/play/stop workflow, execute arbitrary C# in Unity (CODE_EXEC/CODE_EXEC_RETURN — has its own Roslyn compiler, works even when Unity is busy), code search & analysis, asset management, run tests with streaming results, screenshots, prefab operations, and diagnostics. Most commands auto-detect the Unity project from the current directory.");
+        md.AppendLine("CODE_EXEC 'code' | CODE_EXEC_RETURN 'expr' — run C# in Unity (own Roslyn compiler, works when Unity is busy)");
+        md.AppendLine("CODE_ANALYZE Class | CODE_ANALYZE Class.Member — connection graph + grep (works offline)");
+        md.AppendLine("CODE_SEARCH class:|method:|field:|inherits:|attribute: — structured search");
+        md.AppendLine("COMPILE | STATUS | LOG errors — build workflow");
+        md.AppendLine("PLAY | STOP | SCENE | CREATE | FIND | DELETE | SAVE — scene/play mode");
+        md.AppendLine("INSPECTOR obj | COMPONENT_SET obj comp field val — components");
+        md.AppendLine("TEST [filter] | SCREENSHOT [view] | WAKEUP | DISMISS — testing/capture/window mgmt");
 
         // Determine target path
         string targetPath;
@@ -2531,6 +2589,140 @@ class Program
         return EXIT_SUCCESS;
     }
 
+    /// <summary>
+    /// ASSET_SEARCH: server-side Unity Search + CLI-side scene/prefab YAML grep.
+    /// Tries server first, then supplements with fast file-based search for names/components
+    /// found inside scene hierarchies and prefab internals.
+    /// </summary>
+    static int HandleAssetSearch(string pipeName, string projectPath, string data)
+    {
+        if (string.IsNullOrWhiteSpace(data))
+        {
+            Console.Error.WriteLine("Usage: ASSET_SEARCH <query>");
+            return EXIT_USAGE_ERROR;
+        }
+
+        // Extract the text portion of the query (strip t:Type filters for scene search)
+        string searchTerm = data.Trim();
+        string sceneSearchTerm = System.Text.RegularExpressions.Regex.Replace(searchTerm, @"\bt:\w+\b", "").Trim();
+
+        // Try server-side Unity Search first
+        bool serverHadResults = false;
+        int serverResult = EXIT_TIMEOUT;
+        try
+        {
+            serverResult = SendCommand(pipeName, projectPath, "ASSET_SEARCH", data);
+            serverHadResults = serverResult == EXIT_SUCCESS;
+        }
+        catch { }
+
+        // CLI-side scene/prefab YAML search (always runs if there's a name to search for)
+        if (!string.IsNullOrEmpty(sceneSearchTerm))
+        {
+            var sceneResults = SearchSceneFiles(projectPath, sceneSearchTerm);
+            if (sceneResults.results.Count > 0)
+            {
+                if (serverHadResults)
+                    Console.WriteLine(); // separator from server results
+                Console.WriteLine($"--- Scene/Prefab internals ({sceneResults.results.Count} hit(s), {sceneResults.fileCount} files, {sceneResults.ms}ms) ---");
+                if (sceneResults.scriptGuid != null)
+                    Console.WriteLine($"Script GUID: {sceneResults.scriptGuid}");
+                foreach (var group in sceneResults.results.GroupBy(r => r.file))
+                {
+                    Console.WriteLine($"  {group.Key}:");
+                    foreach (var r in group)
+                        Console.WriteLine($"    L{r.line}: {r.context}");
+                }
+                return EXIT_SUCCESS;
+            }
+        }
+
+        return serverResult;
+    }
+
+    /// <summary>
+    /// Search .unity and .prefab YAML files for GameObjects by name and MonoBehaviours by script GUID.
+    /// No Unity connection needed.
+    /// </summary>
+    static (List<(string file, string context, int line)> results, string scriptGuid, int fileCount, long ms)
+        SearchSceneFiles(string projectPath, string searchTerm)
+    {
+        var results = new List<(string file, string context, int line)>();
+        string assetsDir = Path.Combine(projectPath, "Assets");
+        if (!Directory.Exists(assetsDir))
+            return (results, null, 0, 0);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        // Resolve script GUID from .cs.meta files
+        string scriptGuid = null;
+        try
+        {
+            var csFiles = Directory.GetFiles(assetsDir, $"{searchTerm}.cs", SearchOption.AllDirectories);
+            if (csFiles.Length == 0)
+                csFiles = Directory.GetFiles(assetsDir, "*.cs", SearchOption.AllDirectories)
+                    .Where(f => Path.GetFileNameWithoutExtension(f)
+                        .Equals(searchTerm, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+
+            foreach (var csFile in csFiles)
+            {
+                string metaFile = csFile + ".meta";
+                if (!File.Exists(metaFile)) continue;
+                foreach (var metaLine in File.ReadLines(metaFile))
+                {
+                    if (metaLine.StartsWith("guid: "))
+                    {
+                        scriptGuid = metaLine.Substring("guid: ".Length).Trim();
+                        break;
+                    }
+                }
+                if (scriptGuid != null) break;
+            }
+        }
+        catch { }
+
+        // Search .unity and .prefab files
+        var searchFiles = Directory.GetFiles(assetsDir, "*.unity", SearchOption.AllDirectories)
+            .Concat(Directory.GetFiles(assetsDir, "*.prefab", SearchOption.AllDirectories))
+            .ToArray();
+
+        foreach (var filePath in searchFiles)
+        {
+            try
+            {
+                string relPath = filePath.Substring(projectPath.Length + 1).Replace('\\', '/');
+                int lineNum = 0;
+                bool hasGuidHit = false;
+
+                foreach (var line in File.ReadLines(filePath))
+                {
+                    lineNum++;
+                    string trimmed = line.TrimStart();
+
+                    // Name match
+                    if (trimmed.StartsWith("m_Name: "))
+                    {
+                        string name = trimmed.Substring("m_Name: ".Length);
+                        if (name.IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0)
+                            results.Add((relPath, $"GameObject: {name}", lineNum));
+                    }
+
+                    // GUID match (component type — one per file)
+                    if (scriptGuid != null && !hasGuidHit && trimmed.Contains(scriptGuid))
+                    {
+                        results.Add((relPath, $"Component: {searchTerm}", lineNum));
+                        hasGuidHit = true;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        sw.Stop();
+        return (results, scriptGuid, searchFiles.Length, sw.ElapsedMilliseconds);
+    }
+
     static int HandleScreenshot(string projectPath)
     {
         // Find Unity's main window
@@ -2613,6 +2805,33 @@ class Program
 
         ShowNotification("Screenshot", $"Captured {width}x{height}", outputPath);
         return EXIT_SUCCESS;
+    }
+
+    /// <summary>Copy the most recent screenshot output to a user-specified path (--output flag).</summary>
+    static void CopyScreenshotOutput(string destPath)
+    {
+        // Find the most recently written file in the screenshots dir
+        string screenshotDir = Path.Combine(
+            Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(),
+            "clibridge4unity_screenshots");
+        if (!Directory.Exists(screenshotDir)) return;
+        var latest = Directory.GetFiles(screenshotDir, "*.png")
+            .Select(f => new FileInfo(f))
+            .OrderByDescending(f => f.LastWriteTimeUtc)
+            .FirstOrDefault();
+        if (latest == null) return;
+        try
+        {
+            string destDir = Path.GetDirectoryName(destPath);
+            if (!string.IsNullOrEmpty(destDir))
+                Directory.CreateDirectory(destDir);
+            File.Copy(latest.FullName, destPath, overwrite: true);
+            Console.WriteLine($"output: {destPath}");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Warning: Could not copy to --output path: {ex.Message}");
+        }
     }
 
     static void ShowNotification(string title, string message, string imagePath = null)
@@ -3187,12 +3406,37 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
 
 
         /// <summary>
-        /// CODE_ANALYZE: connection-graph analysis using Roslyn syntax parsing.
-        /// Returns structured output showing how a type connects to the rest of the codebase.
+        /// CODE_ANALYZE: unified entry point.
+        /// - Plain `Name` or `class:Name`/`type:Name` → deep connection-graph analysis for that type.
+        /// - `method:Name` / `field:Name` / `property:Name` / `inherits:Type` / `attribute:Name` → listing.
         /// </summary>
         public static string Analyze(string projectPath, string query)
         {
-            query = query.Trim();
+            query = (query ?? "").Trim();
+            if (query.Length == 0)
+                return "Error: No query. Usage: CODE_ANALYZE ClassName | method:Name | field:Name | inherits:Type | attribute:Name";
+
+            int colonIdx = query.IndexOf(':');
+            if (colonIdx > 0 && query.IndexOf(' ') < 0)
+            {
+                string prefix = query.Substring(0, colonIdx).ToLowerInvariant();
+                string term = query.Substring(colonIdx + 1).Trim();
+                switch (prefix)
+                {
+                    case "class":
+                    case "type":
+                        query = term;
+                        break;
+                    case "method":
+                    case "field":
+                    case "property":
+                    case "inherits":
+                    case "extends":
+                    case "attribute":
+                        return SearchByKind(projectPath, prefix, term);
+                }
+            }
+
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
             // Only scan Assets/ — Packages don't reference project code
@@ -3456,68 +3700,40 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         }
 
         /// <summary>
-        /// CODE_SEARCH: find types, methods, fields by query syntax.
-        /// Supports: class:Name, method:Name, field:Name, inherits:Type, attribute:Name, or free text.
+        /// List matches for a single member kind: method/field/property/inherits/attribute.
+        /// Used by CODE_ANALYZE when the query is prefixed (e.g. `method:Foo`).
         /// </summary>
-        public static string Search(string projectPath, string query)
+        static string SearchByKind(string projectPath, string kind, string term)
         {
-            query = query.Trim();
+            if (string.IsNullOrWhiteSpace(term))
+                return $"Error: No term after '{kind}:'";
+
             var sw = System.Diagnostics.Stopwatch.StartNew();
-
-            string searchType = "content";
-            string searchTerm = query;
-
-            if (query.Contains(':'))
-            {
-                int idx = query.IndexOf(':');
-                searchType = query.Substring(0, idx).ToLower();
-                searchTerm = query.Substring(idx + 1);
-            }
-
             string[] allFiles = GetSourceFiles(projectPath);
-
-            // Parallel: read + check contains + parse matching files
             var results = new System.Collections.Concurrent.ConcurrentBag<string>();
+
             Parallel.ForEach(allFiles, file =>
             {
                 try
                 {
                     string text = File.ReadAllText(file);
-                    if (!text.Contains(searchTerm)) return;
+                    if (!text.Contains(term)) return;
 
                     var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, path: file);
                     var root = tree.GetRoot();
                     string rel = ToRelativePath(file, projectPath);
 
-                    switch (searchType)
+                    switch (kind)
                     {
-                        case "class":
-                        case "type":
-                            foreach (var td in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax>())
-                            {
-                                if (td.Identifier.Text.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    int line = td.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                                    var bases = td.BaseList?.Types.Select(t => t.Type.ToString()).ToArray() ?? Array.Empty<string>();
-                                    string basesStr = bases.Length > 0 ? $" : {string.Join(", ", bases)}" : "";
-                                    results.Add($"{td.Modifiers} {td.Keyword} {td.Identifier.Text}{basesStr} — {rel}:{line}");
-                                }
-                            }
-                            break;
-
                         case "method":
                             foreach (var td in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax>())
-                            {
                                 foreach (var m in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>())
-                                {
-                                    if (m.Identifier.Text.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
+                                    if (m.Identifier.Text.Contains(term, StringComparison.OrdinalIgnoreCase))
                                     {
                                         int mLine = m.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
                                         var parms = string.Join(", ", m.ParameterList.Parameters.Select(p => $"{p.Type} {p.Identifier}"));
                                         results.Add($"{td.Identifier.Text}.{m.Identifier.Text}({parms}) : {m.ReturnType} — {rel}:{mLine}");
                                     }
-                                }
-                            }
                             break;
 
                         case "field":
@@ -3525,44 +3741,35 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
                             foreach (var td in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax>())
                             {
                                 foreach (var f in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax>())
-                                {
                                     foreach (var v in f.Declaration.Variables)
-                                    {
-                                        if (v.Identifier.Text.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
+                                        if (v.Identifier.Text.Contains(term, StringComparison.OrdinalIgnoreCase))
                                         {
                                             int fLine = v.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
                                             results.Add($"{td.Identifier.Text}.{v.Identifier} : {f.Declaration.Type} — {rel}:{fLine}");
                                         }
-                                    }
-                                }
                                 foreach (var p in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.PropertyDeclarationSyntax>())
-                                {
-                                    if (p.Identifier.Text.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
+                                    if (p.Identifier.Text.Contains(term, StringComparison.OrdinalIgnoreCase))
                                     {
                                         int pLine = p.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
                                         results.Add($"{td.Identifier.Text}.{p.Identifier} : {p.Type} (prop) — {rel}:{pLine}");
                                     }
-                                }
                             }
                             break;
 
                         case "inherits":
                         case "extends":
                             foreach (var td in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax>())
-                            {
-                                if (td.BaseList?.Types.Any(t => t.Type.ToString().Contains(searchTerm, StringComparison.OrdinalIgnoreCase)) == true)
+                                if (td.BaseList?.Types.Any(t => t.Type.ToString().Contains(term, StringComparison.OrdinalIgnoreCase)) == true)
                                 {
                                     int line = td.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
                                     var bases = td.BaseList.Types.Select(t => t.Type.ToString()).ToArray();
                                     results.Add($"{td.Identifier.Text} : {string.Join(", ", bases)} — {rel}:{line}");
                                 }
-                            }
                             break;
 
                         case "attribute":
                             foreach (var attr in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.AttributeSyntax>())
-                            {
-                                if (attr.Name.ToString().Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
+                                if (attr.Name.ToString().Contains(term, StringComparison.OrdinalIgnoreCase))
                                 {
                                     int aLine = attr.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
                                     var parent = attr.Ancestors().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MemberDeclarationSyntax>().FirstOrDefault();
@@ -3576,20 +3783,6 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
                                     };
                                     results.Add($"[{attr.Name}] on {parentName} — {rel}:{aLine}");
                                 }
-                            }
-                            break;
-
-                        default: // free text / refs
-                            var fileLines = text.Split('\n');
-                            for (int i = 0; i < fileLines.Length; i++)
-                            {
-                                if (fileLines[i].Contains(searchTerm))
-                                {
-                                    string lineText = fileLines[i].Trim();
-                                    if (lineText.Length > 100) lineText = lineText.Substring(0, 100) + "...";
-                                    results.Add($"{rel}:{i + 1}: {lineText}");
-                                }
-                            }
                             break;
                     }
                 }
@@ -3598,18 +3791,16 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
 
             sw.Stop();
             var sorted = results.OrderBy(r => r).ToList();
-
             if (sorted.Count == 0)
-                return $"No matches for '{query}' ({allFiles.Length} files scanned in {sw.ElapsedMilliseconds}ms)";
+                return $"No matches for '{kind}:{term}' ({allFiles.Length} files scanned in {sw.ElapsedMilliseconds}ms)";
 
             var sb = new StringBuilder();
-            sb.AppendLine($"Found {sorted.Count} matches ({sw.ElapsedMilliseconds}ms):");
+            sb.AppendLine($"=== {kind}:{term} === ({sorted.Count} matches, {sw.ElapsedMilliseconds}ms)");
             sb.AppendLine();
             foreach (var r in sorted.Take(50))
                 sb.AppendLine(r);
             if (sorted.Count > 50)
                 sb.AppendLine($"... +{sorted.Count - 50} more");
-
             return sb.ToString().TrimEnd();
         }
     }

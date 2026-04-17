@@ -55,10 +55,30 @@ namespace clibridge4unity
             var flags = knownFlags ?? Array.Empty<string>();
             var options = knownOptions ?? Array.Empty<string>();
 
-            foreach (var raw in data.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            var tokens = data.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < tokens.Length; i++)
             {
-                string token = raw.Trim();
+                string token = tokens[i].Trim();
                 if (string.IsNullOrEmpty(token)) continue;
+
+                // Handle --key value pairs: "--filter foo" → option["filter"] = "foo"
+                if (token.StartsWith("--") && token.Length > 2 && !token.Contains(":") && !token.Contains("="))
+                {
+                    string key = token.Substring(2);
+                    string matchedOpt = MatchKnown(key, options);
+                    if (matchedOpt != null && i + 1 < tokens.Length)
+                    {
+                        args.Options[matchedOpt] = tokens[++i].Trim();
+                        continue;
+                    }
+                    // --flag (no value) → check if it's a known flag
+                    string matchedFlg = MatchKnown(key, flags);
+                    if (matchedFlg != null)
+                    {
+                        args.Flags.Add(matchedFlg);
+                        continue;
+                    }
+                }
 
                 // Check key:value or key=value option first
                 int sepIdx = token.IndexOf(':');

@@ -146,43 +146,21 @@ namespace clibridge4unity
         }
 
         /// <summary>
-        /// Silently installs the CLI from the package (no wizard UI).
+        /// Silently installs the CLI by downloading the matching release from GitHub (no wizard UI).
         /// </summary>
         static void InstallCliSilent()
         {
             try
             {
-                string packagePath = Path.GetFullPath("Packages/au.com.oddgames.clibridge4unity");
                 string destDir = GetDefaultInstallPath();
-
-#if UNITY_EDITOR_WIN
-                string sourceExe = Path.Combine(packagePath, "Tools", "win-x64", "clibridge4unity.exe");
-                string destExe = Path.Combine(destDir, "clibridge4unity.exe");
-#elif UNITY_EDITOR_OSX
-                string sourceExe = Path.Combine(packagePath, "Tools", "osx-x64", "clibridge4unity");
-                string destExe = Path.Combine(destDir, "clibridge4unity");
-#else
-                string sourceExe = Path.Combine(packagePath, "Tools", "linux-x64", "clibridge4unity");
-                string destExe = Path.Combine(destDir, "clibridge4unity");
-#endif
-
-                if (!File.Exists(sourceExe))
+                if (!TryDownloadAndInstallCli(destDir, out string destExe, out string error))
                 {
-                    Debug.LogWarning($"[Bridge] CLI exe not found in package: {sourceExe}");
+                    Debug.LogError($"[Bridge] CLI update failed: {error}");
+                    EditorUtility.DisplayDialog("Update Failed",
+                        $"Could not update CLI tool:\n{error}",
+                        "OK");
                     return;
                 }
-
-                Directory.CreateDirectory(destDir);
-
-                // Rename-swap to handle locked exe
-                string oldExe = destExe + ".old";
-                if (File.Exists(destExe))
-                {
-                    if (File.Exists(oldExe)) File.Delete(oldExe);
-                    File.Move(destExe, oldExe);
-                }
-                File.Copy(sourceExe, destExe, true);
-                if (File.Exists(oldExe)) try { File.Delete(oldExe); } catch { }
 
                 string newVersion = GetCliVersionString();
                 Debug.Log($"[Bridge] CLI updated to v{newVersion}");
@@ -197,6 +175,91 @@ namespace clibridge4unity
                     $"Could not update CLI tool:\n{ex.Message}",
                     "OK");
             }
+        }
+
+        /// <summary>
+        /// Download the Windows CLI zip from GitHub Releases (matching the package version),
+        /// extract it, and copy the exe into <paramref name="destDir"/>. Handles locked exes via rename-swap.
+        /// Windows-only — macOS/Linux are not supported.
+        /// </summary>
+        static bool TryDownloadAndInstallCli(string destDir, out string destExe, out string error)
+        {
+            destExe = null;
+            error = null;
+
+#if !UNITY_EDITOR_WIN
+            error = "CLI Bridge auto-install is Windows-only. macOS/Linux are not supported.";
+            return false;
+#else
+            string version = GetPackageVersion();
+            if (string.IsNullOrEmpty(version))
+            {
+                error = "Could not read package version from package.json";
+                return false;
+            }
+
+            const string assetName = "clibridge4unity-win-x64.zip";
+            const string exeName = "clibridge4unity.exe";
+
+            string url = $"https://github.com/oddgames/clibridge4unity/releases/download/v{version}/{assetName}";
+            string tempZip = Path.Combine(Path.GetTempPath(), assetName);
+            string tempExtract = Path.Combine(Path.GetTempPath(), $"clibridge4unity_install_{Guid.NewGuid():N}");
+
+            try
+            {
+                EditorUtility.DisplayProgressBar("CLI Bridge", $"Downloading {assetName} (v{version})...", 0.3f);
+                using (var http = new System.Net.Http.HttpClient())
+                {
+                    http.Timeout = TimeSpan.FromMinutes(2);
+                    http.DefaultRequestHeaders.UserAgent.ParseAdd("clibridge4unity-setup");
+                    var bytes = http.GetByteArrayAsync(url).GetAwaiter().GetResult();
+                    File.WriteAllBytes(tempZip, bytes);
+                }
+
+                EditorUtility.DisplayProgressBar("CLI Bridge", "Extracting...", 0.7f);
+                Directory.CreateDirectory(tempExtract);
+                System.IO.Compression.ZipFile.ExtractToDirectory(tempZip, tempExtract, overwriteFiles: true);
+
+                string sourceExe = Path.Combine(tempExtract, exeName);
+                if (!File.Exists(sourceExe))
+                {
+                    error = $"Downloaded archive did not contain {exeName}";
+                    return false;
+                }
+
+                EditorUtility.DisplayProgressBar("CLI Bridge", "Installing...", 0.9f);
+                Directory.CreateDirectory(destDir);
+                destExe = Path.Combine(destDir, exeName);
+
+                // Rename-swap to handle locked exe (Unity may have it running as a daemon)
+                string oldExe = destExe + ".old";
+                if (File.Exists(destExe))
+                {
+                    try { if (File.Exists(oldExe)) File.Delete(oldExe); } catch { }
+                    try { File.Move(destExe, oldExe); } catch { }
+                }
+                File.Copy(sourceExe, destExe, true);
+                if (File.Exists(oldExe)) { try { File.Delete(oldExe); } catch { } }
+
+                return true;
+            }
+            catch (System.Net.Http.HttpRequestException ex)
+            {
+                error = $"Download failed: {ex.Message}\nURL: {url}\n(Check that release v{version} exists on GitHub.)";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                error = $"{ex.GetType().Name}: {ex.Message}";
+                return false;
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+                try { File.Delete(tempZip); } catch { }
+                try { Directory.Delete(tempExtract, true); } catch { }
+            }
+#endif
         }
 
         [MenuItem("Tools/CLI Bridge for Unity/Setup Wizard")]
@@ -509,47 +572,13 @@ namespace clibridge4unity
         {
             try
             {
-                // Find the CLI executable in the package
-                string packagePath = Path.GetFullPath("Packages/au.com.oddgames.clibridge4unity");
-                string toolsPath = Path.Combine(packagePath, "Tools");
-
-#if UNITY_EDITOR_WIN
-                string sourceExe = Path.Combine(toolsPath, "win-x64", "clibridge4unity.exe");
-                string destExe = Path.Combine(installPath, "clibridge4unity.exe");
-#elif UNITY_EDITOR_OSX
-                string sourceExe = Path.Combine(toolsPath, "osx-x64", "clibridge4unity");
-                string destExe = Path.Combine(installPath, "clibridge4unity");
-#else
-                string sourceExe = Path.Combine(toolsPath, "linux-x64", "clibridge4unity");
-                string destExe = Path.Combine(installPath, "clibridge4unity");
-#endif
-
-                if (!File.Exists(sourceExe))
+                if (!TryDownloadAndInstallCli(installPath, out string destExe, out string error))
                 {
-                    EditorUtility.DisplayDialog("Error",
-                        $"CLI executable not found in package:\n{sourceExe}\n\n" +
-                        "Please reinstall the package or contact support.",
+                    EditorUtility.DisplayDialog("Install Failed",
+                        $"Could not install the CLI tool:\n\n{error}",
                         "OK");
                     return;
                 }
-
-                // Create install directory if it doesn't exist
-                Directory.CreateDirectory(installPath);
-
-                // Copy executable
-                File.Copy(sourceExe, destExe, true);
-
-#if !UNITY_EDITOR_WIN
-                // Make executable on Unix
-                var chmodInfo = new ProcessStartInfo
-                {
-                    FileName = "chmod",
-                    Arguments = $"+x \"{destExe}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                Process.Start(chmodInfo)?.WaitForExit();
-#endif
 
                 // Add to PATH automatically
                 AddToPath(installPath);
