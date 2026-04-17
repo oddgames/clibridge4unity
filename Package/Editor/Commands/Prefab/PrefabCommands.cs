@@ -496,7 +496,7 @@ namespace clibridge4unity
         }
 
         private static void BuildHierarchy(Transform t, StringBuilder sb, int depth, string filterComponent,
-            int maxNodes = int.MaxValue, ref int nodeCount)
+            int maxNodes, ref int nodeCount)
         {
             if (depth > 20 || nodeCount >= maxNodes) return;
 

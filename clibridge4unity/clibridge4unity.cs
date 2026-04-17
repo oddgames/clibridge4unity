@@ -2415,18 +2415,58 @@ class Program
     /// </summary>
     static int HandleInstall(string pipeName, string projectPath, string data)
     {
+        const string marker = "# Unity Bridge (clibridge4unity) - Tool Reference";
+        const string endMarker = "<!-- END clibridge4unity -->";
+
         var md = new StringBuilder();
-        md.AppendLine("# Unity Bridge (clibridge4unity)");
+        md.AppendLine(marker);
         md.AppendLine();
-        md.AppendLine("CLI for Unity Editor automation. Run `clibridge4unity -h` for full usage.");
+        md.AppendLine("CLI for Unity Editor automation via named pipes. Run `clibridge4unity -h` for the full command list.");
         md.AppendLine();
-        md.AppendLine("CODE_EXEC 'code' | CODE_EXEC_RETURN 'expr' — run C# in Unity (own Roslyn compiler, works when Unity is busy)");
-        md.AppendLine("CODE_ANALYZE Class | CODE_ANALYZE Class.Member — connection graph + grep (works offline)");
-        md.AppendLine("CODE_SEARCH class:|method:|field:|inherits:|attribute: — structured search");
-        md.AppendLine("COMPILE | STATUS | LOG errors — build workflow");
-        md.AppendLine("PLAY | STOP | SCENE | CREATE | FIND | DELETE | SAVE — scene/play mode");
-        md.AppendLine("INSPECTOR obj | COMPONENT_SET obj comp field val — components");
-        md.AppendLine("TEST [filter] | SCREENSHOT [view] | WAKEUP | DISMISS — testing/capture/window mgmt");
+        md.AppendLine("## Prefer existing commands over ad-hoc C#");
+        md.AppendLine();
+        md.AppendLine("Before reaching for CODE_EXEC_RETURN to inspect the scene, try these — they're already structured:");
+        md.AppendLine();
+        md.AppendLine("- `INSPECTOR Canvas/Panel` — one GameObject, all serialized fields (same shape as Unity Inspector)");
+        md.AppendLine("- `INSPECTOR Canvas/Panel --depth 2` — recurse N levels, dumping components + fields at each level");
+        md.AppendLine("- `INSPECTOR Canvas/Panel --children` — full subtree");
+        md.AppendLine("- `PREFAB_HIERARCHY Assets/Prefabs/Foo.prefab` — prefab subtree with components");
+        md.AppendLine("- `SCENE` — hierarchy tree (names only)");
+        md.AppendLine("- `FIND Name` — locate a GameObject + components list");
+        md.AppendLine();
+        md.AppendLine("## CODE_EXEC / CODE_EXEC_RETURN");
+        md.AppendLine();
+        md.AppendLine("Own Roslyn compiler — works even when Unity's main thread is busy.");
+        md.AppendLine();
+        md.AppendLine("**For multi-line scripts or anything containing `$\"...\"`, write the C# to a file and pass its path** —");
+        md.AppendLine("the CLI auto-detects file paths. This avoids bash escaping of `$`, `\"`, backticks and the 32KB cmdline limit:");
+        md.AppendLine();
+        md.AppendLine("```");
+        md.AppendLine("clibridge4unity CODE_EXEC_RETURN /tmp/snippet.cs");
+        md.AppendLine("```");
+        md.AppendLine();
+        md.AppendLine("Flags: `--inspect [depth]` dumps the result tree, `--trace` emits line-by-line execution, `--vars x,y` filters.");
+        md.AppendLine();
+        md.AppendLine("## CODE_ANALYZE — offline code search (works without Unity)");
+        md.AppendLine();
+        md.AppendLine("- `CODE_ANALYZE Foo` — deep view: definition, usages, derived types, GetComponent sites, own members");
+        md.AppendLine("- `CODE_ANALYZE Foo.Bar` — zoom into one member");
+        md.AppendLine("- `CODE_ANALYZE method:Name` — every method matching `Name` across the codebase (+ signatures)");
+        md.AppendLine("- `CODE_ANALYZE field:Name` / `property:Name` — same for fields/properties");
+        md.AppendLine("- `CODE_ANALYZE inherits:Type` — derived types");
+        md.AppendLine("- `CODE_ANALYZE attribute:Name` — attribute usage sites");
+        md.AppendLine();
+        md.AppendLine("(`CODE_SEARCH` is a deprecated alias that forwards here.)");
+        md.AppendLine();
+        md.AppendLine("## Other workflows");
+        md.AppendLine();
+        md.AppendLine("- Build: `COMPILE` | `STATUS` | `LOG errors` | `DIAG` (always works — no main thread needed)");
+        md.AppendLine("- Scene: `PLAY` | `STOP` | `PAUSE` | `STEP` | `SCENE` | `CREATE` | `FIND` | `DELETE` | `SAVE` | `LOAD`");
+        md.AppendLine("- Components: `COMPONENT_SET obj comp field value` | `COMPONENT_ADD` | `COMPONENT_REMOVE`");
+        md.AppendLine("- Prefabs: `PREFAB_CREATE` | `PREFAB_INSTANTIATE` | `PREFAB_HIERARCHY`");
+        md.AppendLine("- Assets: `ASSET_SEARCH` | `ASSET_DISCOVER` | `ASSET_MOVE` | `ASSET_COPY` | `ASSET_DELETE`");
+        md.AppendLine("- Tests & capture: `TEST [filter]` | `SCREENSHOT [view]`");
+        md.AppendLine("- Window mgmt: `WAKEUP` (bring Unity to front) | `DISMISS` (close modal dialogs)");
 
         // Determine target path
         string targetPath;
@@ -2439,10 +2479,15 @@ class Program
             targetPath = Path.Combine(projectPath, "CLAUDE.md");
         }
 
-        // Check if file exists and has non-bridge content
-        string marker = "# Unity Bridge (clibridge4unity) - Tool Reference";
-        string endMarker = "<!-- END clibridge4unity -->";
         string content = md.ToString().TrimEnd() + "\n" + endMarker + "\n";
+
+        // Self-check: the marker must appear in the content we emit, otherwise replace-in-place
+        // breaks and every re-run duplicates the block.
+        if (!content.Contains(marker))
+        {
+            Console.Error.WriteLine($"BUG: CLAUDE.md content missing start marker '{marker}'. Aborting.");
+            return EXIT_COMMAND_ERROR;
+        }
 
         if (File.Exists(targetPath))
         {
