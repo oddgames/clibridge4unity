@@ -57,7 +57,6 @@ namespace clibridge4unity
             if (code != null && code.StartsWith("@"))
             {
                 string filePath = code.Substring(1).Trim();
-                Debug.Log($"[Bridge] ResolveCode: path=[{filePath}] exists={File.Exists(filePath)}");
                 if (File.Exists(filePath))
                     return File.ReadAllText(filePath);
             }

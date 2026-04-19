@@ -106,6 +106,8 @@ class Program
     // Track if last response indicated main thread timeout
     private static bool _lastResponseContainedMainThreadTimeout;
     private static long _preCompileLogId;
+    private static string _intent;       // set via --intent flag; purely descriptive
+    private static string _sessionFile;  // path of this invocation's session ledger entry (for cleanup)
 
     private const uint WM_NULL = 0x0000;
     private const uint WM_PAINT = 0x000F;
@@ -339,6 +341,32 @@ class Program
         return $"~{avg}s (last: {last}s, based on {times.Count} compiles)";
     }
 
+    // ───────────────────── Sessions ─────────────────────
+
+    /// <summary>
+    /// `SESSIONS` command — list other CLI agents currently active on this project.
+    /// Pure presence; no Unity pipe, no locking.
+    /// </summary>
+    static int HandleSessionsCommand(string projectPath)
+    {
+        string selfId = $"cli-{Process.GetCurrentProcess().Id:X}";
+        var sessions = SessionLedger.List(projectPath, excludeSessionId: selfId);
+        if (sessions.Count == 0)
+        {
+            Console.WriteLine("No other active CLI sessions for this project.");
+            return EXIT_SUCCESS;
+        }
+        Console.WriteLine($"{sessions.Count} active session(s):");
+        foreach (var s in sessions)
+        {
+            string intent = string.IsNullOrEmpty(s.Intent) ? "" : $"\n    intent: {s.Intent}";
+            Console.WriteLine($"  {s.SessionId}  (pid {s.Pid}, age {s.Age.TotalSeconds:F0}s)");
+            Console.WriteLine($"    command: {s.Command} {s.DataSummary}{intent}");
+            if (!string.IsNullOrEmpty(s.Cwd)) Console.WriteLine($"    cwd: {s.Cwd}");
+        }
+        return EXIT_SUCCESS;
+    }
+
     // ───────────────────── Self-Update ─────────────────────
 
     static int HandleSelfUpdate()
@@ -512,6 +540,8 @@ class Program
         try { return MainImpl(args); }
         finally
         {
+            // Remove the session ledger entry so other agents stop seeing us as active.
+            try { if (_sessionFile != null) File.Delete(_sessionFile); } catch { }
             // Print the update banner last so it appears at the bottom of the output,
             // after the command's normal stdout/stderr. Uses cached JSON only — no delay.
             try { ShowCachedUpdateNotice(); } catch { }
@@ -582,6 +612,18 @@ class Program
                 logFilter = args[++argIndex];
                 argIndex++;
             }
+            else if (arg == "--intent")
+            {
+                // Presence-only annotation — shown to other active CLI agents on this project
+                // via the SessionLedger. Doesn't affect command behaviour.
+                if (argIndex + 1 >= args.Length)
+                {
+                    Console.Error.WriteLine("Error: --intent requires a description string");
+                    return EXIT_USAGE_ERROR;
+                }
+                _intent = args[++argIndex];
+                argIndex++;
+            }
             else if (command == null)
             {
                 command = arg;
@@ -648,6 +690,25 @@ class Program
         StackTraceMinimizer.SetPaths(Path.GetFullPath(projectPath));
 
         string pipeName = GeneratePipeName(projectPath);
+
+        // SESSIONS: list other active CLI agents on this project (no Unity needed).
+        if (cmdUpper == "SESSIONS")
+            return HandleSessionsCommand(projectPath);
+
+        // Register this invocation in the session ledger + peek at anyone else who's active.
+        // Pure presence / advisory — never blocks or rewrites command behaviour.
+        _sessionFile = SessionLedger.Register(projectPath, command, data, _intent);
+        try
+        {
+            string selfId = $"cli-{Process.GetCurrentProcess().Id:X}";
+            var others = SessionLedger.List(projectPath, excludeSessionId: selfId);
+            foreach (var s in others)
+            {
+                string intentTag = string.IsNullOrEmpty(s.Intent) ? "" : $" — {s.Intent}";
+                Console.Error.WriteLine($"[sessions] {s.SessionId} active {s.Age.TotalSeconds:F0}s: {s.Command} {s.DataSummary}{intentTag}");
+            }
+        }
+        catch { }
 
         // Quick manifest check: warn if UPM package not installed (skip for SETUP/PREFLIGHT)
         if (!command.Equals("SETUP", StringComparison.OrdinalIgnoreCase) &&

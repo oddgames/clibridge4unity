@@ -207,8 +207,12 @@ namespace clibridge4unity
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError($"[Bridge] Main thread action failed: {ex}");
-                    work.CompletionSource.TrySetException(ex);
+                    // Unwrap TargetInvocationException — the outer layer is just a reflection
+                    // abstraction leak from MethodInfo.Invoke; callers care about the real cause.
+                    var inner = (ex is System.Reflection.TargetInvocationException tie && tie.InnerException != null)
+                        ? tie.InnerException : ex;
+                    Debug.LogError($"[Bridge] Main thread action failed: {inner}");
+                    work.CompletionSource.TrySetException(inner);
                 }
             }
         }
@@ -504,7 +508,12 @@ namespace clibridge4unity
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[Bridge] Command '{name}' failed: {ex}");
+                // Timeouts during domain reload / asset import are expected and noisy —
+                // log at warning level so they don't spam the Unity console as errors.
+                if (ex is TimeoutException)
+                    Debug.LogWarning($"[Bridge] Command '{name}' timed out: {ex.Message}");
+                else
+                    Debug.LogError($"[Bridge] Command '{name}' failed: {ex}");
                 response = Response.Exception(ex);
             }
 
