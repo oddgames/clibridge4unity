@@ -21,17 +21,22 @@ namespace clibridge4unity
         private static ICallbacks currentCallbacks;
 
         private static readonly string[] TestFlags = { "playmode", "editmode", "all", "list" };
+        private static readonly string[] TestOptions = { "category", "tests" };
 
         [BridgeCommand("TEST", "Run Unity tests",
             Category = "Code",
-            Usage = "TEST [mode] [filter]\n" +
-                    "  TEST                   - Run EditMode tests\n" +
-                    "  TEST playmode          - Run PlayMode tests\n" +
-                    "  TEST all               - Run all tests\n" +
-                    "  TEST list              - List all available tests\n" +
-                    "  TEST list MyClass      - List tests matching filter\n" +
-                    "  TEST MyTestClass       - Run tests matching name (substring)\n" +
-                    "  TEST MyTest playmode   - Run matching PlayMode tests",
+            Usage = "TEST [mode] [group ...] [--category X,Y] [--tests Full.Name,Other.Name]\n" +
+                    "  TEST                              - Run EditMode tests\n" +
+                    "  TEST playmode                     - Run PlayMode tests\n" +
+                    "  TEST all                          - Run all tests\n" +
+                    "  TEST list                         - List all available tests\n" +
+                    "  TEST list MyClass                 - List tests matching filter\n" +
+                    "  TEST MyTestClass                  - Run tests matching one group/class\n" +
+                    "  TEST PlayerTests,CameraTests      - Run multiple groups (OR — comma-separated)\n" +
+                    "  TEST PlayerTests CameraTests      - Same (multiple positional args also OR)\n" +
+                    "  TEST --category Physics,AI        - Run by [Category(\"X\")] attribute (multiple OR)\n" +
+                    "  TEST --tests Foo.TestA,Foo.TestB  - Run exact test names (multiple OR)\n" +
+                    "  TEST MyTest --category Physics playmode  - Combine filters + mode",
             RequiresMainThread = true,
             Streaming = true,
             TimeoutSeconds = 600,
@@ -42,7 +47,7 @@ namespace clibridge4unity
 
             try
             {
-                var args = CommandArgs.Parse(data, TestFlags);
+                var args = CommandArgs.Parse(data, TestFlags, TestOptions);
 
                 if (api == null)
                     api = await CommandRegistry.RunOnMainThreadAsync(() =>
@@ -52,20 +57,27 @@ namespace clibridge4unity
                 var testMode = args.Has("all") ? TestMode.EditMode | TestMode.PlayMode
                     : args.Has("playmode") ? TestMode.PlayMode : TestMode.EditMode;
 
-                // Get filter text from positional args
-                string testName = args.Positional.Count > 0
-                    ? string.Join(" ", args.Positional)
-                    : args.Warnings.Count > 0 ? string.Join(" ", args.Warnings) : null;
+                // Build filter arrays. Unity's Filter OR's entries within each array.
+                // Group patterns come from positional AND "warning" tokens — CommandArgs.Parse
+                // routes unrecognized tokens to Warnings when a schema (flags/options) is defined,
+                // so `TEST MyClass` lands in Warnings, not Positional.
+                var groupTokens = new List<string>();
+                groupTokens.AddRange(args.Positional);
+                groupTokens.AddRange(args.Warnings);
+                var groupNames = SplitFilterList(groupTokens);
+                var categoryNames = SplitCommaList(args.Get("category"));
+                var testNames = SplitCommaList(args.Get("tests"));
 
-                // LIST mode: enumerate tests without running
+                // LIST mode: enumerate tests without running (uses first group pattern as substring filter).
                 if (args.Has("list"))
                 {
-                    await ListTests(writer, testMode, testName);
+                    string listFilter = groupNames.Length > 0 ? groupNames[0] : null;
+                    await ListTests(writer, testMode, listFilter);
                     return;
                 }
 
                 // Run tests with streaming output
-                await RunTests(writer, testMode, testName, ct);
+                await RunTests(writer, testMode, groupNames, categoryNames, testNames, ct);
             }
             catch (OperationCanceledException)
             {
@@ -114,10 +126,21 @@ namespace clibridge4unity
                 await writer.WriteLineAsync("  " + t);
         }
 
-        private static async Task RunTests(StreamWriter writer, TestMode testMode, string testName, CancellationToken ct)
+        private static async Task RunTests(StreamWriter writer, TestMode testMode,
+            string[] groupNames, string[] categoryNames, string[] testNames, CancellationToken ct)
         {
             var state = new RunState { Writer = writer, StartTime = DateTime.Now, Ct = ct };
             var callbacks = new StreamingTestCallbacks(state);
+
+            // Surface the filter so the user can confirm what's being run.
+            if (groupNames.Length > 0 || categoryNames.Length > 0 || testNames.Length > 0)
+            {
+                var parts = new List<string>();
+                if (groupNames.Length > 0) parts.Add($"groups=[{string.Join(",", groupNames)}]");
+                if (categoryNames.Length > 0) parts.Add($"categories=[{string.Join(",", categoryNames)}]");
+                if (testNames.Length > 0) parts.Add($"tests=[{string.Join(",", testNames)}]");
+                await writer.WriteLineAsync($"Filter: {string.Join(" ", parts)}  mode={testMode}");
+            }
 
             await CommandRegistry.RunOnMainThreadAsync(() =>
             {
@@ -128,10 +151,12 @@ namespace clibridge4unity
                 currentCallbacks = callbacks;
                 api.RegisterCallbacks(callbacks);
 
-                // Create filter
+                // Create filter. Each array is OR'd within, so passing multiple entries
+                // runs every test matching any of them.
                 var testFilter = new Filter { testMode = testMode };
-                if (!string.IsNullOrEmpty(testName))
-                    testFilter.groupNames = new[] { testName };
+                if (groupNames.Length > 0) testFilter.groupNames = groupNames;
+                if (categoryNames.Length > 0) testFilter.categoryNames = categoryNames;
+                if (testNames.Length > 0) testFilter.testNames = testNames;
 
                 // Start the run
                 api.Execute(new ExecutionSettings(testFilter));
@@ -159,6 +184,32 @@ namespace clibridge4unity
                 (state.FailedTests > 0 ? $", {state.FailedTests} failed" : "") +
                 (state.SkippedTests > 0 ? $", {state.SkippedTests} skipped" : "") +
                 $" in {(DateTime.Now - state.StartTime).TotalSeconds:F1}s ===");
+        }
+
+        /// <summary>Split each entry into comma-separated segments and flatten.</summary>
+        private static string[] SplitFilterList(IEnumerable<string> tokens)
+        {
+            var result = new List<string>();
+            foreach (var p in tokens)
+                foreach (var segment in p.Split(','))
+                {
+                    var trimmed = segment.Trim();
+                    if (!string.IsNullOrEmpty(trimmed)) result.Add(trimmed);
+                }
+            return result.ToArray();
+        }
+
+        /// <summary>Split a single comma-separated string; empty/null → empty array.</summary>
+        private static string[] SplitCommaList(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return Array.Empty<string>();
+            var result = new List<string>();
+            foreach (var segment in value.Split(','))
+            {
+                var trimmed = segment.Trim();
+                if (!string.IsNullOrEmpty(trimmed)) result.Add(trimmed);
+            }
+            return result.ToArray();
         }
 
         private static void CollectTestNames(ITestAdaptor test, List<string> names)

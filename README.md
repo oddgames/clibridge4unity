@@ -73,6 +73,20 @@ clibridge4unity SCREENSHOT scene                 # Capture editor windows
 clibridge4unity SCREENSHOT Assets/UI/Menu.prefab # Render prefab to PNG
 ```
 
+### Run Tests (streaming results)
+```bash
+clibridge4unity TEST                                    # All EditMode tests
+clibridge4unity TEST playmode                           # All PlayMode tests
+clibridge4unity TEST all                                # EditMode + PlayMode
+clibridge4unity TEST PlayerControllerTests              # One group/class
+clibridge4unity TEST PlayerTests,CameraTests            # Multiple groups (OR)
+clibridge4unity TEST --category Physics,AI              # Multiple [Category(...)] tags
+clibridge4unity TEST --tests Foo.TestA,Foo.TestB        # Exact test names
+clibridge4unity TEST list                               # List all available tests
+clibridge4unity TEST list MyClass                       # List tests matching filter
+```
+All filter arrays are OR'd — a test runs if it matches any group **or** category **or** exact name. Combine with `playmode` / `all` to change the mode.
+
 ### Diagnostics (no main thread needed)
 ```bash
 clibridge4unity DIAG                # Thread state, HWND, sync context

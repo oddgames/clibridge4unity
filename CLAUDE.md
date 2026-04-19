@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.0.65)
+│   └── package.json           # UPM manifest (v1.0.66)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -240,7 +240,12 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `CODE_EXEC_RETURN code` - Compile and execute C# code (waits for result, returns type)
 - `CODE_EXEC_RETURN code --inspect [depth] [--private]` - Execute and dump result object tree
 - `CODE_EXEC_RETURN code --trace [--maxlines N] [--from N] [--only var] [--vars x,y] [--skip pattern]` - Execute with line-by-line trace
-- `TEST [filter]` - Run Unity tests (streaming results with progress/ETA)
+- `TEST [mode] [groups...] [--category X,Y] [--tests Full.Name,Other.Name]` - Run Unity tests (streaming)
+  - Mode: default `editmode`, or `playmode`, or `all`
+  - Groups: positional args, comma- or space-separated — matches class/namespace paths (regex)
+  - `--category X,Y`: filter by `[Category("…")]` attribute (multiple OR)
+  - `--tests A,B`: filter by exact test full names (multiple OR)
+  - All filter arrays OR'd — a test runs if it matches any group **or** category **or** exact name
 - `TEST list [filter]` - List available tests (substring match)
 - `DEBUG` - Debugger stub (Phase 2: attach, breakpoints, stepping)
 

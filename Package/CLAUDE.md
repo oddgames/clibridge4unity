@@ -19,7 +19,7 @@ Package/
 │       └── UI/                # UI_DISCOVER, SCREENSHOT
 ├── Runtime/                   # (Currently unused)
 ├── Tools/                     # Pre-built CLI executables (win/osx/linux)
-└── package.json               # UPM manifest (v1.0.65)
+└── package.json               # UPM manifest (v1.0.66)
 ```
 
 ## Key Architecture

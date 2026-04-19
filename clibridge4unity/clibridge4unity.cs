@@ -1115,7 +1115,8 @@ class Program
         Console.Error.WriteLine("  CODE_EXEC_RETURN <code>    Execute C# and return result");
         Console.Error.WriteLine("    --inspect [depth]        Dump result object tree");
         Console.Error.WriteLine("    --trace [--maxlines N]   Line-by-line execution trace");
-        Console.Error.WriteLine("  TEST [filter]              Run tests (streaming with progress/ETA)");
+        Console.Error.WriteLine("  TEST [mode] [group...] [--category X,Y] [--tests A,B]");
+        Console.Error.WriteLine("                             Run tests (filters OR'd; mode=editmode|playmode|all)");
         Console.Error.WriteLine("  TEST list [filter]         List available tests");
         Console.Error.WriteLine();
         Console.Error.WriteLine("Exit codes:");
@@ -2748,7 +2749,8 @@ class Program
         md.AppendLine("- Components: `COMPONENT_SET obj comp field value` | `COMPONENT_ADD` | `COMPONENT_REMOVE`");
         md.AppendLine("- Prefabs: `PREFAB_CREATE` | `PREFAB_INSTANTIATE` | `PREFAB_HIERARCHY`");
         md.AppendLine("- Assets: `ASSET_SEARCH` | `ASSET_DISCOVER` | `ASSET_MOVE` | `ASSET_COPY` | `ASSET_DELETE`");
-        md.AppendLine("- Tests & capture: `TEST [filter]` | `SCREENSHOT [view]`");
+        md.AppendLine("- Tests: `TEST` (EditMode) | `TEST playmode` | `TEST all` | `TEST Group1,Group2` | `TEST --category A,B` | `TEST --tests Full.Name,Other.Name` (filters OR'd)");
+        md.AppendLine("- Capture: `SCREENSHOT [view]`");
         md.AppendLine("- Window mgmt: `WAKEUP` (bring Unity to front) | `DISMISS` (close modal dialogs)");
 
         // Determine target path
