@@ -283,7 +283,7 @@ namespace clibridge4unity
                 }
             }
             if (go == null)
-                return Response.Error($"GameObject not found: {name}");
+                return Response.ErrorSceneNotFound(name);
 
             // Detect type: UI (Canvas/RectTransform) vs 3D (Renderer)
             var rectTransform = go.GetComponent<RectTransform>();

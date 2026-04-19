@@ -146,7 +146,7 @@ namespace clibridge4unity
 
             var obj = AssetDatabase.LoadMainAssetAtPath(path);
             if (obj == null)
-                return Response.Error($"Asset not found: {path}");
+                return Response.ErrorAssetNotFound(path);
 
             // Get-only mode
             if (parts.Length == 1)
@@ -203,7 +203,7 @@ namespace clibridge4unity
                 var paths = data.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                 foreach (var p in paths)
                     if (!AssetDatabase.AssetPathExists(p) && !AssetDatabase.IsValidFolder(p))
-                        return Response.Error($"Asset not found: {p}");
+                        return Response.ErrorAssetNotFound(p);
 
                 AssetDatabase.ForceReserializeAssets(paths);
                 return Response.Success($"Reserialized {paths.Length} asset(s)");
@@ -269,13 +269,13 @@ namespace clibridge4unity
                     // Source is in the open scene
                     srcGo = GameObject.Find(srcChild);
                     if (srcGo == null)
-                        return Response.Error($"GameObject not found in scene: {srcChild}");
+                        return Response.ErrorSceneNotFound(srcChild);
                 }
                 else if (srcAsset.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
                 {
                     var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(srcAsset);
                     if (prefab == null)
-                        return Response.Error($"Prefab not found: {srcAsset}");
+                        return Response.ErrorAssetNotFound(srcAsset, "Prefab");
 
                     tempInstance = UnityEngine.Object.Instantiate(prefab);
                     tempInstance.hideFlags = HideFlags.HideAndDontSave;

@@ -162,7 +162,7 @@ namespace clibridge4unity
             {
                 var go = GameObject.Find(path);
                 if (go == null)
-                    return Response.Error($"GameObject not found: {path}");
+                    return Response.ErrorSceneNotFound(path);
 
                 Undo.DestroyObjectImmediate(go);
                 return Response.Success($"Deleted {path}");
@@ -391,7 +391,7 @@ namespace clibridge4unity
             var names = nameSegment.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
             var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
             if (prefab == null)
-                return Response.Error($"Prefab not found: {assetPath}");
+                return Response.ErrorAssetNotFound(assetPath, "Prefab");
 
             var matches = new List<(string path, GameObject go)>();
             void Walk(Transform t, string path)

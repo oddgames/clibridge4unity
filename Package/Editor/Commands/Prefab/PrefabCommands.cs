@@ -167,7 +167,7 @@ namespace clibridge4unity
 
                 var go = GameObject.Find(goName);
                 if (go == null)
-                    return Response.Error($"GameObject not found: {goName}");
+                    return Response.ErrorSceneNotFound(goName);
 
                 // Default path
                 if (string.IsNullOrEmpty(outputPath))
@@ -242,7 +242,7 @@ namespace clibridge4unity
 
                 var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
                 if (prefab == null)
-                    return Response.Error($"Prefab not found: {prefabPath}");
+                    return Response.ErrorAssetNotFound(prefabPath, "Prefab");
 
                 var instance = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
 
@@ -291,7 +291,7 @@ namespace clibridge4unity
             {
                 var instance = GameObject.Find(instancePath);
                 if (instance == null)
-                    return Response.Error($"Instance not found: {instancePath}");
+                    return Response.ErrorSceneNotFound(instancePath, "prefab instance");
 
                 var prefabRoot = PrefabUtility.GetNearestPrefabInstanceRoot(instance);
                 if (prefabRoot == null)
@@ -317,7 +317,7 @@ namespace clibridge4unity
             {
                 var instance = GameObject.Find(instancePath);
                 if (instance == null)
-                    return Response.Error($"Instance not found: {instancePath}");
+                    return Response.ErrorSceneNotFound(instancePath, "prefab instance");
 
                 var mode = completely ? PrefabUnpackMode.Completely : PrefabUnpackMode.OutermostRoot;
                 PrefabUtility.UnpackPrefabInstance(instance, mode, InteractionMode.UserAction);

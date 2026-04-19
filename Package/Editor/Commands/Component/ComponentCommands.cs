@@ -80,7 +80,7 @@ namespace clibridge4unity
                 {
                     go = GameObject.Find(gameObjectPath);
                     if (go == null)
-                        return Response.Error($"GameObject not found: {gameObjectPath}");
+                        return Response.ErrorSceneNotFound(gameObjectPath);
                 }
 
                 // Find the component
@@ -180,7 +180,7 @@ namespace clibridge4unity
                 {
                     go = GameObject.Find(gameObjectPath);
                     if (go == null)
-                        return Response.Error($"GameObject not found: {gameObjectPath}");
+                        return Response.ErrorSceneNotFound(gameObjectPath);
                 }
 
                 var componentType = FindType(componentName);
@@ -252,7 +252,7 @@ namespace clibridge4unity
                 {
                     go = GameObject.Find(gameObjectPath);
                     if (go == null)
-                        return Response.Error($"GameObject not found: {gameObjectPath}");
+                        return Response.ErrorSceneNotFound(gameObjectPath);
                 }
 
                 var component = go.GetComponents<Component>()
@@ -319,7 +319,7 @@ namespace clibridge4unity
                 // Scene GameObject
                 var go = GameObject.Find(opts.TargetPath);
                 if (go == null)
-                    return Response.Error($"GameObject not found: {opts.TargetPath}");
+                    return Response.ErrorSceneNotFound(opts.TargetPath);
 
                 var sb = new System.Text.StringBuilder();
                 var counter = new InspectorNodeCounter { MaxNodes = opts.MaxNodes };
@@ -517,7 +517,7 @@ namespace clibridge4unity
 
             var asset = AssetDatabase.LoadMainAssetAtPath(assetPath);
             if (asset == null)
-                return Response.Error($"Asset not found: {assetPath}");
+                return Response.ErrorAssetNotFound(assetPath);
 
             // Prefab → inspect like a GameObject (components + optional subtree)
             if (asset is GameObject go)

@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.67";
+        public const string Version = "1.0.68";
 
         private static CancellationTokenSource serverCts;
         private static NamedPipeServerStream currentPipeServer;
@@ -431,6 +431,21 @@ namespace clibridge4unity
         public static string Error(string message)
         {
             return $"Error: {message}";
+        }
+
+        /// <summary>Error + "Did you mean:" suggestions for a missing scene GameObject path.</summary>
+        public static string ErrorSceneNotFound(string path, string extraContext = null)
+        {
+            string ctx = string.IsNullOrEmpty(extraContext) ? "" : $" ({extraContext})";
+            return $"Error: GameObject not found: {path}{ctx}"
+                   + PathResolver.FormatSuggestions(path, PathResolver.SuggestKind.SceneGameObject);
+        }
+
+        /// <summary>Error + "Did you mean:" suggestions for a missing asset path (prefab, material, SO, scene asset, etc.).</summary>
+        public static string ErrorAssetNotFound(string path, string kind = "Asset")
+        {
+            return $"Error: {kind} not found: {path}"
+                   + PathResolver.FormatSuggestions(path, PathResolver.SuggestKind.Asset);
         }
 
         public static string Exception(Exception ex)
