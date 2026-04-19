@@ -98,7 +98,8 @@ namespace clibridge4unity
         [BridgeCommand("STATUS", "Get Unity Editor status",
             Category = "Core",
             Usage = "STATUS",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "DIAG", "LOG", "PROBE" })]
         public static string GetStatus()
         {
             // Get all open editor windows
@@ -202,7 +203,8 @@ namespace clibridge4unity
             Usage = "COMPILE",
             Streaming = false,
             RequiresMainThread = true,
-            TimeoutSeconds = 300)]
+            TimeoutSeconds = 300,
+            RelatedCommands = new[] { "LOG", "STATUS", "REFRESH" })]
         public static string Compile(string data)
         {
             if (EditorApplication.isPlaying)
@@ -230,7 +232,8 @@ namespace clibridge4unity
             Usage = "REFRESH",
             Streaming = false,
             RequiresMainThread = true,
-            TimeoutSeconds = 300)]
+            TimeoutSeconds = 300,
+            RelatedCommands = new[] { "COMPILE", "STATUS", "LOG" })]
         public static string Refresh()
         {
             if (EditorApplication.isPlaying)

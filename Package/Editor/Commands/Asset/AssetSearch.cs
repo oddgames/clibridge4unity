@@ -27,7 +27,8 @@ namespace clibridge4unity
         [BridgeCommand("ASSET_SEARCH", "Search for assets using Unity Search syntax",
             Category = "Asset",
             Usage = "ASSET_SEARCH t:prefab",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "ASSET_DISCOVER", "ASSET_LABEL", "ASSET_MOVE" })]
         public static string Search(string data)
         {
             if (string.IsNullOrWhiteSpace(data))

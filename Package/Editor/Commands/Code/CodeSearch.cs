@@ -331,7 +331,8 @@ namespace clibridge4unity
         /// </summary>
         [BridgeCommand("CODE_ANALYZE", "Analyze a class, member, or stack trace (also handles method:/field:/inherits:/attribute: prefixes)",
             Category = "Code",
-            Usage = "CODE_ANALYZE ClassName | ClassName.Member | method:Name | field:Name | inherits:Type | attribute:Name | <stack trace>")]
+            Usage = "CODE_ANALYZE ClassName | ClassName.Member | method:Name | field:Name | inherits:Type | attribute:Name | <stack trace>",
+            RelatedCommands = new[] { "CODE_EXEC_RETURN", "CODE_EXEC", "LOG" })]
         public static string Analyze(string query)
         {
             try

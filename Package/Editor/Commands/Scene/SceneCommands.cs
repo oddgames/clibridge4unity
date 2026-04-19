@@ -20,7 +20,8 @@ namespace clibridge4unity
         [BridgeCommand("CREATE", "Create a GameObject in the scene",
             Category = "Scene",
             Usage = "CREATE MyObject  OR  CREATE {\"name\":\"MyObject\",\"components\":[\"BoxCollider\"]}",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "INSPECTOR", "COMPONENT_ADD", "SCREENSHOT" })]
         public static string Create(string jsonData)
         {
             try
@@ -83,7 +84,8 @@ namespace clibridge4unity
         [BridgeCommand("FIND", "Find GameObject by name or path",
             Category = "Scene",
             Usage = "FIND MyObject",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "INSPECTOR", "SCREENSHOT" })]
         public static string Find(string query)
         {
             try
@@ -159,7 +161,8 @@ namespace clibridge4unity
         [BridgeCommand("SCENE", "Get current scene info and hierarchy",
             Category = "Scene",
             Usage = "SCENE",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "FIND", "WINDOWS", "SCREENSHOT" })]
         public static string GetInfo()
         {
             try
@@ -250,7 +253,8 @@ namespace clibridge4unity
                     "  SCENEVIEW 2d                   - Switch to 2D mode\n" +
                     "  SCENEVIEW 3d                   - Switch to 3D mode\n" +
                     "  SCENEVIEW 2d frame:Panel       - Combinable",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "SCREENSHOT" })]
         public static string SceneView(string data)
         {
             try

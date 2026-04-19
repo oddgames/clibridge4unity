@@ -15,7 +15,8 @@ namespace clibridge4unity
         [BridgeCommand("PLAY", "Enter play mode (optionally load a scene first)",
             Category = "Scene",
             Usage = "PLAY  OR  PLAY Assets/Scenes/MyScene.unity",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "STOP", "PAUSE", "STEP", "PLAYMODE", "LOG" })]
         public static string Play(string data)
         {
             try
@@ -53,7 +54,8 @@ namespace clibridge4unity
         [BridgeCommand("STOP", "Exit play mode",
             Category = "Scene",
             Usage = "STOP",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "PLAY", "LOG" })]
         public static string Stop()
         {
             try

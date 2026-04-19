@@ -45,6 +45,12 @@ namespace clibridge4unity
         /// </summary>
         public int TimeoutSeconds { get; set; } = 0;
 
+        /// <summary>
+        /// Related commands suggested to the caller on successful responses.
+        /// Appended as "Related: CMD1, CMD2, ..." so the AI is reminded of adjacent tools.
+        /// </summary>
+        public string[] RelatedCommands { get; set; } = Array.Empty<string>();
+
         public BridgeCommandAttribute(string name, string description)
         {
             Name = name?.ToUpperInvariant() ?? throw new ArgumentNullException(nameof(name));

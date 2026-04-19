@@ -24,7 +24,8 @@ namespace clibridge4unity
             Category = "Prefab",
             Usage = "PREFAB_CREATE MyPrefab Assets/Prefabs\n" +
                     "  PREFAB_CREATE {\"name\":\"MyPrefab\",\"path\":\"Assets/Prefabs\"}",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "SCREENSHOT", "PREFAB_INSTANTIATE", "PREFAB_HIERARCHY" })]
         public static async Task<string> Create(string jsonData)
         {
             try
@@ -114,7 +115,8 @@ namespace clibridge4unity
             Category = "Prefab",
             Usage = "PREFAB_SAVE GameObjectName Assets/Prefabs/MyPrefab.prefab\n" +
                     "  PREFAB_SAVE GameObjectName  (auto-saves to Assets/Prefabs/)",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "SCREENSHOT", "PREFAB_INSTANTIATE", "PREFAB_HIERARCHY" })]
         public static string Save(string data)
         {
             try
@@ -204,7 +206,8 @@ namespace clibridge4unity
             Category = "Prefab",
             Usage = "PREFAB_INSTANTIATE Assets/Prefabs/Thing.prefab [parent]\n" +
                     "  PREFAB_INSTANTIATE {\"prefab\":\"Assets/Prefabs/Thing.prefab\",\"parent\":\"Canvas\"}",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "SCREENSHOT", "INSPECTOR", "PREFAB_HIERARCHY" })]
         public static string Instantiate(string jsonData)
         {
             try
@@ -288,7 +291,8 @@ namespace clibridge4unity
         [BridgeCommand("PREFAB_HIERARCHY", "Get prefab hierarchy with components (optionally filtered)",
             Category = "Prefab",
             Usage = "PREFAB_HIERARCHY Assets/Prefabs/MyPrefab.prefab  OR  PREFAB_HIERARCHY {\"prefab\":\"Assets/...\",\"filter\":\"Dropdown\"}",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "SCREENSHOT", "INSPECTOR" })]
         public static string GetHierarchy(string data)
         {
             try

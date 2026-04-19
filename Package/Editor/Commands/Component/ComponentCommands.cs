@@ -21,7 +21,8 @@ namespace clibridge4unity
             Category = "Component",
             Usage = "COMPONENT_SET Canvas/Panel Image m_Color #FF0000\n" +
                     "  COMPONENT_SET {\"gameObject\":\"Canvas/Panel\",\"component\":\"Image\",\"field\":\"m_Color\",\"value\":\"#FF0000\"}",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "INSPECTOR" })]
         public static string Set(string jsonData)
         {
             try
@@ -136,7 +137,8 @@ namespace clibridge4unity
             Category = "Component",
             Usage = "COMPONENT_ADD Canvas/Panel BoxCollider\n" +
                     "  COMPONENT_ADD {\"gameObject\":\"Canvas/Panel\",\"component\":\"BoxCollider\"}",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "INSPECTOR", "COMPONENT_SET" })]
         public static string AddComponent(string jsonData)
         {
             try
@@ -208,7 +210,8 @@ namespace clibridge4unity
             Category = "Component",
             Usage = "COMPONENT_REMOVE Canvas/Panel BoxCollider\n" +
                     "  COMPONENT_REMOVE {\"gameObject\":\"Canvas/Panel\",\"component\":\"BoxCollider\"}",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "INSPECTOR" })]
         public static string RemoveComponent(string jsonData)
         {
             try
@@ -282,7 +285,8 @@ namespace clibridge4unity
                     "  INSPECTOR Assets/Data/Config.asset                  (ScriptableObject)\n" +
                     "  INSPECTOR {\"gameObject\":\"Panel\",\"component\":\"Image\"}  (filter component)\n" +
                     "  INSPECTOR {\"gameObject\":\"Panel\",\"depth\":2}         (JSON form)",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "COMPONENT_SET", "COMPONENT_ADD", "SCREENSHOT" })]
         public static string Inspector(string data)
         {
             try

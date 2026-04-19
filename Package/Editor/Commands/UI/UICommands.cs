@@ -31,7 +31,8 @@ namespace clibridge4unity
                     "  ASSET_DISCOVER materials:Standard      - Materials using specific shader\n" +
                     "  ASSET_DISCOVER models                  - FBX/OBJ with sub-assets (meshes, mats, clips)\n" +
                     "  ASSET_DISCOVER variants                - Prefab variant inheritance chains",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "ASSET_SEARCH", "SCREENSHOT" })]
         public static string Discover(string data)
         {
             try

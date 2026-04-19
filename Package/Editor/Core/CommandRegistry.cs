@@ -28,6 +28,7 @@ namespace clibridge4unity
         public bool RequiresMainThread { get; set; }
         public bool IsStreaming { get; set; }
         public int TimeoutSeconds { get; set; }
+        public string[] RelatedCommands { get; set; }
         public MethodInfo Method { get; set; }
         public object Instance { get; set; }
     }
@@ -436,6 +437,7 @@ namespace clibridge4unity
                                 IsStreaming = attr.Streaming,
                                 TimeoutSeconds = attr.TimeoutSeconds > 0 ? attr.TimeoutSeconds
                                     : attr.RequiresMainThread ? 25 : 10,
+                                RelatedCommands = attr.RelatedCommands ?? Array.Empty<string>(),
                                 Method = method,
                                 Instance = method.IsStatic ? null : GetOrCreateInstance(type)
                             };
@@ -526,7 +528,17 @@ namespace clibridge4unity
             }
             SkipPathShortening = false;
 
+            // Append "Related:" hint on successful responses when the command declares related commands.
+            response = AppendRelatedHint(response, cmd.RelatedCommands);
+
             return response;
+        }
+
+        private static string AppendRelatedHint(string response, string[] related)
+        {
+            if (response == null || related == null || related.Length == 0) return response;
+            if (response.StartsWith("Error:", StringComparison.Ordinal)) return response;
+            return response + "\nRelated: " + string.Join(", ", related);
         }
 
         public static string GetHelp(string filter = null)

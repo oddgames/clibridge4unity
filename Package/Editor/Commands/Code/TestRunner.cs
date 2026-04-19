@@ -34,7 +34,8 @@ namespace clibridge4unity
                     "  TEST MyTest playmode   - Run matching PlayMode tests",
             RequiresMainThread = true,
             Streaming = true,
-            TimeoutSeconds = 600)]
+            TimeoutSeconds = 600,
+            RelatedCommands = new[] { "LOG", "CODE_EXEC_RETURN" })]
         public static async Task Run(string data, NamedPipeServerStream pipe, CancellationToken ct)
         {
             var writer = new StreamWriter(pipe, Encoding.UTF8, 4096, leaveOpen: true) { AutoFlush = true };

@@ -3640,435 +3640,53 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
 
     // ─── Roslyn-based offline code analysis ──────────────────────────────
 
+    /// <summary>
+    /// Single-pass fallback when the persistent Roslyn daemon isn't available.
+    /// Scans Assets/ on disk, parses only files containing the query, then delegates to
+    /// CodeAnalysisCore — same extraction + formatting used by the daemon.
+    /// </summary>
     static class RoslynAnalyzer
     {
-        /// <summary>
-        /// Enumerate all .cs files under Assets/ and Packages/ (skip Library/, Temp/, obj/).
-        /// </summary>
-        static string[] GetSourceFiles(string projectPath)
-        {
-            var files = new List<string>();
-            string assetsDir = Path.Combine(projectPath, "Assets");
-            string packagesDir = Path.Combine(projectPath, "Packages");
-
-            if (Directory.Exists(assetsDir))
-                files.AddRange(Directory.EnumerateFiles(assetsDir, "*.cs", SearchOption.AllDirectories));
-            if (Directory.Exists(packagesDir))
-            {
-                // Only scan local packages (folders), not cached packages in Library/
-                foreach (var dir in Directory.EnumerateDirectories(packagesDir))
-                {
-                    string dirName = Path.GetFileName(dir);
-                    if (dirName.StartsWith("com.") || dirName.StartsWith("au.")) // UPM package folders
-                        files.AddRange(Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories));
-                }
-            }
-            return files.ToArray();
-        }
-
-        static string ToRelativePath(string file, string projectPath)
-        {
-            return file.Replace(projectPath + "\\", "").Replace(projectPath + "/", "");
-        }
-
-
-        /// <summary>
-        /// CODE_ANALYZE: unified entry point.
-        /// - Plain `Name` or `class:Name`/`type:Name` → deep connection-graph analysis for that type.
-        /// - `method:Name` / `field:Name` / `property:Name` / `inherits:Type` / `attribute:Name` → listing.
-        /// </summary>
         public static string Analyze(string projectPath, string query)
         {
             query = (query ?? "").Trim();
             if (query.Length == 0)
                 return "Error: No query. Usage: CODE_ANALYZE ClassName | method:Name | field:Name | inherits:Type | attribute:Name";
 
-            int colonIdx = query.IndexOf(':');
-            if (colonIdx > 0 && query.IndexOf(' ') < 0)
-            {
-                string prefix = query.Substring(0, colonIdx).ToLowerInvariant();
-                string term = query.Substring(colonIdx + 1).Trim();
-                switch (prefix)
-                {
-                    case "class":
-                    case "type":
-                        query = term;
-                        break;
-                    case "method":
-                    case "field":
-                    case "property":
-                    case "inherits":
-                    case "extends":
-                    case "attribute":
-                        return SearchByKind(projectPath, prefix, term);
-                }
-            }
-
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
-            // Only scan Assets/ — Packages don't reference project code
+            // For prefix queries, filter on the term (after `kind:`), not the whole string.
+            string filterTerm = query;
+            int colon = filterTerm.IndexOf(':');
+            if (colon > 0 && filterTerm.IndexOf(' ') < 0)
+                filterTerm = filterTerm.Substring(colon + 1).Trim();
+            if (filterTerm.Contains('.'))
+                filterTerm = filterTerm.Substring(filterTerm.LastIndexOf('.') + 1);
+            int ltAngle = filterTerm.IndexOf('<');
+            if (ltAngle > 0) filterTerm = filterTerm.Substring(0, ltAngle);
+            while (filterTerm.EndsWith("[]")) filterTerm = filterTerm.Substring(0, filterTerm.Length - 2);
+
             string assetsDir = Path.Combine(projectPath, "Assets");
             string[] allFiles = Directory.Exists(assetsDir)
                 ? Directory.EnumerateFiles(assetsDir, "*.cs", SearchOption.AllDirectories).ToArray()
                 : Array.Empty<string>();
 
-            // Single pass: read + check contains + parse matching files
-            var parsedFiles = new System.Collections.Concurrent.ConcurrentDictionary<string, Microsoft.CodeAnalysis.SyntaxTree>();
+            var trees = new System.Collections.Concurrent.ConcurrentDictionary<string, Microsoft.CodeAnalysis.SyntaxTree>();
+            var texts = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
             Parallel.ForEach(allFiles, file =>
             {
                 try
                 {
                     string text = File.ReadAllText(file);
-                    if (!text.Contains(query)) return;
-                    parsedFiles[file] = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, path: file);
-                }
-                catch { }
-            });
-
-            var scanMs = sw.ElapsedMilliseconds;
-
-            // Extract connections
-            var sourceFiles = new List<string>();
-            var baseTypes = new List<string>();
-            var derivedTypes = new List<string>();
-            var fieldUsages = new List<string>();
-            var paramUsages = new List<string>();
-            var returnUsages = new List<string>();
-            var getComponentUsages = new List<string>();
-            var localVarUsages = new List<string>();
-            var ownMethods = new List<string>();
-            var ownFields = new List<string>();
-            var grepLines = new System.Collections.Concurrent.ConcurrentBag<string>(); // raw grep for tail
-
-            foreach (var kvp in parsedFiles)
-            {
-                var root = kvp.Value.GetRoot();
-                string rel = ToRelativePath(kvp.Key, projectPath);
-
-                // Collect grep lines from this file
-                var lines = root.ToFullString().Split('\n');
-                for (int i = 0; i < lines.Length; i++)
-                {
-                    if (lines[i].Contains(query))
-                    {
-                        string lineText = lines[i].Trim();
-                        if (lineText.Length > 120) lineText = lineText.Substring(0, 120) + "...";
-                        grepLines.Add($"{rel}:{i + 1}: {lineText}");
-                    }
-                }
-
-                foreach (var td in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax>())
-                {
-                    string enclosing = td.Identifier.Text;
-                    bool isSelf = enclosing.Equals(query, StringComparison.OrdinalIgnoreCase);
-
-                    if (isSelf)
-                    {
-                        // Definition info
-                        int line = td.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                        var bases = td.BaseList?.Types.Select(t => t.Type.ToString()).ToArray() ?? Array.Empty<string>();
-                        sourceFiles.Add($"{rel}:{line} ({td.Modifiers} {td.Keyword} {enclosing} : {string.Join(", ", bases)})");
-                        baseTypes.AddRange(bases);
-
-                        // Own methods
-                        foreach (var m in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>())
-                        {
-                            int mLine = m.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                            var parms = string.Join(", ", m.ParameterList.Parameters.Select(p => $"{p.Type} {p.Identifier}"));
-                            ownMethods.Add($"{m.Modifiers} {m.ReturnType} {m.Identifier.Text}({parms}) — {rel}:{mLine}");
-                        }
-
-                        // Own fields
-                        foreach (var f in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax>())
-                        {
-                            foreach (var v in f.Declaration.Variables)
-                            {
-                                int fLine = v.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                                ownFields.Add($"{f.Modifiers} {f.Declaration.Type} {v.Identifier} — {rel}:{fLine}");
-                            }
-                        }
-                        foreach (var p in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.PropertyDeclarationSyntax>())
-                        {
-                            int pLine = p.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                            ownFields.Add($"{p.Modifiers} {p.Type} {p.Identifier} {{ get; set; }} — {rel}:{pLine}");
-                        }
-
-                        continue;
-                    }
-
-                    // Derived types
-                    if (td.BaseList?.Types.Any(t => t.Type.ToString().Contains(query)) == true)
-                    {
-                        int line = td.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                        derivedTypes.Add($"{enclosing} — {rel}:{line}");
-                    }
-
-                    // Fields/properties typed as the target
-                    foreach (var f in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax>())
-                    {
-                        if (f.Declaration.Type.ToString().Contains(query))
-                        {
-                            foreach (var v in f.Declaration.Variables)
-                            {
-                                int fLine = v.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                                fieldUsages.Add($"{enclosing}.{v.Identifier} — {rel}:{fLine}");
-                            }
-                        }
-                    }
-                    foreach (var p in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.PropertyDeclarationSyntax>())
-                    {
-                        if (p.Type.ToString().Contains(query))
-                        {
-                            int pLine = p.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                            fieldUsages.Add($"{enclosing}.{p.Identifier} (prop) — {rel}:{pLine}");
-                        }
-                    }
-
-                    // Methods with target in params or return type
-                    foreach (var m in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>())
-                    {
-                        bool hasParam = m.ParameterList.Parameters.Any(p => p.Type?.ToString().Contains(query) == true);
-                        bool returnsIt = m.ReturnType.ToString().Contains(query);
-
-                        if (hasParam)
-                        {
-                            int mLine = m.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                            var parms = string.Join(", ", m.ParameterList.Parameters.Select(p => $"{p.Type} {p.Identifier}"));
-                            paramUsages.Add($"{enclosing}.{m.Identifier.Text}({parms}) — {rel}:{mLine}");
-                        }
-                        if (returnsIt)
-                        {
-                            int mLine = m.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                            returnUsages.Add($"{enclosing}.{m.Identifier.Text}() returns {m.ReturnType} — {rel}:{mLine}");
-                        }
-
-                        // GetComponent<Target>()
-                        if (m.Body != null)
-                        {
-                            string bodyText = m.Body.ToString();
-                            if (bodyText.Contains($"GetComponent<{query}>") || bodyText.Contains($"GetComponentInChildren<{query}>"))
-                            {
-                                int mLine = m.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                                getComponentUsages.Add($"{enclosing}.{m.Identifier.Text}() — {rel}:{mLine}");
-                            }
-                        }
-                    }
-
-                    // Local variables typed as target
-                    foreach (var localDecl in td.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.LocalDeclarationStatementSyntax>())
-                    {
-                        if (localDecl.Declaration.Type.ToString().Contains(query))
-                        {
-                            var method = localDecl.Ancestors().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>().FirstOrDefault();
-                            string methodName = method?.Identifier.Text ?? "?";
-                            foreach (var v in localDecl.Declaration.Variables)
-                            {
-                                int vLine = v.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                                localVarUsages.Add($"{enclosing}.{methodName}() var {v.Identifier} — {rel}:{vLine}");
-                            }
-                        }
-                    }
-                }
-            }
-
-            sw.Stop();
-
-            // Build output
-            var sb = new StringBuilder();
-
-            if (sourceFiles.Count == 0 && grepLines.Count == 0)
-            {
-                return $"Error: '{query}' not found in source ({allFiles.Length} files scanned in {sw.ElapsedMilliseconds}ms)";
-            }
-
-            if (sourceFiles.Count > 0)
-            {
-                sb.AppendLine($"=== {query} === ({parsedFiles.Count} files parsed in {sw.ElapsedMilliseconds}ms)");
-                sb.AppendLine();
-
-                sb.AppendLine("Defined in:");
-                foreach (var s in sourceFiles) sb.AppendLine($"  {s}");
-
-                if (baseTypes.Count > 0)
-                    sb.AppendLine($"Inherits from: {string.Join(", ", baseTypes.Distinct())}");
-
-                if (derivedTypes.Count > 0)
-                {
-                    sb.AppendLine($"Inherited by ({derivedTypes.Count}):");
-                    foreach (var d in derivedTypes.Take(15)) sb.AppendLine($"  {d}");
-                    if (derivedTypes.Count > 15) sb.AppendLine($"  ... +{derivedTypes.Count - 15} more");
-                }
-
-                if (fieldUsages.Count > 0)
-                {
-                    sb.AppendLine($"Referenced as field/property ({fieldUsages.Count}):");
-                    foreach (var f in fieldUsages.Take(20)) sb.AppendLine($"  {f}");
-                    if (fieldUsages.Count > 20) sb.AppendLine($"  ... +{fieldUsages.Count - 20} more");
-                }
-
-                if (paramUsages.Count > 0)
-                {
-                    sb.AppendLine($"Passed as parameter ({paramUsages.Count}):");
-                    foreach (var p in paramUsages.Take(15)) sb.AppendLine($"  {p}");
-                    if (paramUsages.Count > 15) sb.AppendLine($"  ... +{paramUsages.Count - 15} more");
-                }
-
-                if (returnUsages.Count > 0)
-                {
-                    sb.AppendLine($"Returned by ({returnUsages.Count}):");
-                    foreach (var r in returnUsages.Take(10)) sb.AppendLine($"  {r}");
-                    if (returnUsages.Count > 10) sb.AppendLine($"  ... +{returnUsages.Count - 10} more");
-                }
-
-                if (getComponentUsages.Count > 0)
-                {
-                    sb.AppendLine($"GetComponent<{query}>() ({getComponentUsages.Count}):");
-                    foreach (var g in getComponentUsages.Take(10)) sb.AppendLine($"  {g}");
-                    if (getComponentUsages.Count > 10) sb.AppendLine($"  ... +{getComponentUsages.Count - 10} more");
-                }
-
-                if (localVarUsages.Count > 0)
-                {
-                    sb.AppendLine($"Local variables ({localVarUsages.Count}):");
-                    foreach (var l in localVarUsages.Take(10)) sb.AppendLine($"  {l}");
-                    if (localVarUsages.Count > 10) sb.AppendLine($"  ... +{localVarUsages.Count - 10} more");
-                }
-
-                if (ownMethods.Count > 0)
-                {
-                    sb.AppendLine($"Methods ({ownMethods.Count}):");
-                    foreach (var m in ownMethods.Take(25)) sb.AppendLine($"  {m}");
-                    if (ownMethods.Count > 25) sb.AppendLine($"  ... +{ownMethods.Count - 25} more");
-                }
-
-                if (ownFields.Count > 0)
-                {
-                    sb.AppendLine($"Fields/Properties ({ownFields.Count}):");
-                    foreach (var f in ownFields.Take(25)) sb.AppendLine($"  {f}");
-                    if (ownFields.Count > 25) sb.AppendLine($"  ... +{ownFields.Count - 25} more");
-                }
-            }
-            else
-            {
-                sb.AppendLine($"Type '{query}' not found as a declaration, but found in source:");
-            }
-
-            // Grep tail — raw references not captured by structured analysis
-            var sortedGrep = grepLines.OrderBy(g => g).ToList();
-            if (sortedGrep.Count > 0)
-            {
-                sb.AppendLine();
-                sb.AppendLine($"--- Raw references ({sortedGrep.Count} lines) ---");
-                foreach (var g in sortedGrep.Take(40)) sb.AppendLine(g);
-                if (sortedGrep.Count > 40) sb.AppendLine($"... +{sortedGrep.Count - 40} more");
-            }
-
-            return sb.ToString().TrimEnd();
-        }
-
-        /// <summary>
-        /// List matches for a single member kind: method/field/property/inherits/attribute.
-        /// Used by CODE_ANALYZE when the query is prefixed (e.g. `method:Foo`).
-        /// </summary>
-        static string SearchByKind(string projectPath, string kind, string term)
-        {
-            if (string.IsNullOrWhiteSpace(term))
-                return $"Error: No term after '{kind}:'";
-
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            string[] allFiles = GetSourceFiles(projectPath);
-            var results = new System.Collections.Concurrent.ConcurrentBag<string>();
-
-            Parallel.ForEach(allFiles, file =>
-            {
-                try
-                {
-                    string text = File.ReadAllText(file);
-                    if (!text.Contains(term)) return;
-
-                    var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, path: file);
-                    var root = tree.GetRoot();
-                    string rel = ToRelativePath(file, projectPath);
-
-                    switch (kind)
-                    {
-                        case "method":
-                            foreach (var td in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax>())
-                                foreach (var m in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax>())
-                                    if (m.Identifier.Text.Contains(term, StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        int mLine = m.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                                        var parms = string.Join(", ", m.ParameterList.Parameters.Select(p => $"{p.Type} {p.Identifier}"));
-                                        results.Add($"{td.Identifier.Text}.{m.Identifier.Text}({parms}) : {m.ReturnType} — {rel}:{mLine}");
-                                    }
-                            break;
-
-                        case "field":
-                        case "property":
-                            foreach (var td in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax>())
-                            {
-                                foreach (var f in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax>())
-                                    foreach (var v in f.Declaration.Variables)
-                                        if (v.Identifier.Text.Contains(term, StringComparison.OrdinalIgnoreCase))
-                                        {
-                                            int fLine = v.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                                            results.Add($"{td.Identifier.Text}.{v.Identifier} : {f.Declaration.Type} — {rel}:{fLine}");
-                                        }
-                                foreach (var p in td.Members.OfType<Microsoft.CodeAnalysis.CSharp.Syntax.PropertyDeclarationSyntax>())
-                                    if (p.Identifier.Text.Contains(term, StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        int pLine = p.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                                        results.Add($"{td.Identifier.Text}.{p.Identifier} : {p.Type} (prop) — {rel}:{pLine}");
-                                    }
-                            }
-                            break;
-
-                        case "inherits":
-                        case "extends":
-                            foreach (var td in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax>())
-                                if (td.BaseList?.Types.Any(t => t.Type.ToString().Contains(term, StringComparison.OrdinalIgnoreCase)) == true)
-                                {
-                                    int line = td.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                                    var bases = td.BaseList.Types.Select(t => t.Type.ToString()).ToArray();
-                                    results.Add($"{td.Identifier.Text} : {string.Join(", ", bases)} — {rel}:{line}");
-                                }
-                            break;
-
-                        case "attribute":
-                            foreach (var attr in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.AttributeSyntax>())
-                                if (attr.Name.ToString().Contains(term, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    int aLine = attr.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                                    var parent = attr.Ancestors().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.MemberDeclarationSyntax>().FirstOrDefault();
-                                    string parentName = parent switch
-                                    {
-                                        Microsoft.CodeAnalysis.CSharp.Syntax.MethodDeclarationSyntax m => m.Identifier.Text + "()",
-                                        Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax t => t.Identifier.Text,
-                                        Microsoft.CodeAnalysis.CSharp.Syntax.PropertyDeclarationSyntax p => p.Identifier.Text,
-                                        Microsoft.CodeAnalysis.CSharp.Syntax.FieldDeclarationSyntax f => f.Declaration.Variables.First().Identifier.Text,
-                                        _ => "?"
-                                    };
-                                    results.Add($"[{attr.Name}] on {parentName} — {rel}:{aLine}");
-                                }
-                            break;
-                    }
+                    if (!text.Contains(filterTerm)) return;
+                    trees[file] = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, path: file);
+                    texts[file] = text;
                 }
                 catch { }
             });
 
             sw.Stop();
-            var sorted = results.OrderBy(r => r).ToList();
-            if (sorted.Count == 0)
-                return $"No matches for '{kind}:{term}' ({allFiles.Length} files scanned in {sw.ElapsedMilliseconds}ms)";
-
-            var sb = new StringBuilder();
-            sb.AppendLine($"=== {kind}:{term} === ({sorted.Count} matches, {sw.ElapsedMilliseconds}ms)");
-            sb.AppendLine();
-            foreach (var r in sorted.Take(50))
-                sb.AppendLine(r);
-            if (sorted.Count > 50)
-                sb.AppendLine($"... +{sorted.Count - 50} more");
-            return sb.ToString().TrimEnd();
+            return CodeAnalysisCore.Analyze(trees, texts, projectPath, query, sw.ElapsedMilliseconds, allFiles.Length);
         }
     }
 

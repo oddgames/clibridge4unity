@@ -321,7 +321,8 @@ namespace clibridge4unity
                     "  LOG --filter text      - Substring search in messages + stacks\n" +
                     "  LOG all                - All entries (no cap)\n" +
                     "  LOG clear              - Clear buffer\n" +
-                    "  Combinable in any order: errors|warnings + verbose|raw + last:N|since:ID|all + --filter text")]
+                    "  Combinable in any order: errors|warnings + verbose|raw + last:N|since:ID|all + --filter text",
+            RelatedCommands = new[] { "STACK_MINIMIZE", "STATUS" })]
         public static string GetLogs(string data)
         {
             FlushPendingWrites();

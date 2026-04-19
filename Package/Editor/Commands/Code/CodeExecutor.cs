@@ -70,7 +70,8 @@ namespace clibridge4unity
                     "  CODE_EXEC @/path/to/tempfile.cs  (read code from file — preferred for multi-line / $\"…\")\n" +
                     "  NOTE: put the temp .cs file OUTSIDE the Unity project (e.g. $TEMP, /tmp, ~/.cache) —\n" +
                     "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
-            RequiresMainThread = false)]
+            RequiresMainThread = false,
+            RelatedCommands = new[] { "CODE_EXEC_RETURN", "LOG" })]
         public static async Task<string> Execute(string code)
         {
             try
@@ -153,7 +154,8 @@ namespace clibridge4unity
                     "  NOTE: put the temp .cs file OUTSIDE the Unity project (e.g. $TEMP, /tmp, ~/.cache) —\n" +
                     "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
             RequiresMainThread = false,
-            TimeoutSeconds = 30)]
+            TimeoutSeconds = 30,
+            RelatedCommands = new[] { "CODE_EXEC", "LOG" })]
         public static async Task<string> ExecuteReturn(string code)
         {
             try
