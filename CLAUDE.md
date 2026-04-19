@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.0.62)
+│   └── package.json           # UPM manifest (v1.0.63)
 └── UnityTestProject/          # Test Unity project
 ```
 

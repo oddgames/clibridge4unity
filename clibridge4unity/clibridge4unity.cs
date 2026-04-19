@@ -371,6 +371,9 @@ class Program
                 Console.WriteLine($"CLI already up to date (v{CLI_VERSION}).");
                 // Still check manifest — CLI may be updated but manifest lagging
                 UpdateManifestTag(CLI_VERSION);
+                // And still refresh CLAUDE.md — content template may have shifted between
+                // CLI installs even when the version number stayed the same.
+                RefreshProjectClaudeMd();
                 return EXIT_SUCCESS;
             }
 
@@ -426,6 +429,7 @@ class Program
             Console.WriteLine($"  {exePath}");
 
             UpdateManifestTag(latestVersion);
+            RefreshProjectClaudeMd();
             return EXIT_SUCCESS;
         }
         catch (Exception ex)
@@ -433,6 +437,29 @@ class Program
             Console.Error.WriteLine($"Error: {ex.GetType().Name}: {ex.Message}");
             Console.Error.WriteLine($"  Run: irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
             return EXIT_COMMAND_ERROR;
+        }
+    }
+
+    /// <summary>
+    /// Regenerate the per-project CLAUDE.md so its command reference reflects this CLI build.
+    /// Called from UPDATE (both "up to date" and "upgraded" paths). No-ops when invoked
+    /// outside a Unity project or when HandleInstall fails.
+    /// </summary>
+    static void RefreshProjectClaudeMd()
+    {
+        try
+        {
+            string projectPath = AutoDetectProjectPath();
+            if (projectPath == null)
+            {
+                Console.WriteLine("  (Run 'clibridge4unity SETUP' inside a Unity project to refresh its CLAUDE.md.)");
+                return;
+            }
+            HandleInstall(null, projectPath, null);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  (Could not refresh CLAUDE.md: {ex.GetType().Name}: {ex.Message})");
         }
     }
 
@@ -772,8 +799,13 @@ class Program
         // CODE_ANALYZE: offline — served by the Roslyn daemon or single-pass source parsing.
         // Never touches Unity, so must run BEFORE the pre-flight state gates or it gets
         // spuriously blocked while Unity is loading/importing/compiling.
-        if (command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase))
+        // CODE_SEARCH is accepted as a legacy alias (muscle memory / old scripts) — forwards
+        // to the same analyze dispatch with a one-line deprecation notice.
+        if (command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase) ||
+            command.Equals("CODE_SEARCH", StringComparison.OrdinalIgnoreCase))
         {
+            if (command.Equals("CODE_SEARCH", StringComparison.OrdinalIgnoreCase))
+                Console.Error.WriteLine("[deprecated] CODE_SEARCH is now CODE_ANALYZE — forwarding.");
             string daemonPipe = RoslynDaemon.GetRunningPipe(projectPath);
             if (daemonPipe == null)
             {
