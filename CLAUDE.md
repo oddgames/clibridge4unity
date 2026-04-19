@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.0.61)
+│   └── package.json           # UPM manifest (v1.0.62)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -211,7 +211,7 @@ The Package is split into 8 asmdefs to minimize recompilation:
 - **clibridge4unity.Commands.Prefab** - Prefab operations
 - **clibridge4unity.Commands.Component** - Component inspection & modification
 - **clibridge4unity.Commands.Asset** - Asset search
-- **clibridge4unity.Commands.Code** - Code analysis (CODE_SEARCH, CODE_ANALYZE, CODE_EXEC, TEST)
+- **clibridge4unity.Commands.Code** - Code analysis (CODE_ANALYZE, CODE_EXEC, TEST)
 - **clibridge4unity.Commands.UI** - UI discovery, rendering
 
 ## Commands Available
@@ -232,8 +232,10 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `PROFILE [enable|disable|clear|hierarchy]` - Control profiler and read performance data
 
 ### Code
-- `CODE_SEARCH query` - Search code (`class:Name`, `method:Name`, `field:Name`, `inherits:Type`, `attribute:Name`)
-- `CODE_ANALYZE query` - Analyze a class, member, or stack trace
+- `CODE_ANALYZE query` - Unified code analysis (works offline via Roslyn daemon):
+  - `CODE_ANALYZE ClassName` → deep view (definition, usages, derived types, GetComponent sites, own members)
+  - `CODE_ANALYZE ClassName.Member` → zoom into one member
+  - `CODE_ANALYZE method:Name` | `field:Name` | `property:Name` | `inherits:Type` | `attribute:Name` → kind-prefixed listing across the codebase
 - `CODE_EXEC code` - Compile and execute C# code (fire-and-forget)
 - `CODE_EXEC_RETURN code` - Compile and execute C# code (waits for result, returns type)
 - `CODE_EXEC_RETURN code --inspect [depth] [--private]` - Execute and dump result object tree

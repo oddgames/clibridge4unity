@@ -26,13 +26,13 @@ clibridge4unity CODE_EXEC @script.cs            # Run from file (no size limit)
 ```
 CODE_EXEC has its own Roslyn compiler — no COMPILE needed, works even when Unity's main thread is busy.
 
-### Search & Analyze Code
+### Analyze Code (offline — no Unity needed)
 ```bash
-clibridge4unity CODE_SEARCH class:PlayerController      # Find types
-clibridge4unity CODE_SEARCH inherits:MonoBehaviour       # Inheritance search
-clibridge4unity CODE_SEARCH method:TakeDamage            # Find methods
-clibridge4unity CODE_ANALYZE PlayerController            # Class overview with doc comments
-clibridge4unity CODE_ANALYZE PlayerController.TakeDamage # Member details + callers
+clibridge4unity CODE_ANALYZE PlayerController                 # Class overview + connection graph
+clibridge4unity CODE_ANALYZE PlayerController.TakeDamage      # Member details + callers
+clibridge4unity CODE_ANALYZE method:TakeDamage                # Every method named TakeDamage across codebase
+clibridge4unity CODE_ANALYZE inherits:MonoBehaviour           # Derived types
+clibridge4unity CODE_ANALYZE attribute:SerializeField         # Attribute usage sites
 ```
 
 ### Inspect Anything
@@ -91,7 +91,7 @@ The generated `CLAUDE.md` tells AI assistants which commands are available, when
 | Category | Commands |
 |----------|----------|
 | **Core** | `PING` `PROBE` `DIAG` `STATUS` `HELP` `COMPILE` `REFRESH` `LOG` `STACK_MINIMIZE` `MENU` `PROFILE` |
-| **Code** | `CODE_SEARCH` `CODE_ANALYZE` `CODE_EXEC` `CODE_EXEC_RETURN` `TEST` |
+| **Code** | `CODE_ANALYZE` `CODE_EXEC` `CODE_EXEC_RETURN` `TEST` |
 | **Scene** | `SCENE` `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `PLAYMODE` `SCENEVIEW` `GAMEVIEW` `WINDOWS` |
 | **Prefab** | `PREFAB_CREATE` `PREFAB_INSTANTIATE` `PREFAB_HIERARCHY` `PREFAB_SAVE` |
 | **Component** | `INSPECTOR` `COMPONENT_SET` `COMPONENT_ADD` `COMPONENT_REMOVE` |

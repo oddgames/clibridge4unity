@@ -171,33 +171,26 @@ class Program
 
     // ───────────────────── Update Check ─────────────────────
     // Architecture:
-    //   - Background HttpClient fetch via Task.Run, fires-and-forgets
-    //   - Caches response to ~/.clibridge4unity/.last_update_check
-    //   - Shows notification from cache (throttled to once per 30 min via .update_notified)
-    //   - If CLI exits before fetch completes, the task just aborts — no big deal,
-    //     it'll succeed on a longer-running command eventually
-    //   - --version calls FetchAndShowUpdate() synchronously (allowed to block)
-    //   - Skipped for fast commands: PING, PROBE, DIAG, DISMISS, SCREENSHOT
+    //   - At Main entry: start a background fetch (Task.Run, fire-and-forget) that refreshes
+    //     ~/.clibridge4unity/.last_update_check from the GitHub releases/latest API.
+    //   - At Main exit: read the cached JSON and print the update banner (version + release
+    //     notes) to stderr. Never blocks on the network — the banner reflects whatever was
+    //     in cache at exit time. Next run picks up the fresh cache.
+    //   - --version calls FetchAndShowUpdate() synchronously (allowed to block up to 5s).
 
     static string UpdateCacheDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".clibridge4unity");
     static string UpdateCacheFile => Path.Combine(UpdateCacheDir, ".last_update_check");
     static string CompileTimesFile => Path.Combine(UpdateCacheDir, ".compile_times");
-    static string UpdateNotifiedFile => Path.Combine(UpdateCacheDir, ".update_notified");
 
-    static void CheckForUpdateInBackground()
+    /// <summary>Kick off a non-blocking refresh of the release cache if it's stale.</summary>
+    static void StartBackgroundUpdateFetch()
     {
         try
         {
-            // Show cached notification first (instant, no network)
-            ShowCachedUpdateNotice();
-
-            // If cache is fresh enough, skip network fetch
             if (File.Exists(UpdateCacheFile) &&
                 (DateTime.UtcNow - File.GetLastWriteTimeUtc(UpdateCacheFile)).TotalMinutes < 30)
                 return;
-
-            // Fire-and-forget fetch — aborts if CLI exits first, that's fine
             Task.Run(() => FetchLatestRelease());
         }
         catch { }
@@ -243,13 +236,6 @@ class Program
             if (force) Console.Error.WriteLine("  Up to date");
             return;
         }
-
-        // Throttle display to once per 30 min (unless forced by --version)
-        if (!force && File.Exists(UpdateNotifiedFile) &&
-            (DateTime.UtcNow - File.GetLastWriteTimeUtc(UpdateNotifiedFile)).TotalMinutes < 30)
-            return;
-
-        try { File.WriteAllText(UpdateNotifiedFile, latestVersion); } catch { }
 
         Console.Error.WriteLine();
         Console.Error.WriteLine($"  Update available: v{CLI_VERSION} → v{latestVersion}");
@@ -493,6 +479,20 @@ class Program
 
     static int Main(string[] args)
     {
+        // Kick off the background update fetch immediately (non-blocking). Runs
+        // concurrently with the command; result is used by PrintUpdateBannerAtExit below.
+        StartBackgroundUpdateFetch();
+        try { return MainImpl(args); }
+        finally
+        {
+            // Print the update banner last so it appears at the bottom of the output,
+            // after the command's normal stdout/stderr. Uses cached JSON only — no delay.
+            try { ShowCachedUpdateNotice(); } catch { }
+        }
+    }
+
+    static int MainImpl(string[] args)
+    {
         string projectPath = null;
         string command = null;
         string data = "";
@@ -574,15 +574,9 @@ class Program
             return EXIT_USAGE_ERROR;
         }
 
-        // Background update check — only for commands that take long enough for it to matter
-        // Skip for fast commands: PING, PROBE, DIAG, DISMISS, SCREENSHOT
         string cmdUpper = command.ToUpperInvariant();
-        if (cmdUpper != "PING" && cmdUpper != "PROBE" && cmdUpper != "DIAG" &&
-            cmdUpper != "DISMISS" && cmdUpper != "SCREENSHOT" && cmdUpper != "UPDATE" &&
-            cmdUpper != "SERVE" && cmdUpper != "HOOK" && cmdUpper != "DAEMON")
-        {
-            CheckForUpdateInBackground();
-        }
+        // Background update fetch is kicked off from Main() before we get here; the
+        // banner is printed from Main()'s finally block at the bottom of output.
 
         // UPDATE: self-update CLI (no Unity needed)
         if (cmdUpper == "UPDATE")
@@ -775,6 +769,52 @@ class Program
             return HandleWakeup(projectPath, refresh);
         }
 
+        // CODE_ANALYZE: offline — served by the Roslyn daemon or single-pass source parsing.
+        // Never touches Unity, so must run BEFORE the pre-flight state gates or it gets
+        // spuriously blocked while Unity is loading/importing/compiling.
+        if (command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase))
+        {
+            string daemonPipe = RoslynDaemon.GetRunningPipe(projectPath);
+            if (daemonPipe == null)
+            {
+                Console.Error.WriteLine("[roslyn] Starting daemon...");
+                daemonPipe = RoslynDaemon.StartBackground(projectPath);
+            }
+
+            if (daemonPipe != null)
+            {
+                string dResult = RoslynDaemon.Query(daemonPipe, "analyze", data ?? "");
+                if (dResult != null)
+                {
+                    Console.WriteLine(dResult);
+                    return dResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+                }
+
+                // Daemon claimed to be running but won't answer — it's stuck.
+                // Kill it and start fresh before falling through to single-pass.
+                Console.Error.WriteLine("[roslyn] Daemon unresponsive — killing and restarting");
+                RoslynDaemon.KillAndCleanup(projectPath);
+                daemonPipe = RoslynDaemon.StartBackground(projectPath);
+                if (daemonPipe != null)
+                {
+                    string retry = RoslynDaemon.Query(daemonPipe, "analyze", data ?? "");
+                    if (retry != null)
+                    {
+                        Console.WriteLine(retry);
+                        return retry.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+                    }
+                }
+            }
+
+            // Fallback: single-pass Roslyn, and start daemon in background for next time
+            Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass analysis");
+            Task.Run(() => RoslynDaemon.StartBackground(projectPath));
+
+            string fallbackResult = RoslynAnalyzer.Analyze(projectPath, data ?? "");
+            Console.WriteLine(fallbackResult);
+            return fallbackResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+        }
+
         // Pre-flight: check if Unity is running for this project (instant, no pipe needed)
         if (unityInfo.State == UnityProcessState.NotRunning)
         {
@@ -919,53 +959,6 @@ class Program
                 }
             }
             catch { }
-        }
-
-        // CODE_SEARCH / CODE_ANALYZE: unified — both go through the `analyze` endpoint.
-        // CODE_SEARCH is kept as an alias; the prefix in the query (method:/field:/etc.) drives behaviour.
-        if (command.Equals("CODE_SEARCH", StringComparison.OrdinalIgnoreCase) ||
-            command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase))
-        {
-            // Try daemon first
-            string daemonPipe = RoslynDaemon.GetRunningPipe(projectPath);
-            if (daemonPipe == null)
-            {
-                Console.Error.WriteLine("[roslyn] Starting daemon...");
-                daemonPipe = RoslynDaemon.StartBackground(projectPath);
-            }
-
-            if (daemonPipe != null)
-            {
-                string dResult = RoslynDaemon.Query(daemonPipe, "analyze", data ?? "");
-                if (dResult != null)
-                {
-                    Console.WriteLine(dResult);
-                    return dResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
-                }
-
-                // Daemon claimed to be running but won't answer — it's stuck.
-                // Kill it and start fresh before falling through to single-pass.
-                Console.Error.WriteLine("[roslyn] Daemon unresponsive — killing and restarting");
-                RoslynDaemon.KillAndCleanup(projectPath);
-                daemonPipe = RoslynDaemon.StartBackground(projectPath);
-                if (daemonPipe != null)
-                {
-                    string retry = RoslynDaemon.Query(daemonPipe, "analyze", data ?? "");
-                    if (retry != null)
-                    {
-                        Console.WriteLine(retry);
-                        return retry.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
-                    }
-                }
-            }
-
-            // Fallback: single-pass Roslyn, and start daemon in background for next time
-            Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass analysis");
-            Task.Run(() => RoslynDaemon.StartBackground(projectPath));
-
-            string fallbackResult = RoslynAnalyzer.Analyze(projectPath, data ?? "");
-            Console.WriteLine(fallbackResult);
-            return fallbackResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
         }
 
         // ASSET_SEARCH: server-side Unity Search + CLI-side scene/prefab YAML grep
@@ -2654,8 +2647,6 @@ class Program
         md.AppendLine("- `CODE_ANALYZE field:Name` / `property:Name` — same for fields/properties");
         md.AppendLine("- `CODE_ANALYZE inherits:Type` — derived types");
         md.AppendLine("- `CODE_ANALYZE attribute:Name` — attribute usage sites");
-        md.AppendLine();
-        md.AppendLine("(`CODE_SEARCH` is a deprecated alias that forwards here.)");
         md.AppendLine();
         md.AppendLine("## Other workflows");
         md.AppendLine();

@@ -14,12 +14,12 @@ Package/
 │       ├── Scene/             # Scene/hierarchy/screenshot commands
 │       ├── Prefab/            # Prefab creation/instantiation
 │       ├── Component/         # Component field/property/event manipulation
-│       ├── Code/              # CODE_SEARCH, CODE_ANALYZE, CodeSearch, PdbCache
+│       ├── Code/              # CODE_ANALYZE, CodeSearch, PdbCache
 │       ├── Asset/             # Asset search
 │       └── UI/                # UI_DISCOVER, SCREENSHOT
 ├── Runtime/                   # (Currently unused)
 ├── Tools/                     # Pre-built CLI executables (win/osx/linux)
-└── package.json               # UPM manifest (v1.0.61)
+└── package.json               # UPM manifest (v1.0.62)
 ```
 
 ## Key Architecture

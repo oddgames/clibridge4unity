@@ -15,7 +15,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 namespace clibridge4unity;
 
 /// <summary>
-/// Background daemon that keeps Roslyn syntax trees in memory for instant CODE_SEARCH/CODE_ANALYZE queries.
+/// Background daemon that keeps Roslyn syntax trees in memory for instant CODE_ANALYZE queries.
 /// Watches for file changes and incrementally re-parses.
 /// Communicates over named pipes (fastest IPC on Windows).
 /// Protocol: client sends "endpoint query\n", daemon responds with result text and closes pipe.
@@ -331,9 +331,6 @@ static class RoslynDaemon
                         break;
                     case "analyze":
                         response = HandleAnalyze(trees, fileTexts, projectPath, query);
-                        break;
-                    case "search":
-                        response = HandleSearch(trees, fileTexts, projectPath, query);
                         break;
                     case "shutdown":
                         response = "shutting down";

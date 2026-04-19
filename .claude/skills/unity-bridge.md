@@ -195,10 +195,9 @@ CODE_ANALYZE PlayerController           # Class overview
 CODE_ANALYZE PlayerController.Move       # Method details
 CODE_ANALYZE "NullReferenceException..." # Parse stack trace
 
-CODE_SEARCH class:PlayerController
-CODE_SEARCH method:OnTriggerEnter
-CODE_SEARCH inherits:MonoBehaviour
-CODE_SEARCH attribute:SerializeField
+CODE_ANALYZE method:OnTriggerEnter
+CODE_ANALYZE inherits:MonoBehaviour
+CODE_ANALYZE attribute:SerializeField
 ```
 
 ## Testing

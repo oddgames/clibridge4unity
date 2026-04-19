@@ -261,14 +261,11 @@ namespace clibridge4unity
         }
 
         /// <summary>
-        /// Searches code using query syntax.
-        /// Queries: class:Name, method:Name, field:Name, inherits:Type, attribute:Name, refs:Symbol
+        /// Kind-prefixed search helper used internally by CODE_ANALYZE when the query is
+        /// `method:Name` / `field:Name` / `inherits:Type` / `attribute:Name` etc. Not exposed
+        /// as a bridge command — CODE_ANALYZE is the single entry point.
         /// </summary>
-        [BridgeCommand("CODE_SEARCH", "Alias for CODE_ANALYZE with a kind-prefixed query (deprecated — use CODE_ANALYZE directly)",
-            Category = "Code",
-            Usage = "CODE_SEARCH class:Name | method:Name | field:Name | inherits:Type | attribute:Name | refs:Symbol\n" +
-                    "  (Prefer: CODE_ANALYZE method:Name — same behaviour)")]
-        public static string Search(string query)
+        internal static string Search(string query)
         {
             try
             {

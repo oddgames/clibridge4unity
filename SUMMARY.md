@@ -19,7 +19,7 @@ tool_claude_unity_bridge/
 │   │       ├── Scene/             # Scene/hierarchy/play mode commands
 │   │       ├── Prefab/            # Prefab creation/instantiation/save
 │   │       ├── Component/         # Component inspection & modification
-│   │       ├── Code/              # CODE_SEARCH, CODE_ANALYZE, CODE_EXEC, TEST
+│   │       ├── Code/              # CODE_ANALYZE, CODE_EXEC, TEST
 │   │       ├── Asset/             # Asset search
 │   │       └── UI/                # UI_DISCOVER, SCREENSHOT
 │   └── Tools/                     # Pre-built CLI executables (win/osx/linux)
@@ -36,7 +36,7 @@ tool_claude_unity_bridge/
 
 ### Commands (33)
 - **Core**: PING, HELP, PROBE, DIAG, STATUS, COMPILE, REFRESH, LOG, STACK_MINIMIZE
-- **Code**: CODE_SEARCH, CODE_ANALYZE, CODE_EXEC, CODE_EXEC_RETURN, TEST
+- **Code**: CODE_ANALYZE, CODE_EXEC, CODE_EXEC_RETURN, TEST
 - **Scene**: CREATE, FIND, DELETE, SAVE, LOAD, SCENE, SCENEVIEW, WINDOWS, PLAY, STOP, PAUSE, STEP, PLAYMODE, GAMEVIEW
 - **Prefab**: PREFAB_CREATE, PREFAB_INSTANTIATE, PREFAB_HIERARCHY, PREFAB_SAVE
 - **Component**: COMPONENT_SET, COMPONENT_ADD, COMPONENT_REMOVE, INSPECTOR
@@ -67,4 +67,4 @@ clibridge4unity LOG since:42
 
 ## Version
 
-Current: 1.0.61
+Current: 1.0.62
