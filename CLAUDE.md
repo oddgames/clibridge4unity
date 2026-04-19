@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.0.66)
+│   └── package.json           # UPM manifest (v1.0.67)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -250,9 +250,10 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `DEBUG` - Debugger stub (Phase 2: attach, breakpoints, stepping)
 
 ### Scene
-- `SCENE` - Get current scene info and hierarchy
 - `CREATE name` - Create a new GameObject
-- `FIND name` - Find GameObject by name or path
+- `FIND name` - Find by name. Scope prefixes:
+  - `FIND Player` or `FIND scene:Player` — scene (default)
+  - `FIND prefab:Assets/UI/Menu.prefab/Button` — inside a prefab asset (comma-separate for OR)
 - `DELETE path` - Delete a GameObject
 - `SAVE` - Save current scene
 - `LOAD scenePath` - Load a scene
@@ -268,13 +269,17 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 ### Prefab
 - `PREFAB_CREATE name path` - Create a prefab asset
 - `PREFAB_INSTANTIATE path [parent]` - Instantiate a prefab in the scene
-- `PREFAB_HIERARCHY path` - Get prefab hierarchy with components
 
-### Component
+### Component / Inspect
+- `INSPECTOR` - Whole-scene hierarchy (brief, all roots recursed)
+- `INSPECTOR path` - One scene GameObject or asset with serialized fields
+- `INSPECTOR path --children` / `--depth N` - Recurse subtree
+- `INSPECTOR path --brief` - Components only, no serialized fields
+- `INSPECTOR path --filter X` - Subtree filtered by GameObject name OR component name
+- `INSPECTOR Assets/x.prefab [--children] [--brief] [--filter X]` - Prefab asset (absorbs old PREFAB_HIERARCHY)
 - `COMPONENT_SET gameObject component field value` - Set field/property on a component
 - `COMPONENT_ADD gameObject component` - Add a component
 - `COMPONENT_REMOVE gameObject component` - Remove a component
-- `INSPECTOR gameObject` - Get component details
 
 ### Asset
 - `ASSET_SEARCH query` - Search assets using Unity Search syntax

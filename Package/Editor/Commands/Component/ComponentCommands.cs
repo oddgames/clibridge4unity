@@ -273,59 +273,59 @@ namespace clibridge4unity
         }
 
         /// <summary>
-        /// Inspect a GameObject's components and their serialized fields.
+        /// Unified inspector — works on scene, prefab assets, materials, ScriptableObjects, etc.
+        /// Absorbs the former PREFAB_HIERARCHY command via --brief + --filter + truncation.
         /// </summary>
-        [BridgeCommand("INSPECTOR", "Inspect a scene GameObject or any asset (prefab, material, shader, ScriptableObject, etc.)",
+        [BridgeCommand("INSPECTOR", "Inspect a scene GameObject, prefab asset, material, ScriptableObject — optionally a subtree with filter",
             Category = "Component",
-            Usage = "INSPECTOR Canvas/Panel                              (scene GameObject)\n" +
+            Usage = "INSPECTOR                                             (scene hierarchy — all roots, brief)\n" +
+                    "  INSPECTOR scene                                     (same — explicit)\n" +
+                    "  INSPECTOR Canvas/Panel                              (one scene GameObject with fields)\n" +
                     "  INSPECTOR Canvas/Panel --depth 2                    (recurse 2 levels)\n" +
                     "  INSPECTOR Canvas/Panel --children                   (recurse all children)\n" +
+                    "  INSPECTOR Canvas --filter Button                    (subtree, keep only nodes matching 'Button' by GO or component name)\n" +
+                    "  INSPECTOR Canvas --brief                            (components only, skip serialized fields)\n" +
                     "  INSPECTOR Assets/Prefabs/My.prefab                  (prefab asset)\n" +
+                    "  INSPECTOR Assets/Prefabs/My.prefab --children       (full prefab subtree with fields)\n" +
+                    "  INSPECTOR Assets/Prefabs/My.prefab --children --brief --filter Button  (prefab, subtree, components-only, filtered)\n" +
                     "  INSPECTOR Assets/Materials/My.mat                   (material)\n" +
-                    "  INSPECTOR Assets/Data/Config.asset                  (ScriptableObject)\n" +
-                    "  INSPECTOR {\"gameObject\":\"Panel\",\"component\":\"Image\"}  (filter component)\n" +
-                    "  INSPECTOR {\"gameObject\":\"Panel\",\"depth\":2}         (JSON form)",
+                    "  INSPECTOR {\"gameObject\":\"Panel\",\"filter\":\"Button\",\"children\":true,\"brief\":true}  (JSON form)",
             RequiresMainThread = true,
-            RelatedCommands = new[] { "COMPONENT_SET", "COMPONENT_ADD", "SCREENSHOT" })]
+            RelatedCommands = new[] { "COMPONENT_SET", "COMPONENT_ADD", "SCREENSHOT", "FIND" })]
         public static string Inspector(string data)
         {
             try
             {
-                string targetPath;
-                string filterComponent = null;
-                int depth = 0;
+                var opts = ParseInspectorOptions(data);
 
-                if (data.TrimStart().StartsWith("{"))
+                // No target → scene-wide (replaces the former SCENE command's hierarchy output).
+                bool sceneScope = string.IsNullOrEmpty(opts.TargetPath) ||
+                                  opts.TargetPath.Equals("scene", StringComparison.OrdinalIgnoreCase);
+                if (sceneScope)
                 {
-                    var json = JObject.Parse(data);
-                    targetPath = json["gameObject"]?.ToString() ?? json["asset"]?.ToString();
-                    filterComponent = json["component"]?.ToString();
-                    var depthToken = json["depth"];
-                    if (depthToken != null) depth = depthToken.ToObject<int>();
-                    if (json["children"]?.ToObject<bool>() == true) depth = int.MaxValue;
-                }
-                else
-                {
-                    targetPath = ParseInspectorFlags(data.Trim(), out depth);
+                    // Default scene scope to brief + all children.
+                    if (opts.Depth == 0) opts.Depth = int.MaxValue;
+                    if (!opts.BriefExplicit) opts.Brief = true;
+                    return InspectScene(opts);
                 }
 
-                if (string.IsNullOrEmpty(targetPath))
-                    return Response.Error("Path is required");
-
-                // Asset path → inspect asset directly
-                if (targetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
-                 || targetPath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
+                // Asset path → inspect asset (prefab / material / SO / etc).
+                if (opts.TargetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
+                 || opts.TargetPath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
                 {
-                    return InspectAsset(targetPath, filterComponent);
+                    return InspectAsset(opts);
                 }
 
                 // Scene GameObject
-                var go = GameObject.Find(targetPath);
+                var go = GameObject.Find(opts.TargetPath);
                 if (go == null)
-                    return Response.Error($"GameObject not found: {targetPath}");
+                    return Response.Error($"GameObject not found: {opts.TargetPath}");
 
                 var sb = new System.Text.StringBuilder();
-                AppendGameObjectInspection(sb, go, filterComponent, depth, 0, targetPath);
+                var counter = new InspectorNodeCounter { MaxNodes = opts.MaxNodes };
+                AppendGameObjectInspection(sb, go, opts, 0, opts.TargetPath, counter);
+                if (counter.Truncated)
+                    sb.AppendLine($"... (truncated at {opts.MaxNodes} nodes — use --filter or deeper path to narrow)");
                 return sb.ToString().TrimEnd();
             }
             catch (Exception ex)
@@ -334,82 +334,178 @@ namespace clibridge4unity
             }
         }
 
-        /// <summary>
-        /// Strip trailing `--depth N` / `--children` flags from the data string and return the bare path.
-        /// </summary>
-        private static string ParseInspectorFlags(string input, out int depth)
+        private class InspectorOptions
         {
-            depth = 0;
-            if (string.IsNullOrEmpty(input)) return input;
+            public string TargetPath;
+            public string Filter;           // matches GameObject name OR component name (substring, case-insensitive)
+            public string FilterComponent;  // exact component type name (legacy JSON "component" field)
+            public int Depth;
+            public bool Brief;              // components only, skip serialized fields
+            public bool BriefExplicit;      // user set Brief explicitly (vs default)
+            public int MaxNodes = 300;
+        }
 
-            var tokens = input.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        private class InspectorNodeCounter
+        {
+            public int Count;
+            public int MaxNodes;
+            public bool Truncated;
+        }
+
+        private static InspectorOptions ParseInspectorOptions(string data)
+        {
+            var opts = new InspectorOptions();
+            if (string.IsNullOrWhiteSpace(data)) return opts;
+
+            if (data.TrimStart().StartsWith("{"))
+            {
+                var json = JObject.Parse(data);
+                opts.TargetPath = json["gameObject"]?.ToString() ?? json["asset"]?.ToString() ?? json["target"]?.ToString();
+                opts.FilterComponent = json["component"]?.ToString();
+                opts.Filter = json["filter"]?.ToString();
+                var depthToken = json["depth"];
+                if (depthToken != null) opts.Depth = depthToken.ToObject<int>();
+                if (json["children"]?.ToObject<bool>() == true) opts.Depth = int.MaxValue;
+                var briefToken = json["brief"];
+                if (briefToken != null) { opts.Brief = briefToken.ToObject<bool>(); opts.BriefExplicit = true; }
+                var maxToken = json["maxNodes"];
+                if (maxToken != null) opts.MaxNodes = maxToken.ToObject<int>();
+                return opts;
+            }
+
+            var tokens = data.Trim().Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
             var pathParts = new System.Collections.Generic.List<string>();
             for (int i = 0; i < tokens.Length; i++)
             {
                 string t = tokens[i];
                 if (t.Equals("--children", StringComparison.OrdinalIgnoreCase))
-                {
-                    depth = int.MaxValue;
-                }
+                    opts.Depth = int.MaxValue;
                 else if (t.Equals("--depth", StringComparison.OrdinalIgnoreCase) && i + 1 < tokens.Length
                       && int.TryParse(tokens[i + 1], out int d))
-                {
-                    depth = Math.Max(0, d);
-                    i++;
-                }
+                { opts.Depth = Math.Max(0, d); i++; }
+                else if (t.Equals("--filter", StringComparison.OrdinalIgnoreCase) && i + 1 < tokens.Length)
+                { opts.Filter = tokens[++i]; }
+                else if (t.Equals("--brief", StringComparison.OrdinalIgnoreCase) ||
+                         t.Equals("--components-only", StringComparison.OrdinalIgnoreCase))
+                { opts.Brief = true; opts.BriefExplicit = true; }
+                else if (t.Equals("--max", StringComparison.OrdinalIgnoreCase) && i + 1 < tokens.Length
+                      && int.TryParse(tokens[i + 1], out int m))
+                { opts.MaxNodes = Math.Max(1, m); i++; }
                 else
-                {
                     pathParts.Add(t);
-                }
             }
-            return string.Join(" ", pathParts);
+            opts.TargetPath = string.Join(" ", pathParts);
+            return opts;
+        }
+
+        /// <summary>Walk all roots of the active scene, apply filter + depth, render. Replaces SCENE.</summary>
+        private static string InspectScene(InspectorOptions opts)
+        {
+            var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            var roots = scene.GetRootGameObjects();
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"Scene: {scene.name}  ({roots.Length} root{(roots.Length == 1 ? "" : "s")}, total {UnityEngine.Object.FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None).Length} objects)");
+            if (!string.IsNullOrEmpty(opts.Filter))
+                sb.AppendLine($"Filter: '{opts.Filter}'");
+            sb.AppendLine();
+
+            var counter = new InspectorNodeCounter { MaxNodes = opts.MaxNodes };
+            foreach (var root in roots)
+            {
+                AppendGameObjectInspection(sb, root, opts, 0, root.name, counter);
+                if (counter.Truncated) break;
+            }
+            if (counter.Truncated)
+                sb.AppendLine($"... (truncated at {opts.MaxNodes} nodes — use --filter or a specific path to narrow)");
+            return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>Count transforms in a subtree (including root).</summary>
+        private static int CountTransforms(Transform t)
+        {
+            int n = 1;
+            for (int i = 0; i < t.childCount; i++) n += CountTransforms(t.GetChild(i));
+            return n;
         }
 
         /// <summary>
-        /// Render a GameObject and (optionally) its descendants up to `maxDepth` levels deep.
-        /// Indent by `currentDepth * 2` spaces to show hierarchy.
+        /// Render a GameObject and (optionally) its descendants up to opts.Depth levels deep.
+        /// Honors --filter (name OR component), --brief (skip fields), --max (node cap).
         /// </summary>
         private static void AppendGameObjectInspection(System.Text.StringBuilder sb, GameObject go,
-            string filterComponent, int maxDepth, int currentDepth, string displayPath)
+            InspectorOptions opts, int currentDepth, string displayPath, InspectorNodeCounter counter)
         {
-            string indent = new string(' ', currentDepth * 2);
-            sb.AppendLine($"{indent}GameObject: {displayPath ?? go.name}");
-            sb.AppendLine($"{indent}active: {go.activeSelf}  layer: {LayerMask.LayerToName(go.layer)}  tag: {go.tag}");
+            if (counter.Truncated) return;
 
             var components = go.GetComponents<Component>();
-            foreach (var comp in components)
+
+            // Filter decides whether THIS node is rendered. If it doesn't match,
+            // still recurse — a descendant might.
+            bool nodeMatches = MatchesFilter(go, components, opts);
+
+            if (nodeMatches)
             {
-                if (comp == null) continue;
-                string typeName = comp.GetType().Name;
+                if (counter.Count >= counter.MaxNodes) { counter.Truncated = true; return; }
+                counter.Count++;
 
-                if (!string.IsNullOrEmpty(filterComponent) &&
-                    !typeName.Equals(filterComponent, StringComparison.OrdinalIgnoreCase))
-                    continue;
+                string indent = new string(' ', currentDepth * 2);
+                sb.AppendLine($"{indent}GameObject: {displayPath ?? go.name}");
+                sb.AppendLine($"{indent}active: {go.activeSelf}  layer: {LayerMask.LayerToName(go.layer)}  tag: {go.tag}");
 
-                sb.AppendLine($"{indent}[{typeName}]");
-                var so = new SerializedObject(comp);
-                var prop = so.GetIterator();
-                if (prop.NextVisible(true))
+                foreach (var comp in components)
                 {
-                    do
+                    if (comp == null) continue;
+                    string typeName = comp.GetType().Name;
+
+                    // Legacy exact-component filter from JSON form.
+                    if (!string.IsNullOrEmpty(opts.FilterComponent) &&
+                        !typeName.Equals(opts.FilterComponent, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    sb.AppendLine($"{indent}[{typeName}]");
+                    if (opts.Brief) continue;  // components-only mode — skip serialized fields
+
+                    var so = new SerializedObject(comp);
+                    var prop = so.GetIterator();
+                    if (prop.NextVisible(true))
                     {
-                        sb.AppendLine($"{indent}  {prop.name}: {GetPropertyValue(prop)}");
-                    } while (prop.NextVisible(false));
+                        do
+                        {
+                            sb.AppendLine($"{indent}  {prop.name}: {GetPropertyValue(prop)}");
+                        } while (prop.NextVisible(false));
+                    }
                 }
             }
 
-            if (currentDepth >= maxDepth) return;
+            if (currentDepth >= opts.Depth) return;
 
             foreach (Transform child in go.transform)
             {
-                sb.AppendLine();
-                AppendGameObjectInspection(sb, child.gameObject, filterComponent,
-                    maxDepth, currentDepth + 1, child.name);
+                if (counter.Truncated) break;
+                if (nodeMatches) sb.AppendLine();
+                AppendGameObjectInspection(sb, child.gameObject, opts,
+                    currentDepth + 1, child.name, counter);
             }
         }
 
-        private static string InspectAsset(string assetPath, string filterComponent)
+        /// <summary>Filter test: no filter → always true; else GO name or any component name contains the filter (case-insensitive).</summary>
+        private static bool MatchesFilter(GameObject go, Component[] components, InspectorOptions opts)
         {
+            if (string.IsNullOrEmpty(opts.Filter)) return true;
+            if (go.name.IndexOf(opts.Filter, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            foreach (var comp in components)
+            {
+                if (comp == null) continue;
+                if (comp.GetType().Name.IndexOf(opts.Filter, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
+            return false;
+        }
+
+        private static string InspectAsset(InspectorOptions opts)
+        {
+            string assetPath = opts.TargetPath;
+
             // Support child paths: Assets/My.prefab/Child/Path
             string childPath = null;
             int prefabIdx = assetPath.IndexOf(".prefab/", StringComparison.OrdinalIgnoreCase);
@@ -423,7 +519,7 @@ namespace clibridge4unity
             if (asset == null)
                 return Response.Error($"Asset not found: {assetPath}");
 
-            // Prefab → inspect like a GameObject (components)
+            // Prefab → inspect like a GameObject (components + optional subtree)
             if (asset is GameObject go)
             {
                 // Navigate to child if specified
@@ -449,9 +545,6 @@ namespace clibridge4unity
 
                 var sb = new System.Text.StringBuilder();
                 sb.AppendLine($"Prefab: {assetPath}");
-                sb.AppendLine($"active: {go.activeSelf}");
-                sb.AppendLine($"layer: {LayerMask.LayerToName(go.layer)}");
-                sb.AppendLine($"tag: {go.tag}");
                 var prefabType = PrefabUtility.GetPrefabAssetType(go);
                 sb.AppendLine($"prefabType: {prefabType}");
                 if (prefabType == PrefabAssetType.Variant)
@@ -460,29 +553,16 @@ namespace clibridge4unity
                     if (source != null)
                         sb.AppendLine($"basePrefab: {AssetDatabase.GetAssetPath(source)}");
                 }
-                sb.AppendLine($"children: {go.transform.childCount}");
-                sb.AppendLine("---");
+                int totalNodes = CountTransforms(go.transform);
+                sb.AppendLine($"nodes: {totalNodes}");
+                if (!string.IsNullOrEmpty(opts.Filter))
+                    sb.AppendLine($"filter: '{opts.Filter}'");
+                sb.AppendLine();
 
-                foreach (var comp in go.GetComponents<Component>())
-                {
-                    if (comp == null) continue;
-                    string typeName = comp.GetType().Name;
-                    if (!string.IsNullOrEmpty(filterComponent) &&
-                        !typeName.Equals(filterComponent, StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    sb.AppendLine($"[{typeName}]");
-                    var so = new SerializedObject(comp);
-                    var prop = so.GetIterator();
-                    if (prop.NextVisible(true))
-                    {
-                        do
-                        {
-                            sb.AppendLine($"  {prop.name}: {GetPropertyValue(prop)}");
-                        } while (prop.NextVisible(false));
-                    }
-                    sb.AppendLine();
-                }
+                var counter = new InspectorNodeCounter { MaxNodes = opts.MaxNodes };
+                AppendGameObjectInspection(sb, go, opts, 0, go.name, counter);
+                if (counter.Truncated)
+                    sb.AppendLine($"... (truncated at {opts.MaxNodes} nodes — use --filter or deeper path to narrow)");
                 return sb.ToString().TrimEnd();
             }
 

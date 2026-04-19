@@ -860,13 +860,8 @@ class Program
         // CODE_ANALYZE: offline — served by the Roslyn daemon or single-pass source parsing.
         // Never touches Unity, so must run BEFORE the pre-flight state gates or it gets
         // spuriously blocked while Unity is loading/importing/compiling.
-        // CODE_SEARCH is accepted as a legacy alias (muscle memory / old scripts) — forwards
-        // to the same analyze dispatch with a one-line deprecation notice.
-        if (command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase) ||
-            command.Equals("CODE_SEARCH", StringComparison.OrdinalIgnoreCase))
+        if (command.Equals("CODE_ANALYZE", StringComparison.OrdinalIgnoreCase))
         {
-            if (command.Equals("CODE_SEARCH", StringComparison.OrdinalIgnoreCase))
-                Console.Error.WriteLine("[deprecated] CODE_SEARCH is now CODE_ANALYZE — forwarding.");
             string daemonPipe = RoslynDaemon.GetRunningPipe(projectPath);
             if (daemonPipe == null)
             {
@@ -2710,12 +2705,13 @@ class Program
         md.AppendLine();
         md.AppendLine("Before reaching for CODE_EXEC_RETURN to inspect the scene, try these — they're already structured:");
         md.AppendLine();
-        md.AppendLine("- `INSPECTOR Canvas/Panel` — one GameObject, all serialized fields (same shape as Unity Inspector)");
-        md.AppendLine("- `INSPECTOR Canvas/Panel --depth 2` — recurse N levels, dumping components + fields at each level");
-        md.AppendLine("- `INSPECTOR Canvas/Panel --children` — full subtree");
-        md.AppendLine("- `PREFAB_HIERARCHY Assets/Prefabs/Foo.prefab` — prefab subtree with components");
-        md.AppendLine("- `SCENE` — hierarchy tree (names only)");
-        md.AppendLine("- `FIND Name` — locate a GameObject + components list");
+        md.AppendLine("- `INSPECTOR` — full active-scene hierarchy (brief, all roots recursed)");
+        md.AppendLine("- `INSPECTOR Canvas/Panel` — one GameObject, all serialized fields");
+        md.AppendLine("- `INSPECTOR Canvas/Panel --depth 2` / `--children` — recurse subtree");
+        md.AppendLine("- `INSPECTOR Canvas/Panel --filter Button` — subtree filtered by GameObject name OR component name");
+        md.AppendLine("- `INSPECTOR Canvas/Panel --children --brief` — subtree, components only (no field dumps — concise)");
+        md.AppendLine("- `INSPECTOR Assets/Prefabs/Foo.prefab [--children] [--brief] [--filter X]` — prefab asset (replaces old PREFAB_HIERARCHY)");
+        md.AppendLine("- `FIND Name` — scene (default) | `FIND prefab:Assets/UI/Menu.prefab/Button,Panel` — find by name inside a prefab asset (comma = OR)");
         md.AppendLine();
         md.AppendLine("## CODE_EXEC / CODE_EXEC_RETURN");
         md.AppendLine();
@@ -2745,9 +2741,9 @@ class Program
         md.AppendLine("## Other workflows");
         md.AppendLine();
         md.AppendLine("- Build: `COMPILE` | `STATUS` | `LOG errors` | `DIAG` (always works — no main thread needed)");
-        md.AppendLine("- Scene: `PLAY` | `STOP` | `PAUSE` | `STEP` | `SCENE` | `CREATE` | `FIND` | `DELETE` | `SAVE` | `LOAD`");
+        md.AppendLine("- Scene: `PLAY` | `STOP` | `PAUSE` | `STEP` | `CREATE` | `FIND` | `DELETE` | `SAVE` | `LOAD`");
         md.AppendLine("- Components: `COMPONENT_SET obj comp field value` | `COMPONENT_ADD` | `COMPONENT_REMOVE`");
-        md.AppendLine("- Prefabs: `PREFAB_CREATE` | `PREFAB_INSTANTIATE` | `PREFAB_HIERARCHY`");
+        md.AppendLine("- Prefabs: `PREFAB_CREATE` | `PREFAB_INSTANTIATE`");
         md.AppendLine("- Assets: `ASSET_SEARCH` | `ASSET_DISCOVER` | `ASSET_MOVE` | `ASSET_COPY` | `ASSET_DELETE`");
         md.AppendLine("- Tests: `TEST` (EditMode) | `TEST playmode` | `TEST all` | `TEST Group1,Group2` | `TEST --category A,B` | `TEST --tests Full.Name,Other.Name` (filters OR'd)");
         md.AppendLine("- Capture: `SCREENSHOT [view]`");

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using UnityEngine;
@@ -79,17 +80,35 @@ namespace clibridge4unity
         }
 
         /// <summary>
-        /// Finds and selects GameObjects by name/path.
+        /// Finds GameObjects by name. Default scope is the active scene.
+        /// Prefix `prefab:Assets/path.prefab/NameFragment` to search inside a prefab asset.
         /// </summary>
-        [BridgeCommand("FIND", "Find GameObject by name or path",
+        [BridgeCommand("FIND", "Find GameObject by name — scene (default) or prefab:<assetpath>/<name>",
             Category = "Scene",
-            Usage = "FIND MyObject",
+            Usage = "FIND MyObject                                  (scene)\n" +
+                    "  FIND scene:MyObject                            (explicit scene scope)\n" +
+                    "  FIND prefab:Assets/UI/Menu.prefab/Button       (inside a prefab asset — exact or substring match)\n" +
+                    "  FIND prefab:Assets/UI/Menu.prefab/Panel,Button (multiple names — comma-separated)",
             RequiresMainThread = true,
             RelatedCommands = new[] { "INSPECTOR", "SCREENSHOT" })]
         public static string Find(string query)
         {
             try
             {
+                if (string.IsNullOrWhiteSpace(query))
+                    return Response.Error("Usage: FIND <name> | FIND prefab:<assetpath>/<name>");
+
+                query = query.Trim();
+
+                // Strip `scene:` prefix — scene is the default.
+                if (query.StartsWith("scene:", StringComparison.OrdinalIgnoreCase))
+                    query = query.Substring("scene:".Length).TrimStart();
+
+                // Prefab scope: find by name inside a prefab asset (no prior path knowledge required).
+                if (query.StartsWith("prefab:", StringComparison.OrdinalIgnoreCase))
+                    return FindInPrefab(query.Substring("prefab:".Length).TrimStart());
+
+                // Scene scope — original behaviour.
                 var found = GameObject.Find(query);
                 if (found != null)
                 {
@@ -103,7 +122,6 @@ namespace clibridge4unity
                     });
                 }
 
-                // Try pattern search
                 var all = UnityEngine.Object.FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None);
                 var matches = all.Where(go => go.name.Contains(query)).Take(10).ToList();
 
@@ -148,50 +166,6 @@ namespace clibridge4unity
 
                 Undo.DestroyObjectImmediate(go);
                 return Response.Success($"Deleted {path}");
-            }
-            catch (Exception ex)
-            {
-                return Response.Exception(ex);
-            }
-        }
-
-        /// <summary>
-        /// Gets scene info and hierarchy.
-        /// </summary>
-        [BridgeCommand("SCENE", "Get current scene info and hierarchy",
-            Category = "Scene",
-            Usage = "SCENE",
-            RequiresMainThread = true,
-            RelatedCommands = new[] { "FIND", "WINDOWS", "SCREENSHOT" })]
-        public static string GetInfo()
-        {
-            try
-            {
-                var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
-                var roots = scene.GetRootGameObjects();
-                var allObjects = UnityEngine.Object.FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None);
-
-                var sb = new StringBuilder();
-                void AppendHierarchy(Transform t, int depth)
-                {
-                    if (depth > 8) return;
-                    sb.AppendLine($"{new string(' ', depth * 2)}{t.name}");
-                    foreach (Transform child in t)
-                        AppendHierarchy(child, depth + 1);
-                }
-
-                foreach (var root in roots)
-                    AppendHierarchy(root.transform, 0);
-
-                return Response.SuccessWithData(new
-                {
-                    sceneName = scene.name,
-                    scenePath = scene.path,
-                    isDirty = scene.isDirty,
-                    rootCount = roots.Length,
-                    totalObjects = allObjects.Length,
-                    hierarchy = sb.ToString()
-                });
             }
             catch (Exception ex)
             {
@@ -397,6 +371,56 @@ namespace clibridge4unity
             sceneView.Repaint();
 
             return Response.Success($"Framed '{target}' (size={bounds.size:F1})");
+        }
+
+        /// <summary>
+        /// FIND prefab:Assets/UI/Menu.prefab/NameFragment — load prefab asset, walk, list matches.
+        /// Supports comma-separated names (OR) in the fragment segment.
+        /// </summary>
+        private static string FindInPrefab(string scoped)
+        {
+            int prefabIdx = scoped.IndexOf(".prefab/", StringComparison.OrdinalIgnoreCase);
+            if (prefabIdx < 0)
+                return Response.Error("Usage: FIND prefab:Assets/path/Foo.prefab/NameFragment");
+
+            string assetPath = scoped.Substring(0, prefabIdx + ".prefab".Length);
+            string nameSegment = scoped.Substring(prefabIdx + ".prefab/".Length);
+            if (string.IsNullOrWhiteSpace(nameSegment))
+                return Response.Error("Name fragment required after prefab path: prefab:<asset>/<name>");
+
+            var names = nameSegment.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
+            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+            if (prefab == null)
+                return Response.Error($"Prefab not found: {assetPath}");
+
+            var matches = new List<(string path, GameObject go)>();
+            void Walk(Transform t, string path)
+            {
+                string full = string.IsNullOrEmpty(path) ? t.name : path + "/" + t.name;
+                foreach (var n in names)
+                    if (t.name.IndexOf(n, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        matches.Add((full, t.gameObject));
+                        break;
+                    }
+                for (int i = 0; i < t.childCount; i++) Walk(t.GetChild(i), full);
+            }
+            Walk(prefab.transform, "");
+
+            if (matches.Count == 0)
+                return Response.Error($"No GameObjects in {assetPath} matching [{string.Join(",", names)}]");
+
+            return Response.SuccessWithData(new
+            {
+                prefab = assetPath,
+                filter = names,
+                matches = matches.Take(50).Select(m => new
+                {
+                    path = m.path,
+                    components = m.go.GetComponents<Component>().Where(c => c != null).Select(c => c.GetType().Name).ToArray()
+                }).ToArray(),
+                truncated = matches.Count > 50
+            });
         }
 
         private static string GetPath(GameObject go)

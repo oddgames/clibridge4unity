@@ -35,14 +35,27 @@ clibridge4unity CODE_ANALYZE inherits:MonoBehaviour           # Derived types
 clibridge4unity CODE_ANALYZE attribute:SerializeField         # Attribute usage sites
 ```
 
-### Inspect Anything
+### Inspect Anything (one command, every target)
 ```bash
-clibridge4unity INSPECTOR Player                              # Scene GameObject
+clibridge4unity INSPECTOR                                     # Whole active scene hierarchy (brief)
+clibridge4unity INSPECTOR Player                              # One scene GameObject with all serialized fields
+clibridge4unity INSPECTOR Player --children                   # Scene GameObject + subtree
+clibridge4unity INSPECTOR Player --children --brief           # Subtree, components only (no fields)
+clibridge4unity INSPECTOR Player --filter Button              # Subtree filtered by GO or component name
 clibridge4unity INSPECTOR Assets/Prefabs/Enemy.prefab         # Prefab asset
+clibridge4unity INSPECTOR Assets/Prefabs/Enemy.prefab --children --brief --filter Button
 clibridge4unity INSPECTOR Assets/Data/GameConfig.asset        # ScriptableObject
 clibridge4unity INSPECTOR Assets/Materials/Metal.mat          # Material properties
 ```
-INSPECTOR uses `SerializedObject` — shows every field the Unity Inspector would show.
+INSPECTOR uses `SerializedObject` — shows every field the Unity Inspector would show. `--filter X` matches by GameObject name OR component name (substring). `--brief` skips field dumps for big trees. Trees over 300 nodes truncate with a hint.
+
+### Find by Name
+```bash
+clibridge4unity FIND Player                                   # Scene GameObject (substring match)
+clibridge4unity FIND scene:Player                             # Explicit scene scope
+clibridge4unity FIND prefab:Assets/UI/Menu.prefab/Button      # Inside a prefab asset
+clibridge4unity FIND prefab:Assets/UI/Menu.prefab/Panel,Button  # Multiple names (OR)
+```
 
 ### Discover Project Assets
 ```bash
@@ -106,8 +119,8 @@ The generated `CLAUDE.md` tells AI assistants which commands are available, when
 |----------|----------|
 | **Core** | `PING` `PROBE` `DIAG` `STATUS` `HELP` `COMPILE` `REFRESH` `LOG` `STACK_MINIMIZE` `MENU` `PROFILE` |
 | **Code** | `CODE_ANALYZE` `CODE_EXEC` `CODE_EXEC_RETURN` `TEST` |
-| **Scene** | `SCENE` `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `PLAYMODE` `SCENEVIEW` `GAMEVIEW` `WINDOWS` |
-| **Prefab** | `PREFAB_CREATE` `PREFAB_INSTANTIATE` `PREFAB_HIERARCHY` `PREFAB_SAVE` |
+| **Scene** | `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `PLAYMODE` `SCENEVIEW` `GAMEVIEW` `WINDOWS` |
+| **Prefab** | `PREFAB_CREATE` `PREFAB_INSTANTIATE` `PREFAB_SAVE` |
 | **Component** | `INSPECTOR` `COMPONENT_SET` `COMPONENT_ADD` `COMPONENT_REMOVE` |
 | **Asset** | `ASSET_SEARCH` `ASSET_DISCOVER` `ASSET_MOVE` `ASSET_COPY` `ASSET_DELETE` `ASSET_MKDIR` `ASSET_LABEL` `ASSET_RESERIALIZE` |
 | **UI** | `SCREENSHOT` |
