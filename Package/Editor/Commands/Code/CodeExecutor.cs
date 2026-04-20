@@ -687,13 +687,20 @@ namespace clibridge4unity
 
         private static CompileResult CompileWithRoslyn(string fullCode)
         {
-            // Parse source code — fill all optional params with defaults
+            // Parse source code — fill all optional params with defaults, but give the
+            // syntax tree a synthetic path so stack traces from exceptions in user code
+            // read "at Runner.Run () in Script.cs:line 42" instead of a bare IL offset.
             var parseParams = roslynParseText.GetParameters();
             var parseArgs = new object[parseParams.Length];
             parseArgs[0] = fullCode;  // string text
             parseArgs[1] = roslynParseOptions;  // CSharpParseOptions options
             for (int i = 2; i < parseArgs.Length; i++)
                 parseArgs[i] = parseParams[i].HasDefaultValue ? parseParams[i].DefaultValue : null;
+            // ParseText(text, options, path, encoding, ...) — give both a synthetic path
+            // AND a UTF-8 encoding, otherwise Emit with a PDB stream rejects the tree
+            // ("CS8055: Cannot emit debug information for a source text without encoding").
+            if (parseArgs.Length > 2) parseArgs[2] = "Script.cs";
+            if (parseArgs.Length > 3) parseArgs[3] = new UTF8Encoding(false);
             var syntaxTree = roslynParseText.Invoke(null, parseArgs);
 
             // Create typed SyntaxTree[] array for CSharpCompilation.Create
@@ -711,12 +718,17 @@ namespace clibridge4unity
                 createArgs[i] = createParams[i].HasDefaultValue ? createParams[i].DefaultValue : null;
             var compilation = roslynCreate.Invoke(null, createArgs);
 
-            // Emit to memory stream
-            using var ms = new MemoryStream();
+            // Emit to memory streams — PE + PDB. Emitting a PDB alongside lets the
+            // CLR include source line numbers in stack traces for runtime exceptions.
+            using var peMs = new MemoryStream();
+            using var pdbMs = new MemoryStream();
             var emitParams = roslynEmit.GetParameters();
             var emitArgs = new object[emitParams.Length];
-            emitArgs[0] = ms;
-            for (int i = 1; i < emitArgs.Length; i++)
+            emitArgs[0] = peMs;
+            // Emit signature: Emit(Stream peStream, Stream pdbStream = null, ...)
+            // Param 1 = pdbStream.
+            if (emitArgs.Length > 1) emitArgs[1] = pdbMs;
+            for (int i = 2; i < emitArgs.Length; i++)
                 emitArgs[i] = emitParams[i].HasDefaultValue ? emitParams[i].DefaultValue : null;
 
             var emitResult = roslynEmit.Invoke(compilation, emitArgs);
@@ -740,8 +752,8 @@ namespace clibridge4unity
                 return new CompileResult { Error = Response.Error($"Compilation failed (Roslyn):\n{string.Join("\n", errors)}") };
             }
 
-            ms.Seek(0, SeekOrigin.Begin);
-            var assembly = Assembly.Load(ms.ToArray());
+            // Load with both PE + PDB bytes so the CLR resolves sequence points at runtime.
+            var assembly = Assembly.Load(peMs.ToArray(), pdbMs.ToArray());
             return new CompileResult { Assembly = assembly };
         }
 
@@ -765,7 +777,9 @@ namespace clibridge4unity
                 GenerateInMemory = true,
                 GenerateExecutable = false,
                 TreatWarningsAsErrors = false,
-                CompilerOptions = $"-nostdlib -lib:\"{monoLibDir}\" @\"{mcsResponseFilePath}\""
+                // Emit debug info so runtime exceptions include source line numbers.
+                IncludeDebugInformation = true,
+                CompilerOptions = $"-nostdlib -lib:\"{monoLibDir}\" @\"{mcsResponseFilePath}\" -debug:full"
             };
 
             // Don't use ReferencedAssemblies — they go on the command line and hit the length limit.
