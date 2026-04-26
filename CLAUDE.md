@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.0.69)
+│   └── package.json           # UPM manifest (v1.0.70)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -291,14 +291,18 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `ASSET_LABEL path [+add -remove]` - Get/set asset labels
 - `ASSET_RESERIALIZE [paths...]` - Force re-validate and re-import assets (fixes corrupted YAML)
 
-### UI
-- `SCREENSHOT Assets/path` - Render prefab/UXML to PNG
+### Screenshot (single command, smart routing)
+- `SCREENSHOT [view]` - CLI-side window capture (default `editor`; views: `editor|scene|inspector|hierarchy|console|project|profiler`). Downscaled to max 1280px.
+- `SCREENSHOT camera [WxH]` - Server-side render of main camera (default 960x540)
+- `SCREENSHOT <GameObjectName>` - Render scene GameObject (3-view atlas for 3D)
+- `SCREENSHOT Assets/Foo.prefab` - Render prefab asset (auto-sized, capped at 1280px)
+- `SCREENSHOT Assets/UI/Foo.uxml` - Render UXML at 800x450
+- `SCREENSHOT path1.prefab path2.prefab` - Grid render (multi-asset)
 
 ### CLI-side (no Unity connection needed)
 - `SETUP` - Install UPM package + verify Unity + generate CLAUDE.md (alias: `INSTALL`)
 - `UPDATE` - Self-update CLI exe + UPM package tag (no Unity connection needed)
 - `WAKEUP` - Bring Unity to foreground (targets project via -d)
 - `WAKEUP refresh` - Bring to foreground + send Ctrl+R to force recompile
-- `SCREENSHOT [view]` - Capture Unity window screenshot
 - `DISMISS` - Close modal dialogs
 

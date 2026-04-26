@@ -1,6 +1,6 @@
 {
     "name": "au.com.oddgames.clibridge4unity",
-    "version": "1.0.69",
+    "version": "1.0.70",
     "displayName": "CLI Bridge for Unity",
     "description": "Named pipe communication bridge between CLI applications and Unity Editor for AI-assisted development",
     "unity": "2021.3",

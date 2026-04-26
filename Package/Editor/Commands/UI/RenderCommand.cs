@@ -117,13 +117,7 @@ namespace clibridge4unity
             Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(),
             "clibridge4unity_screenshots");
 
-        [BridgeCommand("SCREENSHOT_ASSET",
-            "Render prefabs, UXML, or GameObjects to PNG (called internally by SCREENSHOT)",
-            Category = "Scene",
-            Usage = "SCREENSHOT_ASSET Assets/Prefabs/MyPrefab.prefab\n" +
-                    "  SCREENSHOT_ASSET path1.prefab path2.prefab   (grid)\n" +
-                    "  Output: %TEMP%/clibridge4unity_screenshots/render_*.png",
-            RequiresMainThread = false)]
+        // Called inline by SCREENSHOT for asset paths (.prefab / .uxml). No separate command.
         public static async Task<string> Render(string data)
         {
             try
@@ -159,7 +153,7 @@ namespace clibridge4unity
                 // ── Plain text: check for multiple paths ──
                 var paths = ParseMultiplePaths(data);
                 if (paths.Count > 1)
-                    return await RenderGridAsync(paths, 0, 640, 480);
+                    return await RenderGridAsync(paths, 0, 400, 300);
 
                 // ── Single path ── (0,0 = auto-size from content bounds)
                 if (paths.Count == 1)
@@ -185,7 +179,7 @@ namespace clibridge4unity
 
             if (path.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase))
             {
-                return await RenderUxmlAsync(path, width > 0 ? width : 1280, height > 0 ? height : 720);
+                return await RenderUxmlAsync(path, width > 0 ? width : 800, height > 0 ? height : 450);
             }
 
             // Auto-detect asset type
@@ -466,6 +460,17 @@ namespace clibridge4unity
         /// then computing the enclosing bounds of all Graphic components. Adds padding.
         /// Returns (width, height) in pixels. Falls back to 1920x1080 if measurement fails.
         /// </summary>
+        // Cap any render dimension to keep PNG output manageable (4K UIs → 1280-max).
+        const int MAX_RENDER_DIM = 1280;
+        static void ClampRenderSize(ref int width, ref int height)
+        {
+            if (width <= 0 || height <= 0) return;
+            if (width <= MAX_RENDER_DIM && height <= MAX_RENDER_DIM) return;
+            float scale = Mathf.Min((float)MAX_RENDER_DIM / width, (float)MAX_RENDER_DIM / height);
+            width = Mathf.Max(1, Mathf.RoundToInt(width * scale));
+            height = Mathf.Max(1, Mathf.RoundToInt(height * scale));
+        }
+
         static (int w, int h) MeasureUIPrefabSize(GameObject prefab)
         {
             var canvasGo = new GameObject("__MEASURE_CANVAS__");
@@ -547,9 +552,9 @@ namespace clibridge4unity
                 h = Mathf.CeilToInt(h * scale);
             }
 
-            // Clamp to reasonable bounds
-            w = Mathf.Clamp(w, 200, 3840);
-            h = Mathf.Clamp(h, 200, 2160);
+            // Clamp to reasonable bounds (kept small to limit PNG size)
+            w = Mathf.Clamp(w, 200, 1280);
+            h = Mathf.Clamp(h, 200, 1280);
             return (w, h);
         }
 
@@ -584,10 +589,11 @@ namespace clibridge4unity
                         }
                         else
                         {
-                            width = 1920; height = 1080;
+                            width = 1280; height = 720;
                         }
                     }
                 }
+                ClampRenderSize(ref width, ref height);
                 return RenderUIPrefab(prefab, prefabPath, width, height);
             }
 
@@ -601,10 +607,12 @@ namespace clibridge4unity
                 {
                     (width, height) = MeasureUIPrefabSize(prefab);
                 }
+                ClampRenderSize(ref width, ref height);
                 return RenderUIPrefabWithTempCanvas(prefab, prefabPath, width, height);
             }
 
-            if (width <= 0 || height <= 0) { width = 1024; height = 1024; }
+            if (width <= 0 || height <= 0) { width = 640; height = 640; }
+            ClampRenderSize(ref width, ref height);
             return Render3DPrefab(prefab, prefabPath, width, height);
         }
 

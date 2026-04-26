@@ -2,7 +2,8 @@
     "name": "clibridge4unity.Commands.Scene",
     "rootNamespace": "clibridge4unity.Commands",
     "references": [
-        "clibridge4unity.Core"
+        "clibridge4unity.Core",
+        "clibridge4unity.Commands.UI"
     ],
     "includePlatforms": [
         "Editor"

@@ -880,6 +880,13 @@ namespace clibridge4unity
             sb.AppendLine("using System.Linq;");
             sb.AppendLine("using UnityEngine;");
             sb.AppendLine("using UnityEditor;");
+            // Unity disambiguation: these names collide between System and UnityEngine.
+            // Alias them to the Unity side — that's what nearly every Unity script means.
+            // Users who want the System variant can qualify (e.g. `System.Random`) or use
+            // the lowercase `object` keyword for System.Object.
+            sb.AppendLine("using Object = UnityEngine.Object;");
+            sb.AppendLine("using Random = UnityEngine.Random;");
+            sb.AppendLine("using Debug  = UnityEngine.Debug;");
 
             foreach (var u in customUsings)
                 sb.AppendLine(u);

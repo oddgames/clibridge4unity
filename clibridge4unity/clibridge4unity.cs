@@ -2176,6 +2176,7 @@ class Program
         public bool MatchedByCommandLine; // true if project matched via -projectPath arg, not window title
         public HashSet<uint> Pids = new HashSet<uint>();  // Unity process IDs for this project
         public List<UnityWorkspaceInfo> AllWorkspaces = new List<UnityWorkspaceInfo>(); // every Unity instance on this machine
+        public string EditorLogPath;  // per-instance Editor.log (from -logFile arg or header-matched scan)
     }
 
     /// <summary>
@@ -2430,6 +2431,20 @@ class Program
                             foundProject = true;
                             info.MatchedByCommandLine = true;
                         }
+
+                        // Extract -logFile path for this specific instance (authoritative per-workspace log)
+                        if (info.EditorLogPath == null)
+                        {
+                            var logMatch = System.Text.RegularExpressions.Regex.Match(
+                                cmdLine, @"-logFile\s+(""([^""]+)""|(\S+))",
+                                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                            if (logMatch.Success)
+                            {
+                                string logPath = logMatch.Groups[2].Success ? logMatch.Groups[2].Value : logMatch.Groups[3].Value;
+                                if (logPath != "-" && !string.IsNullOrWhiteSpace(logPath))
+                                    info.EditorLogPath = Path.GetFullPath(logPath);
+                            }
+                        }
                     }
                 }
             }
@@ -2538,7 +2553,7 @@ class Program
     /// <summary>
     /// Read recent errors from two sources (no pipe needed):
     /// 1. Bridge's own log file (per-project, in %TEMP%)
-    /// 2. Global Unity Editor.log (fallback, filtered by project path)
+    /// 2. Per-instance Editor.log — scans all Editor*.log files to find the one for this project
     /// </summary>
     static void TailProjectErrors(UnityProcessInfo info, string projectPath)
     {
@@ -2568,21 +2583,20 @@ class Program
         }
         catch { }
 
-        // Source 2: Global Editor.log — only if bridge log had nothing and project matches
+        // Source 2: Per-instance Editor.log — prefer -logFile path, else find newest file whose header matches
         if (info.RecentErrors.Count == 0)
         {
             try
             {
-                string editorLog = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "Unity", "Editor", "Editor.log");
-                if (!File.Exists(editorLog)) return;
+                string editorLog = info.EditorLogPath;
 
-                // Verify this log is for our project (check header for -projectPath)
-                string header = ReadFileHead(editorLog, 4096);
-                string absProject = Path.GetFullPath(projectPath).Replace("/", "\\").TrimEnd('\\');
-                if (!header.Contains(absProject, StringComparison.OrdinalIgnoreCase))
-                    return; // Log is for a different project
+                if (editorLog == null || !File.Exists(editorLog))
+                {
+                    editorLog = FindEditorLogForProject(projectPath);
+                    if (editorLog != null) info.EditorLogPath = editorLog;
+                }
+
+                if (editorLog == null || !File.Exists(editorLog)) return;
 
                 // Tail last ~256KB and scan for compile errors
                 string tail = TailFile(editorLog, 256 * 1024);
@@ -2595,6 +2609,44 @@ class Program
             }
             catch { }
         }
+    }
+
+    /// <summary>
+    /// Find the Unity Editor log file for a given project by scanning the standard log dir
+    /// and matching each file's header against the project path. Prefers the most recently
+    /// modified match (that's the currently-active session). Excludes user-made copies.
+    /// </summary>
+    static string FindEditorLogForProject(string projectPath)
+    {
+        try
+        {
+            string editorLogDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Unity", "Editor");
+            if (!Directory.Exists(editorLogDir)) return null;
+
+            string absProject = Path.GetFullPath(projectPath).Replace("/", "\\").TrimEnd('\\');
+
+            // Unity's real log names: Editor.log, Editor-prev.log, Editor-1.log, Editor-2.log...
+            // User backups (e.g. "Editor - Copy.log") contain spaces — exclude them.
+            var candidates = Directory.EnumerateFiles(editorLogDir, "Editor*.log")
+                .Where(f => !Path.GetFileName(f).Contains(' '))
+                .Select(f => new FileInfo(f))
+                .OrderByDescending(fi => fi.LastWriteTimeUtc);
+
+            foreach (var fi in candidates)
+            {
+                try
+                {
+                    string header = ReadFileHead(fi.FullName, 4096);
+                    if (header.Contains(absProject, StringComparison.OrdinalIgnoreCase))
+                        return fi.FullName;
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return null;
     }
 
     static bool IsCompileError(string line)
@@ -3117,20 +3169,55 @@ class Program
         DeleteDC(memDC);
         ReleaseDC(hwnd, winDC);
 
+        // Downscale if larger than max dimension to keep PNGs small (4K → ~1280px)
+        const int MAX_DIM = 1280;
+        int outW = width, outH = height;
+        byte[] outPixels = pixels;
+        if (width > MAX_DIM || height > MAX_DIM)
+        {
+            float scale = Math.Min((float)MAX_DIM / width, (float)MAX_DIM / height);
+            outW = Math.Max(1, (int)(width * scale));
+            outH = Math.Max(1, (int)(height * scale));
+            outPixels = DownscaleBgra(pixels, width, height, outW, outH);
+        }
+
         // Save PNG
         string outputDir = Path.Combine(
             Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(),
             "clibridge4unity_screenshots");
         Directory.CreateDirectory(outputDir);
         string outputPath = Path.Combine(outputDir, "render_editor.png");
-        WritePng(outputPath, width, height, pixels);
+        WritePng(outputPath, outW, outH, outPixels);
 
         Console.WriteLine($"Captured editor");
-        Console.WriteLine($"size: {width}x{height}");
+        Console.WriteLine($"size: {outW}x{outH}");
         Console.WriteLine($"output: {outputPath}");
 
-        ShowNotification("Screenshot", $"Captured {width}x{height}", outputPath);
+        ShowNotification("Screenshot", $"Captured {outW}x{outH}", outputPath);
         return EXIT_SUCCESS;
+    }
+
+    /// <summary>Nearest-neighbor downscale of a top-down BGRA buffer.</summary>
+    static byte[] DownscaleBgra(byte[] src, int srcW, int srcH, int dstW, int dstH)
+    {
+        var dst = new byte[dstW * dstH * 4];
+        for (int y = 0; y < dstH; y++)
+        {
+            int srcY = (int)((long)y * srcH / dstH);
+            int srcRow = srcY * srcW * 4;
+            int dstRow = y * dstW * 4;
+            for (int x = 0; x < dstW; x++)
+            {
+                int srcX = (int)((long)x * srcW / dstW);
+                int s = srcRow + srcX * 4;
+                int d = dstRow + x * 4;
+                dst[d]     = src[s];
+                dst[d + 1] = src[s + 1];
+                dst[d + 2] = src[s + 2];
+                dst[d + 3] = src[s + 3];
+            }
+        }
+        return dst;
     }
 
     /// <summary>Copy the most recent screenshot output to a user-specified path (--output flag).</summary>

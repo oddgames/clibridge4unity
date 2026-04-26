@@ -173,12 +173,12 @@ namespace clibridge4unity
             }
         }
 
-        [BridgeCommand("SCREENSHOT", "Smart screenshot — captures camera, GameObjects, prefabs, or UXML",
+        [BridgeCommand("SCREENSHOT", "Smart screenshot — camera, GameObjects, prefabs, or UXML",
             Category = "Scene",
-            Usage = "SCREENSHOT camera [WxH]       - Render main camera (default 1280x720)\n" +
-                    "  SCREENSHOT Player              - Find GameObject, render from multiple angles\n" +
-                    "  SCREENSHOT Assets/Prefabs/X.prefab - Render prefab asset\n" +
-                    "  SCREENSHOT Assets/UI/X.uxml    - Render UXML at 1280x720",
+            Usage = "SCREENSHOT camera [WxH]            - Render main camera (default 960x540)\n" +
+                    "  SCREENSHOT Player                  - Find GameObject, render from multiple angles\n" +
+                    "  SCREENSHOT Assets/Prefabs/X.prefab - Render prefab asset (auto-sized, capped at 1280px)\n" +
+                    "  SCREENSHOT Assets/UI/X.uxml        - Render UXML at 800x450",
             RequiresMainThread = false)]
         public static async Task<string> Screenshot(string data)
         {
@@ -188,7 +188,7 @@ namespace clibridge4unity
                     data = "camera";
 
                 string arg = data.Trim();
-                int width = 1280, height = 720;
+                int width = 960, height = 540;
 
                 // Strip --output flag (handled CLI-side, ignore here)
                 int outIdx = arg.IndexOf("--output ", System.StringComparison.OrdinalIgnoreCase);
@@ -218,11 +218,11 @@ namespace clibridge4unity
                     return await CommandRegistry.RunOnMainThreadAsync(() =>
                         RenderCamera(width, height, outputDir));
 
-                // Asset path: delegate to SCREENSHOT_ASSET (handles its own main thread)
+                // Asset path → inline RenderCommand pipeline (handles its own main thread)
                 if (target.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) ||
                     target.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
                 {
-                    return await CommandRegistry.ExecuteCommand("SCREENSHOT_ASSET", target, null, default);
+                    return await RenderCommand.Render(target);
                 }
 
                 // GameObject by name (needs main thread)

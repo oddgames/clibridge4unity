@@ -492,7 +492,7 @@ namespace clibridge4unity
             }
 
             // Capture log position before command execution
-            // Skip for: LOG itself, lightweight commands, and internal calls (pipe == null, e.g. SCREENSHOT→SCREENSHOT_ASSET)
+            // Skip for: LOG itself, lightweight commands, and internal calls (pipe == null)
             long logIdBefore = 0;
             bool captureLogs = pipe != null && name != "LOG" && name != "PING" && name != "HELP" && name != "PROBE" && name != "DIAG" && GetLastLogId != null;
             if (captureLogs)
