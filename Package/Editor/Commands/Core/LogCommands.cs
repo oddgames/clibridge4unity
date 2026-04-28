@@ -176,8 +176,9 @@ namespace clibridge4unity
                 try
                 {
                     int count = (int)getCount.Invoke(null, null);
-                    // Only scan recent entries (last 50) to avoid showing ancient errors
-                    for (int i = count - 1; i >= 0 && i >= count - 50; i--)
+                    // Scan the entire console — compile errors can be buried by warnings/info
+                    // and we'd rather block execution one false alarm than miss a real one.
+                    for (int i = count - 1; i >= 0; i--)
                     {
                         var entry = System.Activator.CreateInstance(logEntryType);
                         if ((bool)getEntry.Invoke(null, new object[] { i, entry }))
@@ -284,13 +285,30 @@ namespace clibridge4unity
         /// <summary>
         /// Returns formatted log entries since the given ID (for appending to command responses).
         /// Only includes errors/exceptions — warnings and info are noise for LLM consumers.
+        /// Suppresses duplicates of errors that were already in the log before the command ran:
+        /// Unity re-emits compile errors on many internal events, so they would otherwise pollute
+        /// every command's response with stale, already-known errors.
         /// </summary>
         public static string GetLogsSinceFormatted(long sinceId, int maxLines = 5)
         {
             FlushPendingWrites();
-            var entries = ReadLogFile()
-                .Where(e => e.Id > sinceId &&
-                       (e.Type == LogType.Error || e.Type == LogType.Exception || e.Type == LogType.Assert))
+            var all = ReadLogFile();
+
+            // Set of error messages that already existed in the log when the command started.
+            // Anything new with the same message text is a re-emission, not a fresh error.
+            var seenBefore = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < all.Count; i++)
+            {
+                var e = all[i];
+                if (e.Id <= sinceId
+                    && (e.Type == LogType.Error || e.Type == LogType.Exception || e.Type == LogType.Assert))
+                    seenBefore.Add(e.Message ?? "");
+            }
+
+            var entries = all
+                .Where(e => e.Id > sinceId
+                         && (e.Type == LogType.Error || e.Type == LogType.Exception || e.Type == LogType.Assert)
+                         && !seenBefore.Contains(e.Message ?? ""))
                 .ToList();
             if (entries.Count == 0) return null;
 

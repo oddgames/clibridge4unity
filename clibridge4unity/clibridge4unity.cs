@@ -994,8 +994,8 @@ class Program
             }
 
             string viewLower = view.ToLowerInvariant();
-            // "game" routes to server (can create the tab + render camera)
-            // Other known views use fast CLI-side Win32 capture
+            // "camera", "game", "gameview" route to server (need Unity to render).
+            // Other known views use fast CLI-side Win32 capture of the editor window.
             string[] cliViews = { "", "editor", "scene", "inspector", "hierarchy", "console", "project", "profiler" };
             if (Array.Exists(cliViews, v => v == viewLower))
             {
@@ -1229,8 +1229,10 @@ class Program
             Console.WriteLine($"Unity {requiredVersion} launched for {projectName}");
             Console.WriteLine("Waiting for bridge to start...");
 
-            // Wait for bridge pipe to become available
+            // Wait for bridge pipe to become available. While waiting, also detect Safe Mode
+            // (compile errors block bridge startup), so we can fail fast with a clear message.
             string pipeName = GeneratePipeName(projectPath);
+            bool safeModeRecoveryAttempted = false;
             for (int i = 0; i < 60; i++) // up to 60 seconds
             {
                 System.Threading.Thread.Sleep(2000);
@@ -1242,6 +1244,32 @@ class Program
                     return EXIT_SUCCESS;
                 }
                 catch { }
+
+                // Safe Mode check — only inspect THIS project's Unity window
+                var info = DetectUnityProcess(projectPath);
+                if (info.TargetedWindowTitle != null
+                    && info.TargetedWindowTitle.Contains("SAFE MODE", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!safeModeRecoveryAttempted)
+                    {
+                        Console.Error.WriteLine();
+                        Console.Error.WriteLine($"Unity for '{projectName}' launched in Safe Mode (compile errors).");
+                        Console.Error.WriteLine("  Attempting recompile (Ctrl+R) to clear it...");
+                        safeModeRecoveryAttempted = true;
+                        HandleWakeup(projectPath, sendRefresh: true);
+                        // Give Unity ~10s to recompile and exit safe mode
+                        System.Threading.Thread.Sleep(10000);
+                        continue;
+                    }
+
+                    // Recompile didn't clear it — compile errors are real, give up
+                    Console.Error.WriteLine();
+                    Console.Error.WriteLine($"Error: Unity for '{projectName}' is stuck in Safe Mode after recompile attempt.");
+                    Console.Error.WriteLine("       Compile errors are blocking the bridge from starting.");
+                    Console.Error.WriteLine("       Action: open Unity Editor manually, fix the compile errors,");
+                    Console.Error.WriteLine("               then click 'Exit Safe Mode' (or rerun OPEN).");
+                    return EXIT_COMMAND_ERROR;
+                }
 
                 if (i % 5 == 4)
                     Console.Error.Write(".");
@@ -1990,21 +2018,50 @@ class Program
         sb.AppendLine("--- Unity Diagnostics ---");
 
         var info = DetectUnityProcess(projectPath);
+        string targetedProjectName = Path.GetFileName(Path.GetFullPath(projectPath));
 
-        // Process state
-        bool isSafeMode = info.OpenProjects.Any(t => t.Contains("SAFE MODE", StringComparison.OrdinalIgnoreCase));
-        sb.AppendLine($"state: {(isSafeMode ? "SafeMode" : info.State.ToString())}");
-        if (info.OpenProjects.Count > 0)
+        // Safe mode applies ONLY to the Unity instance for the targeted project.
+        // Other Unity instances on this machine (different projects) being in safe mode is irrelevant here.
+        bool targetedInSafeMode = info.TargetedWindowTitle != null
+            && info.TargetedWindowTitle.Contains("SAFE MODE", StringComparison.OrdinalIgnoreCase);
+
+        sb.AppendLine($"targetedProject: {targetedProjectName}");
+        sb.AppendLine($"state: {(targetedInSafeMode ? "SafeMode" : info.State.ToString())}");
+
+        if (info.TargetedWindowTitle != null)
         {
-            sb.AppendLine($"unityWindows ({info.OpenProjects.Count}):");
-            foreach (var title in info.OpenProjects)
-                sb.AppendLine($"  - {title}");
+            sb.AppendLine($"targetedUnityWindow: {info.TargetedWindowTitle}");
         }
-        if (isSafeMode)
+
+        // Show other Unity instances separately so it's obvious they aren't ours
+        var otherWindows = info.OpenProjects
+            .Where(t => t != info.TargetedWindowTitle)
+            .ToList();
+        if (otherWindows.Count > 0)
+        {
+            sb.AppendLine($"otherUnityInstances ({otherWindows.Count}, NOT this project):");
+            foreach (var title in otherWindows)
+            {
+                bool otherSafe = title.Contains("SAFE MODE", StringComparison.OrdinalIgnoreCase);
+                sb.AppendLine($"  - {title}{(otherSafe ? "   [in SafeMode — unrelated to this project]" : "")}");
+            }
+        }
+
+        if (targetedInSafeMode)
         {
             sb.AppendLine("--- SAFE MODE ---");
-            sb.AppendLine("Unity is in Safe Mode due to compile errors.");
+            sb.AppendLine($"Unity for project '{targetedProjectName}' is in Safe Mode due to compile errors.");
             sb.AppendLine("action: Fix compile errors in Unity Editor, exit Safe Mode, then retry.");
+            return sb.ToString();
+        }
+
+        // Targeted project's Unity isn't running — make sure the AI doesn't conflate this with safe mode
+        if (info.State == UnityProcessState.NotRunning || info.State == UnityProcessState.DifferentProject)
+        {
+            sb.AppendLine($"note: Unity is NOT currently running for '{targetedProjectName}'.");
+            if (otherWindows.Any(t => t.Contains("SAFE MODE", StringComparison.OrdinalIgnoreCase)))
+                sb.AppendLine("      (One of the other Unity instances above is in Safe Mode, but that is a different project — not relevant here.)");
+            sb.AppendLine($"action: Open '{projectPath}' in Unity, then retry.");
             return sb.ToString();
         }
 
@@ -2168,7 +2225,8 @@ class Program
     {
         public UnityProcessState State;
         public string ImportStatus;       // e.g. "Importing - Compress 50% (busy for 02:04)..."
-        public List<string> OpenProjects = new List<string>();
+        public List<string> OpenProjects = new List<string>(); // titles of ALL Unity windows on this machine — not just this project
+        public string TargetedWindowTitle;  // the window title that matches THIS project (null if not found)
         public List<DialogInfo> Dialogs = new List<DialogInfo>(); // dialog windows with buttons/text
         public List<string> RecentErrors = new List<string>();  // from Editor.log
         public string HeartbeatState;     // from heartbeat file: ready, compiling, reloading, etc.
@@ -2407,6 +2465,7 @@ class Program
                         {
                             foundProject = true;
                             unityPids.Add((uint)proc.Id);
+                            info.TargetedWindowTitle = proc.MainWindowTitle;
                         }
                     }
                 }
@@ -2797,10 +2856,12 @@ class Program
         md.AppendLine();
         md.AppendLine("- `SCREENSHOT` (no args) — CLI-side window capture of the whole Unity editor. No pipe needed; works while Unity is busy/compiling.");
         md.AppendLine("- `SCREENSHOT editor|scene|inspector|hierarchy|console|project|profiler` — capture that editor view via Win32 PrintWindow.");
-        md.AppendLine("- `SCREENSHOT camera [WxH]` — server-side render of `Camera.main` (default 960x540).");
+        md.AppendLine("- `SCREENSHOT camera [WxH]` — server-side render of `Camera.main` only (default 960x540). **No overlays** — OnGUI / runtime UI Toolkit / IMGUI debug aren't drawn.");
+        md.AppendLine("- `SCREENSHOT gameview` — captures the GameView tab (via `GrabPixels`), so OnGUI, runtime `UIDocument`, and the GameView chrome all show up. Use this to see what the player actually sees.");
         md.AppendLine("- `SCREENSHOT Player` — find a scene GameObject by name, render it. 3D objects → 3-view atlas (front|right|top). UI under a Canvas → render that Canvas.");
         md.AppendLine("- `SCREENSHOT Assets/Foo.prefab` — render a prefab asset. UI prefabs auto-size from RectTransform/Canvas; 3D prefabs render an 8-angle turntable.");
-        md.AppendLine("- `SCREENSHOT Assets/UI/Foo.uxml` — render a UXML file at 800x450 via an offscreen EditorWindow.");
+        md.AppendLine("- `SCREENSHOT Assets/UI/Foo.uxml` — render a UXML file at 800x450 via an offscreen EditorWindow. UXML and its `.uss`/`.tss` deps are force-reimported first, so on-disk edits show up immediately.");
+        md.AppendLine("- `SCREENSHOT Assets/UI/Foo.uxml --el #card-grid` — render only a sub-element. `--el` accepts `#name`, `.class`, or a bare name (tries name then class).");
         md.AppendLine("- `SCREENSHOT a.prefab b.prefab c.prefab` — multi-asset grid render (one image, labeled cells).");
         md.AppendLine("- `SCREENSHOT --output path/file.png ...` — also copy the result to a chosen path.");
         md.AppendLine();

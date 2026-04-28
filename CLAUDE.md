@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.0.71)
+│   └── package.json           # UPM manifest (v1.0.72)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -293,10 +293,12 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 
 ### Screenshot (single command, smart routing)
 - `SCREENSHOT [view]` - CLI-side window capture (default `editor`; views: `editor|scene|inspector|hierarchy|console|project|profiler`). Downscaled to max 1280px.
-- `SCREENSHOT camera [WxH]` - Server-side render of main camera (default 960x540)
+- `SCREENSHOT camera [WxH]` - Raw camera render only, **no overlays** (default 960x540)
+- `SCREENSHOT gameview` - GameView tab incl. OnGUI, runtime UI Toolkit, and chrome (use this to see what the player sees)
 - `SCREENSHOT <GameObjectName>` - Render scene GameObject (3-view atlas for 3D)
 - `SCREENSHOT Assets/Foo.prefab` - Render prefab asset (auto-sized, capped at 1280px)
-- `SCREENSHOT Assets/UI/Foo.uxml` - Render UXML at 800x450
+- `SCREENSHOT Assets/UI/Foo.uxml` - Render UXML at 800x450 (force-reimports the UXML + its .uss/.tss deps first)
+- `SCREENSHOT Assets/UI/Foo.uxml --el #card-grid` - Render only a sub-element (--el: `#name`, `.class`, or bare name)
 - `SCREENSHOT path1.prefab path2.prefab` - Grid render (multi-asset)
 
 ### CLI-side (no Unity connection needed)

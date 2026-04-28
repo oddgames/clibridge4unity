@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -173,12 +174,15 @@ namespace clibridge4unity
             }
         }
 
-        [BridgeCommand("SCREENSHOT", "Smart screenshot — camera, GameObjects, prefabs, or UXML",
+        [BridgeCommand("SCREENSHOT", "Smart screenshot — camera, gameview, GameObjects, prefabs, or UXML",
             Category = "Scene",
-            Usage = "SCREENSHOT camera [WxH]            - Render main camera (default 960x540)\n" +
-                    "  SCREENSHOT Player                  - Find GameObject, render from multiple angles\n" +
-                    "  SCREENSHOT Assets/Prefabs/X.prefab - Render prefab asset (auto-sized, capped at 1280px)\n" +
-                    "  SCREENSHOT Assets/UI/X.uxml        - Render UXML at 800x450",
+            Usage = "SCREENSHOT camera [WxH]                 - Raw camera render, NO overlays (default 960x540)\n" +
+                    "  SCREENSHOT gameview                     - GameView tab including OnGUI / UI Toolkit / chrome\n" +
+                    "  SCREENSHOT Player                       - Find GameObject, render from multiple angles\n" +
+                    "  SCREENSHOT Assets/Prefabs/X.prefab      - Render prefab asset (auto-sized, capped at 1280px)\n" +
+                    "  SCREENSHOT Assets/UI/X.uxml             - Render UXML at 800x450\n" +
+                    "  SCREENSHOT Assets/UI/X.uxml --el #card  - Render only the matching sub-element\n" +
+                    "                                            (--el supports #name, .class, or bare name)",
             RequiresMainThread = false)]
         public static async Task<string> Screenshot(string data)
         {
@@ -212,11 +216,17 @@ namespace clibridge4unity
                 string outputDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "clibridge4unity_screenshots");
                 System.IO.Directory.CreateDirectory(outputDir);
 
-                // Camera / game render (needs main thread)
-                if (target.Equals("camera", StringComparison.OrdinalIgnoreCase) ||
-                    target.Equals("game", StringComparison.OrdinalIgnoreCase))
+                // Camera-only render (no overlays)
+                if (target.Equals("camera", StringComparison.OrdinalIgnoreCase))
                     return await CommandRegistry.RunOnMainThreadAsync(() =>
                         RenderCamera(width, height, outputDir));
+
+                // GameView tab (includes OnGUI, runtime UI Toolkit, chrome)
+                // 'game' kept as alias for backwards compatibility — 'gameview' is canonical.
+                if (target.Equals("gameview", StringComparison.OrdinalIgnoreCase) ||
+                    target.Equals("game", StringComparison.OrdinalIgnoreCase))
+                    return await CommandRegistry.RunOnMainThreadAsync(() =>
+                        RenderGameView(outputDir));
 
                 // Asset path → inline RenderCommand pipeline (handles its own main thread)
                 if (target.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) ||
@@ -285,6 +295,16 @@ namespace clibridge4unity
             if (go == null)
                 return Response.ErrorSceneNotFound(name);
 
+            // Heads-up if the GameObject (or an ancestor) is disabled — render will produce blank/empty output
+            if (!go.activeInHierarchy)
+            {
+                string reason = !go.activeSelf
+                    ? $"'{name}' is disabled (activeSelf=false)"
+                    : $"'{name}' is in a disabled hierarchy (a parent has activeSelf=false)";
+                return Response.Error(
+                    $"{reason} — enable it in the scene before screenshotting, or it will render as empty.");
+            }
+
             // Detect type: UI (Canvas/RectTransform) vs 3D (Renderer)
             var rectTransform = go.GetComponent<RectTransform>();
             if (rectTransform != null && go.GetComponentInParent<Canvas>() != null)
@@ -297,6 +317,10 @@ namespace clibridge4unity
             var renderer = go.GetComponentInChildren<Renderer>();
             if (renderer == null)
                 return Response.Error($"GameObject '{name}' has no Renderer — nothing to capture");
+            // All renderers disabled? Bounds will be (0,0,0) and image will be empty.
+            var allRenderers = go.GetComponentsInChildren<Renderer>(includeInactive: false);
+            if (allRenderers.Length == 0 || allRenderers.All(r => !r.enabled))
+                return Response.Error($"GameObject '{name}' has no enabled Renderers — would render empty. Enable a Renderer (or the GameObject) first.");
 
             var bounds = renderer.bounds;
             foreach (var r in go.GetComponentsInChildren<Renderer>())
@@ -360,6 +384,74 @@ namespace clibridge4unity
                 rt.Release();
                 UnityEngine.Object.DestroyImmediate(camGO);
                 UnityEngine.Object.DestroyImmediate(atlas);
+                UnityEngine.Object.DestroyImmediate(rt);
+            }
+        }
+
+        private static string RenderGameView(string outputDir)
+        {
+            var gameView = GetGameView(create: true);
+            if (gameView == null)
+                return Response.Error("GameView window not available");
+
+            // Force focus + repaint so GameView shows current frame even if Unity is backgrounded
+            gameView.Focus();
+            gameView.Repaint();
+
+            var parentField = typeof(EditorWindow).GetField("m_Parent",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var parent = parentField?.GetValue(gameView);
+            if (parent == null)
+                return Response.Error("GameView has no parent view (window not docked yet)");
+
+            // RepaintImmediately on the host view forces a fresh frame into the backing buffer
+            var repaintImm = parent.GetType().GetMethod("RepaintImmediately",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            repaintImm?.Invoke(parent, null);
+
+            var grabMethod = parent.GetType().GetMethod("GrabPixels",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            if (grabMethod == null)
+                return Response.Error("GrabPixels reflection failed (Unity API changed?)");
+
+            var rect = gameView.position;
+            float dpi = EditorGUIUtility.pixelsPerPoint;
+            int w = Mathf.RoundToInt(rect.width * dpi);
+            int h = Mathf.RoundToInt(rect.height * dpi);
+            if (w <= 0 || h <= 0)
+                return Response.Error($"GameView has invalid size: {w}x{h}");
+
+            var rt = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
+            rt.Create();
+            try
+            {
+                grabMethod.Invoke(parent, new object[] { rt, new Rect(0, 0, w, h) });
+
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                var tex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+                tex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                tex.Apply();
+                RenderTexture.active = prev;
+
+                // GrabPixels writes top-down; Texture2D is bottom-up — flip vertically
+                var pixels = tex.GetPixels32();
+                var flipped = new Color32[pixels.Length];
+                for (int y = 0; y < h; y++)
+                    System.Array.Copy(pixels, y * w, flipped, (h - 1 - y) * w, w);
+                tex.SetPixels32(flipped);
+                tex.Apply();
+
+                string path = System.IO.Path.Combine(outputDir, "gameview.png");
+                System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
+                UnityEngine.Object.DestroyImmediate(tex);
+
+                return Response.Success(
+                    $"GameView render ({w}x{h}, includes overlays)\noutput: {path}");
+            }
+            finally
+            {
+                rt.Release();
                 UnityEngine.Object.DestroyImmediate(rt);
             }
         }

@@ -125,6 +125,17 @@ namespace clibridge4unity
                 Directory.CreateDirectory(OutputDir);
                 data = data?.Trim() ?? "";
 
+                // ── Extract --el <selector> flag (UXML sub-element capture) ──
+                string elSelector = null;
+                int elIdx = data.IndexOf("--el ", StringComparison.OrdinalIgnoreCase);
+                if (elIdx >= 0)
+                {
+                    string after = data.Substring(elIdx + "--el ".Length).TrimStart();
+                    int spaceIdx = after.IndexOf(' ');
+                    elSelector = (spaceIdx > 0 ? after.Substring(0, spaceIdx) : after).Trim();
+                    data = (data.Substring(0, elIdx) + (spaceIdx > 0 ? after.Substring(spaceIdx) : "")).Trim();
+                }
+
                 // ── JSON input ──
                 if (data.StartsWith('{') || data.StartsWith('['))
                 {
@@ -147,7 +158,7 @@ namespace clibridge4unity
                                ?? json["gameObject"]?.ToString();
                     if (path == null)
                         return Response.Error("Missing prefab or gameObject");
-                    return await RenderSingleAsync(path, width, height);
+                    return await RenderSingleAsync(path, width, height, elSelector ?? json["el"]?.ToString());
                 }
 
                 // ── Plain text: check for multiple paths ──
@@ -157,7 +168,7 @@ namespace clibridge4unity
 
                 // ── Single path ── (0,0 = auto-size from content bounds)
                 if (paths.Count == 1)
-                    return await RenderSingleAsync(paths[0], 0, 0);
+                    return await RenderSingleAsync(paths[0], 0, 0, elSelector);
 
                 return Response.Error("Usage: RENDER <path> [path2 path3 ...]");
             }
@@ -169,7 +180,7 @@ namespace clibridge4unity
 
         // ───────────────────── Single item render ─────────────────────
 
-        static async Task<string> RenderSingleAsync(string path, int width, int height)
+        static async Task<string> RenderSingleAsync(string path, int width, int height, string elSelector = null)
         {
             if (path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
             {
@@ -179,7 +190,10 @@ namespace clibridge4unity
 
             if (path.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase))
             {
-                return await RenderUxmlAsync(path, width > 0 ? width : 800, height > 0 ? height : 450);
+                // Default a bit bigger when targeting a sub-element so we have room to crop.
+                int defaultW = elSelector != null ? 1280 : 800;
+                int defaultH = elSelector != null ? 720 : 450;
+                return await RenderUxmlAsync(path, width > 0 ? width : defaultW, height > 0 ? height : defaultH, elSelector);
             }
 
             // Auto-detect asset type
@@ -201,7 +215,7 @@ namespace clibridge4unity
         /// GrabPixels captures the window's internal backing buffer directly —
         /// no screen capture, no TOPMOST, works even if the window is behind other apps.
         /// </summary>
-        static async Task<string> RenderUxmlAsync(string uxmlPath, int width, int height)
+        static async Task<string> RenderUxmlAsync(string uxmlPath, int width, int height, string elSelector = null)
         {
             // Force-reimport the UXML and its USS dependencies so on-disk edits show up
             // immediately — without this, AssetDatabase serves the previously imported version.
@@ -230,6 +244,7 @@ namespace clibridge4unity
             }
 
             EditorWindow window = null;
+            VisualElement instantiatedRoot = null;
 
             try
             {
@@ -245,6 +260,7 @@ namespace clibridge4unity
                     root.style.width = Length.Percent(100);
                     root.style.height = Length.Percent(100);
                     window.rootVisualElement.Add(root);
+                    instantiatedRoot = root;
                     window.Repaint();
 
                     return 0;
@@ -283,30 +299,54 @@ namespace clibridge4unity
                     {
                         grabMethod?.Invoke(parent, new object[] { rt, new Rect(0, 0, w, h) });
 
+                        // If a sub-element selector was given, find it and crop to its bounds.
+                        // worldBound is in window-relative pixels (pre-DPI), so scale to texture coords.
+                        int cropX = 0, cropY = 0, cropW = w, cropH = h;
+                        string cropNote = "";
+                        if (!string.IsNullOrEmpty(elSelector) && instantiatedRoot != null)
+                        {
+                            var el = ResolveSelector(instantiatedRoot, elSelector);
+                            if (el == null)
+                                return Response.Error($"Element not found: {elSelector}");
+                            var wb = el.worldBound;
+                            if (float.IsNaN(wb.width) || wb.width <= 0 || wb.height <= 0)
+                                return Response.Error(
+                                    $"Element '{elSelector}' has zero size — likely hidden (display:none, visibility:hidden, or a disabled parent). Make it visible in the UXML/USS first.");
+                            cropX = Mathf.Clamp(Mathf.FloorToInt(wb.xMin * dpi), 0, w - 1);
+                            cropY = Mathf.Clamp(Mathf.FloorToInt(wb.yMin * dpi), 0, h - 1);
+                            cropW = Mathf.Clamp(Mathf.CeilToInt(wb.width * dpi), 1, w - cropX);
+                            cropH = Mathf.Clamp(Mathf.CeilToInt(wb.height * dpi), 1, h - cropY);
+                            cropNote = $" → element '{elSelector}' ({cropW}x{cropH})";
+                        }
+
                         // Read pixels and fix orientation (GrabPixels returns vertically flipped)
                         var prev = RenderTexture.active;
                         RenderTexture.active = rt;
-                        var tex = new Texture2D(w, h, TextureFormat.RGBA32, false);
-                        tex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                        var tex = new Texture2D(cropW, cropH, TextureFormat.RGBA32, false);
+                        // For cropped reads, RT is top-down so flip Y when sourcing from RT
+                        int rtSrcY = h - cropY - cropH;
+                        tex.ReadPixels(new Rect(cropX, rtSrcY, cropW, cropH), 0, 0);
                         tex.Apply();
                         RenderTexture.active = prev;
 
                         // Flip vertically (GrabPixels is top-down, Texture2D is bottom-up)
                         var pixels = tex.GetPixels32();
                         var flipped = new Color32[pixels.Length];
-                        for (int y = 0; y < h; y++)
+                        for (int y = 0; y < cropH; y++)
                         {
-                            System.Array.Copy(pixels, y * w, flipped, (h - 1 - y) * w, w);
+                            System.Array.Copy(pixels, y * cropW, flipped, (cropH - 1 - y) * cropW, cropW);
                         }
                         tex.SetPixels32(flipped);
                         tex.Apply();
 
-                        string outputPath = TimestampedPath(
-                            Path.GetFileNameWithoutExtension(uxmlPath));
+                        string baseName = Path.GetFileNameWithoutExtension(uxmlPath);
+                        if (!string.IsNullOrEmpty(elSelector))
+                            baseName += "_" + SanitizeForFilename(elSelector);
+                        string outputPath = TimestampedPath(baseName);
                         File.WriteAllBytes(outputPath, tex.EncodeToPNG());
                         UnityEngine.Object.DestroyImmediate(tex);
 
-                        return Response.Success($"UXML rendered ({w}x{h})\noutput: {outputPath}");
+                        return Response.Success($"UXML rendered ({cropW}x{cropH}){cropNote}\noutput: {outputPath}");
                     }
                     finally
                     {
@@ -324,6 +364,32 @@ namespace clibridge4unity
                     catch { }
                 }
             }
+        }
+
+        // ───────────────────── UXML element selector ─────────────────────
+
+        /// <summary>
+        /// Resolves a CSS-style selector against an instantiated UXML tree.
+        /// Supported: `#name` (by name), `.class` (by USS class), bare `name` (by name first, then class).
+        /// </summary>
+        static VisualElement ResolveSelector(VisualElement root, string selector)
+        {
+            if (root == null || string.IsNullOrEmpty(selector)) return null;
+            selector = selector.Trim();
+            if (selector.StartsWith("#"))
+                return root.Q<VisualElement>(name: selector.Substring(1));
+            if (selector.StartsWith("."))
+                return root.Q<VisualElement>(className: selector.Substring(1));
+            return root.Q<VisualElement>(name: selector)
+                ?? root.Q<VisualElement>(className: selector);
+        }
+
+        static string SanitizeForFilename(string s)
+        {
+            var sb = new StringBuilder(s.Length);
+            foreach (var c in s)
+                sb.Append(char.IsLetterOrDigit(c) || c == '-' || c == '_' ? c : '_');
+            return sb.ToString();
         }
 
         // ───────────────────── Multi-path parsing ─────────────────────
@@ -580,6 +646,11 @@ namespace clibridge4unity
             var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
             if (prefab == null)
                 return Response.Error($"Prefab not found: {prefabPath}{FuzzyAssetSearch(prefabPath)}");
+
+            // Heads-up if the prefab root is disabled — instance will be inactive and render empty
+            if (!prefab.activeSelf)
+                return Response.Error(
+                    $"Prefab '{prefabPath}' has its root GameObject disabled (activeSelf=false). The render would be empty — enable the prefab root first.");
 
             var canvas = prefab.GetComponentInChildren<Canvas>(true);
             if (canvas != null)
