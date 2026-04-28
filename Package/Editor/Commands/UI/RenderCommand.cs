@@ -203,8 +203,25 @@ namespace clibridge4unity
         /// </summary>
         static async Task<string> RenderUxmlAsync(string uxmlPath, int width, int height)
         {
+            // Force-reimport the UXML and its USS dependencies so on-disk edits show up
+            // immediately — without this, AssetDatabase serves the previously imported version.
             var uxml = await CommandRegistry.RunOnMainThreadAsync(() =>
-                AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(uxmlPath));
+            {
+                if (File.Exists(uxmlPath))
+                {
+                    const ImportAssetOptions opts = ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport;
+                    AssetDatabase.ImportAsset(uxmlPath, opts);
+                    foreach (var dep in AssetDatabase.GetDependencies(uxmlPath, recursive: true))
+                    {
+                        if (dep == uxmlPath) continue;
+                        if (dep.EndsWith(".uss", StringComparison.OrdinalIgnoreCase)
+                            || dep.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase)
+                            || dep.EndsWith(".tss", StringComparison.OrdinalIgnoreCase))
+                            AssetDatabase.ImportAsset(dep, opts);
+                    }
+                }
+                return AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(uxmlPath);
+            });
 
             if (uxml == null)
             {
