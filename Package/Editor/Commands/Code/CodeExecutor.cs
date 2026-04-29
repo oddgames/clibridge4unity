@@ -718,17 +718,16 @@ namespace clibridge4unity
                 createArgs[i] = createParams[i].HasDefaultValue ? createParams[i].DefaultValue : null;
             var compilation = roslynCreate.Invoke(null, createArgs);
 
-            // Emit to memory streams — PE + PDB. Emitting a PDB alongside lets the
-            // CLR include source line numbers in stack traces for runtime exceptions.
+            // Emit to memory — PE only, NO PDB. Emitting a PDB makes Roslyn instantiate
+            // Microsoft.DiaSymReader.Native via COM, which Mono's IL generator
+            // (emit_managed_wrapper_ilgen) asserts on, hard-crashing Unity. Skipping the PDB
+            // costs us source line numbers in CODE_EXEC exceptions — acceptable tradeoff for stability.
             using var peMs = new MemoryStream();
-            using var pdbMs = new MemoryStream();
             var emitParams = roslynEmit.GetParameters();
             var emitArgs = new object[emitParams.Length];
             emitArgs[0] = peMs;
-            // Emit signature: Emit(Stream peStream, Stream pdbStream = null, ...)
-            // Param 1 = pdbStream.
-            if (emitArgs.Length > 1) emitArgs[1] = pdbMs;
-            for (int i = 2; i < emitArgs.Length; i++)
+            // Param 1 = pdbStream — leave null
+            for (int i = 1; i < emitArgs.Length; i++)
                 emitArgs[i] = emitParams[i].HasDefaultValue ? emitParams[i].DefaultValue : null;
 
             var emitResult = roslynEmit.Invoke(compilation, emitArgs);
@@ -752,8 +751,8 @@ namespace clibridge4unity
                 return new CompileResult { Error = Response.Error($"Compilation failed (Roslyn):\n{string.Join("\n", errors)}") };
             }
 
-            // Load with both PE + PDB bytes so the CLR resolves sequence points at runtime.
-            var assembly = Assembly.Load(peMs.ToArray(), pdbMs.ToArray());
+            // PE-only load — no PDB (see emit comment above).
+            var assembly = Assembly.Load(peMs.ToArray());
             return new CompileResult { Assembly = assembly };
         }
 

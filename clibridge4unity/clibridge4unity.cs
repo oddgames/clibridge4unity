@@ -1456,6 +1456,9 @@ class Program
             pipe.Write(msgBytes, 0, msgBytes.Length);
             pipe.Flush();
 
+            // Mark command-start time so we can correlate with Unity crash dumps
+            DateTime commandStart = DateTime.UtcNow;
+
             // Read the server's timeout hint, then read the actual response
             int readTimeoutMs = 10000; // initial timeout for the hint itself
             using var cts = new CancellationTokenSource(readTimeoutMs);
@@ -1498,15 +1501,41 @@ class Program
             }
             catch (OperationCanceledException)
             {
+                string crashReport = DetectUnityCrash(commandStart);
+                if (crashReport != null)
+                {
+                    Console.Error.WriteLine($"\nError: Unity CRASHED during '{command}'.");
+                    Console.Error.Write(crashReport);
+                    return EXIT_COMMAND_ERROR;
+                }
                 Console.Error.WriteLine($"\nError: Command '{command}' timed out after {readTimeoutMs / 1000}s.");
                 Console.Error.Write(BuildDiagnosticReport(projectPath));
                 return EXIT_TIMEOUT;
             }
             catch (AggregateException ex) when (ex.InnerException is OperationCanceledException)
             {
+                string crashReport = DetectUnityCrash(commandStart);
+                if (crashReport != null)
+                {
+                    Console.Error.WriteLine($"\nError: Unity CRASHED during '{command}'.");
+                    Console.Error.Write(crashReport);
+                    return EXIT_COMMAND_ERROR;
+                }
                 Console.Error.WriteLine($"\nError: Command '{command}' timed out after {readTimeoutMs / 1000}s.");
                 Console.Error.Write(BuildDiagnosticReport(projectPath));
                 return EXIT_TIMEOUT;
+            }
+            catch (IOException) // pipe disconnected mid-command — usually crash or domain reload
+            {
+                string crashReport = DetectUnityCrash(commandStart);
+                if (crashReport != null)
+                {
+                    Console.Error.WriteLine($"\nError: Unity CRASHED during '{command}'.");
+                    Console.Error.Write(crashReport);
+                    return EXIT_COMMAND_ERROR;
+                }
+                Console.Error.WriteLine($"\nError: Pipe disconnected during '{command}' (likely domain reload).");
+                return EXIT_CONNECTION;
             }
 
             // Check if response indicates we need to wait for reconnection
@@ -2004,6 +2033,70 @@ class Program
         // If isCompiling is false and lastCompileFinished is "never" or missing,
         // Unity didn't need to recompile (no code changes). That's still success.
         return true;
+    }
+
+    /// <summary>
+    /// Detects whether Unity hard-crashed during a command. Returns a formatted report with
+    /// the crash signature (top of the stack trace) and dump path, or null if no recent crash.
+    /// </summary>
+    static string DetectUnityCrash(DateTime commandStartUtc)
+    {
+        try
+        {
+            string crashesDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Temp", "Unity", "Editor", "Crashes");
+            if (!Directory.Exists(crashesDir)) return null;
+
+            var newest = new DirectoryInfo(crashesDir)
+                .GetDirectories("Crash_*")
+                .Where(d => d.LastWriteTimeUtc > commandStartUtc.AddSeconds(-5))
+                .OrderByDescending(d => d.LastWriteTimeUtc)
+                .FirstOrDefault();
+            if (newest == null) return null;
+
+            var sb = new StringBuilder();
+            sb.AppendLine();
+            sb.AppendLine("--- Unity Crash Detected ---");
+            sb.AppendLine($"crashDir: {newest.FullName}");
+            sb.AppendLine($"crashedAt: {newest.LastWriteTime:yyyy-MM-dd HH:mm:ss}");
+
+            // Pull the top of the stack from the crash's Editor.log so the LLM sees the cause
+            string editorLog = Path.Combine(newest.FullName, "Editor.log");
+            if (File.Exists(editorLog))
+            {
+                var lines = File.ReadAllLines(editorLog);
+                int stackStart = -1;
+                for (int i = lines.Length - 1; i >= 0 && i > lines.Length - 200; i--)
+                {
+                    if (lines[i].Contains("OUTPUTTING STACK TRACE"))
+                    {
+                        stackStart = i;
+                        break;
+                    }
+                }
+                if (stackStart >= 0)
+                {
+                    sb.AppendLine("--- Stack signature (top frames) ---");
+                    int shown = 0;
+                    for (int i = stackStart + 1; i < lines.Length && shown < 15; i++)
+                    {
+                        var line = lines[i].Trim();
+                        if (string.IsNullOrEmpty(line)) continue;
+                        if (line.Contains("END OF STACKTRACE")) break;
+                        sb.AppendLine($"  {line}");
+                        shown++;
+                    }
+                }
+            }
+
+            sb.AppendLine("action: Open the crash dir above for the full dump. If this repeats, it's a Unity/package bug — report it.");
+            return sb.ToString();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>
