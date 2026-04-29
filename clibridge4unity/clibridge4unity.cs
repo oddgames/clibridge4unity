@@ -107,6 +107,7 @@ class Program
     private static bool _lastResponseContainedMainThreadTimeout;
     private static long _preCompileLogId;
     private static string _intent;       // set via --intent flag; purely descriptive
+    private static bool _killIfWedged;    // set via --kill-if-wedged; auto-terminate Unity when stuck
     private static string _sessionFile;  // path of this invocation's session ledger entry (for cleanup)
 
     private const uint WM_NULL = 0x0000;
@@ -602,6 +603,11 @@ class Program
                 waitForLogs = true;
                 argIndex++;
             }
+            else if (arg == "--kill-if-wedged")
+            {
+                _killIfWedged = true;
+                argIndex++;
+            }
             else if (arg == "--log-filter")
             {
                 if (argIndex + 1 >= args.Length)
@@ -849,6 +855,12 @@ class Program
             return HandleOpen(projectPath, unityInfo);
         }
 
+        // KILL: force-terminate Unity for this project (no restart) — CLI-side, no pipe needed
+        if (command.Equals("KILL", StringComparison.OrdinalIgnoreCase))
+        {
+            return HandleKill(projectPath, unityInfo);
+        }
+
         // WAKEUP: bring Unity to foreground — CLI-side, no pipe needed
         // WAKEUP refresh — also sends Ctrl+R to force asset refresh/recompile
         if (command.Equals("WAKEUP", StringComparison.OrdinalIgnoreCase))
@@ -1092,6 +1104,7 @@ class Program
         Console.Error.WriteLine("  -h, --help              Show available commands from Unity");
         Console.Error.WriteLine("  -w, --wait              Wait for completion and show logs (for COMPILE/REFRESH)");
         Console.Error.WriteLine("  --log-filter <filter>   Log filter for --wait: errors (default), warnings, all");
+        Console.Error.WriteLine("  --kill-if-wedged        Auto-kill Unity if heartbeat says wedged (loses unsaved work)");
         Console.Error.WriteLine("  --version               Show version information");
         Console.Error.WriteLine();
         Console.Error.WriteLine("CLI-side commands (no Unity pipe needed):");
@@ -1104,6 +1117,7 @@ class Program
         Console.Error.WriteLine("  SCREENSHOT [view]          Capture Unity window screenshot");
         Console.Error.WriteLine("  LAST [command|index]       Retrieve previous command result from history");
         Console.Error.WriteLine("  OPEN                       Launch Unity (or restart if in Safe Mode)");
+        Console.Error.WriteLine("  KILL                       Force-terminate Unity for this project (loses unsaved work)");
         Console.Error.WriteLine();
         Console.Error.WriteLine("Key bridge commands (requires Unity):");
         Console.Error.WriteLine("  PING / STATUS / HELP       Connection and status");
@@ -1148,6 +1162,49 @@ class Program
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Force-terminates every Unity process associated with the given project.
+    /// Returns the number of processes killed. Loses unsaved work — caller should warn.
+    /// </summary>
+    static int KillUnityProcesses(UnityProcessInfo unityInfo)
+    {
+        int killed = 0;
+        foreach (uint pid in unityInfo.Pids)
+        {
+            try
+            {
+                var proc = Process.GetProcessById((int)pid);
+                proc.Kill();
+                proc.WaitForExit(10000);
+                killed++;
+            }
+            catch { }
+        }
+        // Wait for process to fully exit (file locks, named pipes, etc.)
+        if (killed > 0) System.Threading.Thread.Sleep(2000);
+        return killed;
+    }
+
+    /// <summary>
+    /// CLI-side KILL command — terminates Unity for the targeted project without restarting.
+    /// </summary>
+    static int HandleKill(string projectPath, UnityProcessInfo unityInfo)
+    {
+        if (unityInfo.State != UnityProcessState.Running &&
+            unityInfo.State != UnityProcessState.Importing)
+        {
+            Console.Error.WriteLine($"Unity is not running for this project (state: {unityInfo.State}).");
+            return EXIT_SUCCESS;
+        }
+
+        string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
+        Console.Error.WriteLine($"Force-terminating Unity for '{projectName}' — unsaved work will be LOST.");
+        int killed = KillUnityProcesses(unityInfo);
+        Console.WriteLine($"Killed {killed} Unity process(es) for '{projectName}'.");
+        Console.WriteLine($"Use 'clibridge4unity OPEN' to restart.");
+        return EXIT_SUCCESS;
     }
 
     /// <summary>
@@ -1197,18 +1254,7 @@ class Program
             unityInfo.State == UnityProcessState.Importing)
         {
             Console.Error.WriteLine($"Closing Unity ({projectName})...");
-            foreach (uint pid in unityInfo.Pids)
-            {
-                try
-                {
-                    var proc = Process.GetProcessById((int)pid);
-                    proc.Kill();
-                    proc.WaitForExit(10000);
-                }
-                catch { }
-            }
-            // Wait for process to fully exit
-            System.Threading.Thread.Sleep(2000);
+            KillUnityProcesses(unityInfo);
         }
 
         // Launch Unity
@@ -2517,11 +2563,20 @@ class Program
         // we bail rather than burning most of the budget on the wait alone.
         const int waitInlineThresholdSec = 7;
 
-        // Wedged: been busy way longer than average — don't wait, fail fast with context.
+        // Wedged: been busy way longer than average. Either kill (if --kill-if-wedged) or bail.
         if (avg > 0 && elapsed > avg * 2)
         {
+            if (_killIfWedged)
+            {
+                Console.Error.WriteLine($"[CLI] Unity wedged in '{state}' for {elapsed}s (avg {avg}s). --kill-if-wedged → terminating.");
+                var info = DetectUnityProcess(projectPath);
+                int killed = KillUnityProcesses(info);
+                busyMessage = $"Error: Killed {killed} Unity process(es). Run 'clibridge4unity OPEN' to restart.\n" +
+                              $"       Unsaved work was lost.";
+                return -1;
+            }
             busyMessage = $"Error: Unity stuck in '{state}' for {elapsed}s (avg {avg}s). Possibly wedged.\n" +
-                          $"       Try: clibridge4unity DIAG, or restart Unity.";
+                          $"       Try: clibridge4unity DIAG, or 'clibridge4unity KILL' to force-terminate (loses unsaved work).";
             return -1;
         }
 
