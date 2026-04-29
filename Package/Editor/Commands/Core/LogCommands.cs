@@ -322,6 +322,28 @@ namespace clibridge4unity
             return sb.ToString().TrimEnd();
         }
 
+        /// <summary>
+        /// Returns ALL log entries since the given ID (any severity), formatted compactly.
+        /// Used by commands that surface user-visible output, e.g. CODE_EXEC where Debug.Log
+        /// is the primary feedback channel and `GetLogsSinceFormatted` (errors-only) misses it.
+        /// </summary>
+        public static string GetLogsSinceAllFormatted(long sinceId, int maxLines = 30)
+        {
+            FlushPendingWrites();
+            var entries = ReadLogFile()
+                .Where(e => e.Id > sinceId)
+                .ToList();
+            if (entries.Count == 0) return null;
+
+            if (entries.Count > maxLines)
+                entries = entries.Skip(entries.Count - maxLines).ToList();
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"--- Logs ({entries.Count}) ---");
+            FormatEntriesCompact(entries, sb, includeTimestamp: false);
+            return sb.ToString().TrimEnd();
+        }
+
         private const int DefaultLogCount = 20;
 
         private static readonly string[] LogFlags = { "errors", "warnings", "verbose", "raw", "all", "clear" };

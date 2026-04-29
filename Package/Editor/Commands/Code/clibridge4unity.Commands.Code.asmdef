@@ -3,6 +3,7 @@
     "rootNamespace": "clibridge4unity.Commands",
     "references": [
         "clibridge4unity.Core",
+        "clibridge4unity.Commands.Core",
         "Unity.Newtonsoft.Json"
     ],
     "includePlatforms": [

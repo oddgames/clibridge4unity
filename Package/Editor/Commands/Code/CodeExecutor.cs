@@ -81,6 +81,9 @@ namespace clibridge4unity
 
                 if (!initialized) Initialize();
 
+                // Snapshot log position BEFORE running so we can return everything CODE_EXEC produced.
+                long execStartLogId = CommandRegistry.GetLastLogId?.Invoke() ?? 0;
+
                 string fullCode = WrapCode(code);
                 int codeHash = fullCode.GetHashCode();
 
@@ -134,6 +137,12 @@ namespace clibridge4unity
                     }
                 }
 
+                // Pull every log line emitted during this CODE_EXEC (Debug.Log, warnings, errors)
+                // and include them in the response — they're the primary feedback channel.
+                string captured = LogCommands.GetLogsSinceAllFormatted(execStartLogId, maxLines: 50);
+                if (!string.IsNullOrEmpty(captured))
+                    return Response.Success("Code executed on main thread.\n" + captured);
+
                 return Response.Success("Code executed on main thread.");
             }
             catch (Exception ex)
@@ -186,6 +195,9 @@ namespace clibridge4unity
                 if (trace)
                     return await ExecuteTrace(code, maxTraceLines, traceFrom, traceOnly, traceVars, traceSkip);
 
+                // Snapshot log position so we can attach Debug.Log/Warning output to the response.
+                long execStartLogId = CommandRegistry.GetLastLogId?.Invoke() ?? 0;
+
                 string fullCode = WrapCode(code);
                 int codeHash = fullCode.GetHashCode();
 
@@ -203,12 +215,18 @@ namespace clibridge4unity
                 string desc = code.Length > 80 ? $"CODE_EXEC_RETURN|{code.Substring(0, 80)}..." : $"CODE_EXEC_RETURN|{code}";
                 var result = await CommandRegistry.RunOnMainThreadAsync<object>(() => RunAssembly(asm), desc);
 
-                // Inspect mode: reflection tree dump
+                string baseResponse;
                 if (inspect)
-                    return Response.Success(InspectObject(result, inspectDepth, includePrivate));
+                    baseResponse = Response.Success(InspectObject(result, inspectDepth, includePrivate));
+                else
+                    baseResponse = FormatResult(result);
 
-                // Default: serialize result with type annotation
-                return FormatResult(result);
+                // Attach captured logs (Debug.Log/Warning/Error) so the LLM sees user output
+                string captured = LogCommands.GetLogsSinceAllFormatted(execStartLogId, maxLines: 50);
+                if (!string.IsNullOrEmpty(captured))
+                    baseResponse = baseResponse + "\n" + captured;
+
+                return baseResponse;
             }
             catch (TargetInvocationException ex)
             {
