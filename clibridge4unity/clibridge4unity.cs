@@ -2253,6 +2253,14 @@ class Program
             return sb.ToString();
         }
 
+        // Stuck domain reload detection (reads stale heartbeat — works even mid-reload)
+        string stuckMsg = CheckStuckDomainReload(projectPath, thresholdSec: 60);
+        if (stuckMsg != null)
+        {
+            sb.AppendLine(stuckMsg);
+            return sb.ToString();
+        }
+
         // Import/busy status
         if (!string.IsNullOrEmpty(info.ImportStatus))
             sb.AppendLine($"busy: {info.ImportStatus}");
@@ -2584,7 +2592,13 @@ class Program
         if (BusyAwareBypassCommands.Contains(command)) return 0;
 
         var hb = ReadHeartbeatFile(projectPath);
-        if (!hb.HasValue) return 0;
+        if (!hb.HasValue)
+        {
+            // Stale heartbeat = domain reload in progress. Check if it's been frozen too long.
+            string stuck = CheckStuckDomainReload(projectPath);
+            if (stuck != null) { busyMessage = stuck; return -1; }
+            return 0;
+        }
 
         string state = hb.Value.state;
         long enteredAt = hb.Value.stateEnteredAt;
@@ -2707,6 +2721,52 @@ class Program
             return (state, errors, errorCount, avgTime, enteredAt);
         }
         catch { return null; }
+    }
+
+    // Reads heartbeat file ignoring the freshness limit — used to detect stuck domain reloads.
+    static (string state, long stateEnteredAt, double fileAgeSec)? ReadStaleHeartbeat(string projectPath)
+    {
+        try
+        {
+            string normalizedPath = Path.GetFullPath(projectPath).ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
+            int hash1 = 5381, hash2 = hash1;
+            for (int i = 0; i < normalizedPath.Length && normalizedPath[i] != '\0'; i += 2)
+            {
+                hash1 = ((hash1 << 5) + hash1) ^ normalizedPath[i];
+                if (i == normalizedPath.Length - 1 || normalizedPath[i + 1] == '\0') break;
+                hash2 = ((hash2 << 5) + hash2) ^ normalizedPath[i + 1];
+            }
+            int hash = hash1 + (hash2 * 1566083941);
+            string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}.status");
+            if (!File.Exists(statusFile)) return null;
+
+            double ageSec = (DateTime.UtcNow - File.GetLastWriteTimeUtc(statusFile)).TotalSeconds;
+            string json = File.ReadAllText(statusFile);
+            string state = ExtractJsonString(json, "state") ?? "unknown";
+            long enteredAt = 0;
+            var m = System.Text.RegularExpressions.Regex.Match(json, @"""stateEnteredAt"":\s*(\d+)");
+            if (m.Success) enteredAt = long.Parse(m.Groups[1].Value);
+            return (state, enteredAt, ageSec);
+        }
+        catch { return null; }
+    }
+
+    // Returns a KILL+OPEN suggestion string if heartbeat shows Unity stuck in reload/compile >thresholdSec.
+    // Returns null if not stuck (or can't tell).
+    static string CheckStuckDomainReload(string projectPath, int thresholdSec = 60)
+    {
+        var stale = ReadStaleHeartbeat(projectPath);
+        if (stale == null) return null;
+        var (state, enteredAt, fileAgeSec) = stale.Value;
+        if (state != "reloading" && state != "compiling" && state != "importing") return null;
+        if (fileAgeSec < thresholdSec) return null;
+
+        long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        int elapsedSec = enteredAt > 0 ? (int)(nowUnix - enteredAt) : (int)fileAgeSec;
+        if (elapsedSec < thresholdSec) return null;
+
+        return $"Error: Unity stuck in '{state}' for {elapsedSec}s (heartbeat last updated {(int)fileAgeSec}s ago — domain reload frozen).\n" +
+               $"action: clibridge4unity KILL && clibridge4unity OPEN";
     }
 
     static UnityProcessInfo DetectUnityProcess(string projectPath)
