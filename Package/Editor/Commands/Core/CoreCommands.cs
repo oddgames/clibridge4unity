@@ -213,9 +213,19 @@ namespace clibridge4unity
             // If already compiling (e.g. after exiting play mode), just wait for it
             if (!EditorApplication.isCompiling)
             {
-                // Force asset refresh first — detects package folder renames, new/deleted files
+                // Force asset refresh — detects script edits, package renames, new/deleted files.
+                // If anything changed, Refresh kicks off compilation on its own — DO NOT also call
+                // CompilationPipeline.RequestScriptCompilation(), since that queues a SECOND compile
+                // that fires after the first one finishes, doubling the domain-reload cost.
                 AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
-                CompilationPipeline.RequestScriptCompilation();
+
+                // Only request an explicit recompile if Refresh didn't trigger one (no file changes).
+                // We poll briefly because Refresh may start the compile a few editor ticks later.
+                System.Threading.Thread.Sleep(250);
+                if (!EditorApplication.isCompiling)
+                {
+                    CompilationPipeline.RequestScriptCompilation();
+                }
                 EditorApplication.QueuePlayerLoopUpdate();
             }
 
