@@ -443,9 +443,19 @@ class Program
             Directory.CreateDirectory(installDir);
             File.WriteAllBytes(tempPath, exeBytes);
 
-            // Replace current exe: rename current → .old, rename .update → current
+            // Replace current exe: rename current → .old, rename .update → current.
+            // If .old is locked by a stale clibridge4unity process, kill it and retry.
             string oldPath = exePath + ".old";
-            if (File.Exists(oldPath)) File.Delete(oldPath);
+            if (File.Exists(oldPath))
+            {
+                try { File.Delete(oldPath); }
+                catch (UnauthorizedAccessException)
+                {
+                    KillStaleClibridgeProcesses();
+                    System.Threading.Thread.Sleep(500);
+                    File.Delete(oldPath);
+                }
+            }
 
             if (File.Exists(exePath))
                 File.Move(exePath, oldPath);
@@ -461,11 +471,37 @@ class Program
             RefreshProjectClaudeMd();
             return EXIT_SUCCESS;
         }
+        catch (UnauthorizedAccessException ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            Console.Error.WriteLine("  Stale clibridge4unity process holding the file. Recover with:");
+            Console.Error.WriteLine("    Get-Process clibridge4unity -ErrorAction SilentlyContinue | Stop-Process -Force");
+            Console.Error.WriteLine("    Remove-Item \"$env:USERPROFILE\\.clibridge4unity\\clibridge4unity.exe.old\" -Force -ErrorAction SilentlyContinue");
+            Console.Error.WriteLine("    clibridge4unity UPDATE");
+            Console.Error.WriteLine("  Or fall back to a fresh install:");
+            Console.Error.WriteLine($"    irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
+            return EXIT_COMMAND_ERROR;
+        }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error: {ex.GetType().Name}: {ex.Message}");
             Console.Error.WriteLine($"  Run: irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
             return EXIT_COMMAND_ERROR;
+        }
+    }
+
+    /// <summary>
+    /// Kill any clibridge4unity processes on this machine other than the current one.
+    /// Used to free a locked .old binary during self-update.
+    /// </summary>
+    static void KillStaleClibridgeProcesses()
+    {
+        int self = Process.GetCurrentProcess().Id;
+        foreach (var p in Process.GetProcessesByName("clibridge4unity"))
+        {
+            if (p.Id == self) continue;
+            try { p.Kill(); p.WaitForExit(3000); }
+            catch { }
         }
     }
 
@@ -2551,11 +2587,27 @@ class Program
         if (!hb.HasValue) return 0;
 
         string state = hb.Value.state;
-        if (state == "ready" || state == "playing" || state == "paused") return 0;
-
-        int avg = hb.Value.compileTimeAvg;
         long enteredAt = hb.Value.stateEnteredAt;
         long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        // Settle wait: a "ready" state that JUST flipped over (<2s ago) often chains into another
+        // reload (post-import housekeeping, second forced sync recompile, etc.). Hold briefly so
+        // the command doesn't fire in the gap between two reloads and trip a domain-reload mid-pipe.
+        if (state == "ready" || state == "playing" || state == "paused")
+        {
+            if (state == "ready" && enteredAt > 0)
+            {
+                int sinceReady = (int)Math.Max(0, nowUnix - enteredAt);
+                if (sinceReady < 2)
+                {
+                    System.Threading.Thread.Sleep((2 - sinceReady) * 1000);
+                    return (2 - sinceReady) * 1000;
+                }
+            }
+            return 0;
+        }
+
+        int avg = hb.Value.compileTimeAvg;
         int elapsed = enteredAt > 0 ? (int)Math.Max(0, nowUnix - enteredAt) : 0;
         int estRemaining = avg > 0 ? Math.Max(0, avg - elapsed) : 0;
 
