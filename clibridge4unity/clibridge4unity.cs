@@ -2590,9 +2590,12 @@ class Program
         long enteredAt = hb.Value.stateEnteredAt;
         long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-        // Settle wait: a "ready" state that JUST flipped over (<2s ago) often chains into another
-        // reload (post-import housekeeping, second forced sync recompile, etc.). Hold briefly so
-        // the command doesn't fire in the gap between two reloads and trip a domain-reload mid-pipe.
+        // Settle wait: "ready" that JUST flipped (<2s ago) often chains into another reload
+        // (e.g. Google PlayServices Resolver patches AndroidManifest then calls
+        //  AssetDatabase.Refresh(ForceSynchronousImport|ForceDomainReload) → second 7-8s reload).
+        // One-shot sleep misses cascades. Poll every 500ms until "ready" has been CONTINUOUSLY
+        // stable for 2s (or 30s max). If state goes non-ready mid-poll, reset the counter and
+        // keep waiting — this handles N-deep reload chains automatically.
         if (state == "ready" || state == "playing" || state == "paused")
         {
             if (state == "ready" && enteredAt > 0)
@@ -2600,8 +2603,23 @@ class Program
                 int sinceReady = (int)Math.Max(0, nowUnix - enteredAt);
                 if (sinceReady < 2)
                 {
-                    System.Threading.Thread.Sleep((2 - sinceReady) * 1000);
-                    return (2 - sinceReady) * 1000;
+                    const int pollMs = 500;
+                    const int requiredStableMs = 2000;
+                    const int maxWaitMs = 30000;
+                    int stableMs = sinceReady * 1000; // credit already-stable time
+                    int totalWaitMs = 0;
+                    while (stableMs < requiredStableMs && totalWaitMs < maxWaitMs)
+                    {
+                        System.Threading.Thread.Sleep(pollMs);
+                        totalWaitMs += pollMs;
+                        var newHb = ReadHeartbeatFile(projectPath);
+                        if (!newHb.HasValue) break;
+                        if (newHb.Value.state == "ready")
+                            stableMs += pollMs;
+                        else
+                            stableMs = 0; // cascade reload started — reset stability counter
+                    }
+                    return totalWaitMs;
                 }
             }
             return 0;
