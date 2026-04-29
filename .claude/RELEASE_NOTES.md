@@ -1,17 +1,11 @@
-## Settle-wait before pipe commands
+## Fix: COMPILE no longer forces a recompile when nothing changed
 
-Unity sometimes chains domain reloads — script-edit compile → reload, then a second forced sync recompile right after (post-import housekeeping or another package's `[InitializeOnLoad]`). The heartbeat flips to `ready` for a moment in the gap. If a CLI command landed in that window, the pipe call would die mid-reload.
+v1.0.77 added a "fallback" path: if `AssetDatabase.Refresh` didn't trigger compilation within 250ms, call `CompilationPipeline.RequestScriptCompilation()` to force one. That made `COMPILE` always cost a domain reload, even on idle projects with no edits — visible in `Editor.log` as a lone:
 
-`HeartbeatAwarePreWait` now requires `state=ready` to have been stable for ≥2s. If the heartbeat just transitioned to ready, the CLI sleeps the remainder before sending. The wait is subtracted from the read budget, same as the busy-wait path — total time stays roughly constant.
-
-## UPDATE auto-recovery for stale .old binary
-
-Previous behaviour: if `clibridge4unity.exe.old` was held by a stale CLI process, `UPDATE` failed with `UnauthorizedAccessException` and pointed at the install script.
-
-Now: on lock, `UPDATE` kills any *other* clibridge4unity processes (excluding self), retries the delete, and proceeds. If it still fails, the error message prints the exact PowerShell recovery commands inline:
-
-```powershell
-Get-Process clibridge4unity -ErrorAction SilentlyContinue | Stop-Process -Force
-Remove-Item "$env:USERPROFILE\.clibridge4unity\clibridge4unity.exe.old" -Force -ErrorAction SilentlyContinue
-clibridge4unity UPDATE
 ```
+Reloading assemblies after forced synchronous recompile.
+```
+
+That fallback is now removed. `COMPILE` is just `AssetDatabase.Refresh(ForceUpdate)` — Refresh handles the script-edit case on its own and does nothing if nothing changed. No reload when there's nothing to compile.
+
+If you genuinely need to force a recompile on an unchanged project (rare — usually for stale-cache cleanup), edit any `.cs` and re-run `COMPILE`, or use the Unity Editor menu `Assets > Reimport All`.

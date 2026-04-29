@@ -210,22 +210,14 @@ namespace clibridge4unity
             if (EditorApplication.isPlaying)
                 return Response.Error("Cannot compile during play mode. Use STOP first.");
 
-            // If already compiling (e.g. after exiting play mode), just wait for it
+            // If already compiling (e.g. after exiting play mode), just wait for it.
             if (!EditorApplication.isCompiling)
             {
-                // Force asset refresh — detects script edits, package renames, new/deleted files.
-                // If anything changed, Refresh kicks off compilation on its own — DO NOT also call
-                // CompilationPipeline.RequestScriptCompilation(), since that queues a SECOND compile
-                // that fires after the first one finishes, doubling the domain-reload cost.
+                // Refresh detects script edits, package renames, new/deleted files and triggers a
+                // compile only if anything actually changed. We deliberately DO NOT call
+                // CompilationPipeline.RequestScriptCompilation() — that forces a recompile + domain
+                // reload even when nothing changed, which is expensive on large projects.
                 AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
-
-                // Only request an explicit recompile if Refresh didn't trigger one (no file changes).
-                // We poll briefly because Refresh may start the compile a few editor ticks later.
-                System.Threading.Thread.Sleep(250);
-                if (!EditorApplication.isCompiling)
-                {
-                    CompilationPipeline.RequestScriptCompilation();
-                }
                 EditorApplication.QueuePlayerLoopUpdate();
             }
 
