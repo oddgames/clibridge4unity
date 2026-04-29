@@ -1447,6 +1447,15 @@ class Program
                 }
             }
 
+            // Heartbeat-aware pre-wait: if Unity is busy (compiling/reloading/importing), use the
+            // heartbeat to decide whether to wait inline (cheap) or bail-fast (let the agent retry).
+            int waitedForBusyMs = HeartbeatAwarePreWait(projectPath, command, out string busyMsg);
+            if (busyMsg != null)
+            {
+                Console.Error.WriteLine(busyMsg);
+                return EXIT_TIMEOUT;
+            }
+
             using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
             pipe.Connect(1000);
 
@@ -1483,7 +1492,11 @@ class Program
                         {
                             string hintStr = chunk.Substring(10, nlIdx - 10);
                             if (int.TryParse(hintStr, out int hintSec))
-                                readTimeoutMs = hintSec * 1000;
+                            {
+                                // Subtract any time we already spent waiting on heartbeat-busy
+                                // so the total budget (pre-wait + read) stays roughly constant.
+                                readTimeoutMs = Math.Max(2000, hintSec * 1000 - waitedForBusyMs);
+                            }
                             gotTimeoutHint = true;
                             cts.CancelAfter(readTimeoutMs);
                             // Process any data after the hint line
@@ -2324,6 +2337,7 @@ class Program
         public List<string> RecentErrors = new List<string>();  // from Editor.log
         public string HeartbeatState;     // from heartbeat file: ready, compiling, reloading, etc.
         public int HeartbeatCompileTimeAvg; // avg compile time from heartbeat file
+        public long HeartbeatStateEnteredAtUnix; // when Unity entered HeartbeatState (unix seconds)
         public bool MatchedByCommandLine; // true if project matched via -projectPath arg, not window title
         public HashSet<uint> Pids = new HashSet<uint>();  // Unity process IDs for this project
         public List<UnityWorkspaceInfo> AllWorkspaces = new List<UnityWorkspaceInfo>(); // every Unity instance on this machine
@@ -2468,7 +2482,68 @@ class Program
     /// Reads the heartbeat status file written by Unity-side Heartbeat.cs.
     /// Returns null if file doesn't exist or is stale (>10s old).
     /// </summary>
-    static (string state, bool compileErrors, int compileErrorCount, int compileTimeAvg)?
+    // Commands that legitimately want to talk to a busy Unity (poll status, dump logs, trigger compile, etc.).
+    // Everything else gets the heartbeat-aware bail-fast / inline-wait treatment.
+    static readonly HashSet<string> BusyAwareBypassCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "STATUS", "DIAG", "PROBE", "PING", "LOG", "HELP", "COMPILE", "REFRESH", "WAKEUP", "DISMISS"
+    };
+
+    /// <summary>
+    /// If Unity is busy per heartbeat, decide: wait inline (returns ms waited) or bail (sets busyMessage).
+    /// Heuristic: budget = 15s. est_remaining = max(0, compileTimeAvg - elapsed_in_state).
+    ///   est_remaining > budget * 0.5  → bail (let the agent retry when ready)
+    ///   est_remaining ≤ budget * 0.5  → sleep est_remaining, return that as ms waited
+    ///   elapsed > avg * 2             → bail (Unity is wedged, no point waiting)
+    /// </summary>
+    static int HeartbeatAwarePreWait(string projectPath, string command, out string busyMessage)
+    {
+        busyMessage = null;
+        if (BusyAwareBypassCommands.Contains(command)) return 0;
+
+        var hb = ReadHeartbeatFile(projectPath);
+        if (!hb.HasValue) return 0;
+
+        string state = hb.Value.state;
+        if (state == "ready" || state == "playing" || state == "paused") return 0;
+
+        int avg = hb.Value.compileTimeAvg;
+        long enteredAt = hb.Value.stateEnteredAt;
+        long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        int elapsed = enteredAt > 0 ? (int)Math.Max(0, nowUnix - enteredAt) : 0;
+        int estRemaining = avg > 0 ? Math.Max(0, avg - elapsed) : 0;
+
+        // Half of the typical 15s read budget — rounded down. If Unity needs longer than this
+        // we bail rather than burning most of the budget on the wait alone.
+        const int waitInlineThresholdSec = 7;
+
+        // Wedged: been busy way longer than average — don't wait, fail fast with context.
+        if (avg > 0 && elapsed > avg * 2)
+        {
+            busyMessage = $"Error: Unity stuck in '{state}' for {elapsed}s (avg {avg}s). Possibly wedged.\n" +
+                          $"       Try: clibridge4unity DIAG, or restart Unity.";
+            return -1;
+        }
+
+        // Long enough to bail — agent retries when state becomes ready.
+        if (estRemaining > waitInlineThresholdSec)
+        {
+            busyMessage = $"busy: {state} (~{estRemaining}s remaining, elapsed {elapsed}s of avg {avg}s)\n" +
+                          $"retry: clibridge4unity {command} ...";
+            return -1;
+        }
+
+        // Short enough to wait inline — but consume from the read budget so we still fail fast if Unity hangs.
+        if (estRemaining > 0)
+        {
+            System.Threading.Thread.Sleep(estRemaining * 1000);
+            return estRemaining * 1000;
+        }
+
+        return 0;
+    }
+
+    static (string state, bool compileErrors, int compileErrorCount, int compileTimeAvg, long stateEnteredAt)?
         ReadHeartbeatFile(string projectPath)
     {
         try
@@ -2496,12 +2571,15 @@ class Program
             string state = ExtractJsonString(json, "state");
             bool errors = json.Contains("\"compileErrors\": true");
             int errorCount = 0, avgTime = 0;
+            long enteredAt = 0;
             var ecMatch = System.Text.RegularExpressions.Regex.Match(json, @"""compileErrorCount"":\s*(\d+)");
             if (ecMatch.Success) errorCount = int.Parse(ecMatch.Groups[1].Value);
             var atMatch = System.Text.RegularExpressions.Regex.Match(json, @"""compileTimeAvg"":\s*(\d+)");
             if (atMatch.Success) avgTime = int.Parse(atMatch.Groups[1].Value);
+            var enMatch = System.Text.RegularExpressions.Regex.Match(json, @"""stateEnteredAt"":\s*(\d+)");
+            if (enMatch.Success) enteredAt = long.Parse(enMatch.Groups[1].Value);
 
-            return (state, errors, errorCount, avgTime);
+            return (state, errors, errorCount, avgTime, enteredAt);
         }
         catch { return null; }
     }
@@ -2519,6 +2597,7 @@ class Program
         {
             info.HeartbeatState = heartbeat.Value.state;
             info.HeartbeatCompileTimeAvg = heartbeat.Value.compileTimeAvg;
+            info.HeartbeatStateEnteredAtUnix = heartbeat.Value.stateEnteredAt;
         }
 
         // Check lockfile — Unity creates this while project is open

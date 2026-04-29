@@ -17,6 +17,8 @@ namespace clibridge4unity
         private static string _statusFile;
         private static double _lastWrite;
         private static string _overrideState;
+        private static string _currentState;
+        private static long _stateEnteredAtUnix;
 
         static Heartbeat()
         {
@@ -53,6 +55,14 @@ namespace clibridge4unity
                 string state = _overrideState ?? GetState();
                 _overrideState = null;
 
+                // Track when this state was first entered so the CLI can compute elapsed-in-state
+                // and decide whether to wait for Unity or bail-fast.
+                if (state != _currentState)
+                {
+                    _currentState = state;
+                    _stateEnteredAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                }
+
                 bool hasErrors = false;
                 int errorCount = 0;
                 var getErrors = CommandRegistry.GetCompileErrors;
@@ -82,6 +92,7 @@ namespace clibridge4unity
                     $"  \"compileErrors\": {(hasErrors ? "true" : "false")},\n" +
                     $"  \"compileErrorCount\": {errorCount},\n" +
                     $"  \"compileTimeAvg\": {compileTimeAvg},\n" +
+                    $"  \"stateEnteredAt\": {_stateEnteredAtUnix},\n" +
                     $"  \"timestamp\": {DateTimeOffset.UtcNow.ToUnixTimeSeconds()}\n" +
                     "}";
 
