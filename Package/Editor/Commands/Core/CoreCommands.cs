@@ -210,13 +210,12 @@ namespace clibridge4unity
             if (EditorApplication.isPlaying)
                 return Response.Error("Cannot compile during play mode. Use STOP first.");
 
-            // If already compiling (e.g. after exiting play mode), just wait for it.
-            if (!EditorApplication.isCompiling)
+            // If Unity is already compiling OR updating assets (e.g. post-play-mode cleanup),
+            // skip the Refresh — triggering it on top of an in-progress compile/update causes
+            // cascading domain reloads, especially on large projects with packages that hook
+            // into the asset pipeline (Addressables, Google Play Services Resolver, etc.).
+            if (!EditorApplication.isCompiling && !EditorApplication.isUpdating)
             {
-                // Refresh detects script edits, package renames, new/deleted files and triggers a
-                // compile only if anything actually changed. We deliberately DO NOT call
-                // CompilationPipeline.RequestScriptCompilation() — that forces a recompile + domain
-                // reload even when nothing changed, which is expensive on large projects.
                 AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
                 EditorApplication.QueuePlayerLoopUpdate();
             }

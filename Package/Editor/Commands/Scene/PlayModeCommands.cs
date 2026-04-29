@@ -65,7 +65,14 @@ namespace clibridge4unity
                     return Response.Success("Not in play mode");
 
                 EditorApplication.isPlaying = false;
-                return Response.Success("Exiting play mode");
+                return Response.SuccessWithData(new
+                {
+                    message = "Exiting play mode.",
+                    note = "If scripts were edited before play mode, Unity auto-compiles after exit " +
+                           "cleanup. Do NOT call COMPILE immediately — it triggers a redundant reload " +
+                           "on top of the auto-compile, causing cascading domain reloads. " +
+                           "Wait for STATUS to show isCompiling=False and isUpdating=False first."
+                });
             }
             catch (Exception ex)
             {
