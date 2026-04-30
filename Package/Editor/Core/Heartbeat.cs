@@ -16,28 +16,29 @@ namespace clibridge4unity
     {
         private static string _statusFile;
         private static double _lastWrite;
-        private static string _overrideState;
         private static string _currentState;
         private static long _stateEnteredAtUnix;
 
         static Heartbeat()
         {
+            BridgeDiagnostics.Log("Heartbeat", "static ctor enter");
             string normalizedPath = Application.dataPath.Replace("/Assets", "")
                 .ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
             string hash = BridgeServer.GetDeterministicHashCode(normalizedPath).ToString("X8");
             _statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash}.status");
+            BridgeDiagnostics.Log("Heartbeat", $"status file: {_statusFile}");
 
             EditorApplication.update += Tick;
             AssemblyReloadEvents.beforeAssemblyReload += () =>
             {
-                _overrideState = "reloading";
-                WriteNow();
+                WriteReloadingNow();
             };
             EditorApplication.playModeStateChanged += _ => WriteNow();
             EditorApplication.quitting += Cleanup;
 
             // Write immediately on init
             WriteNow();
+            BridgeDiagnostics.Log("Heartbeat", "static ctor exit");
         }
 
         static void Tick()
@@ -52,8 +53,7 @@ namespace clibridge4unity
             _lastWrite = EditorApplication.timeSinceStartup;
             try
             {
-                string state = _overrideState ?? GetState();
-                _overrideState = null;
+                string state = GetState();
 
                 // Track when this state was first entered so the CLI can compute elapsed-in-state
                 // and decide whether to wait for Unity or bail-fast.
@@ -61,6 +61,7 @@ namespace clibridge4unity
                 {
                     _currentState = state;
                     _stateEnteredAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                    BridgeDiagnostics.Log("Heartbeat", $"state changed: {state}");
                 }
 
                 bool hasErrors = false;
@@ -98,7 +99,37 @@ namespace clibridge4unity
 
                 File.WriteAllText(_statusFile, json);
             }
-            catch { }
+            catch (Exception ex) { BridgeDiagnostics.LogException("Heartbeat WriteNow", ex); }
+        }
+
+        static void WriteReloadingNow()
+        {
+            BridgeDiagnostics.Log("Heartbeat", "before assembly reload - writing reloading state");
+            _lastWrite = EditorApplication.timeSinceStartup;
+            try
+            {
+                _currentState = "reloading";
+                _stateEnteredAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+                string projectName = Path.GetFileName(
+                    Application.dataPath.Replace("/Assets", ""));
+
+                string json = "{\n" +
+                    "  \"state\": \"reloading\",\n" +
+                    $"  \"pid\": {System.Diagnostics.Process.GetCurrentProcess().Id},\n" +
+                    $"  \"version\": \"{BridgeServer.Version}\",\n" +
+                    $"  \"project\": \"{EscapeJson(projectName)}\",\n" +
+                    "  \"compileErrors\": false,\n" +
+                    "  \"compileErrorCount\": 0,\n" +
+                    "  \"compileTimeAvg\": 0,\n" +
+                    $"  \"stateEnteredAt\": {_stateEnteredAtUnix},\n" +
+                    $"  \"timestamp\": {DateTimeOffset.UtcNow.ToUnixTimeSeconds()}\n" +
+                    "}";
+
+                File.WriteAllText(_statusFile, json);
+                BridgeDiagnostics.Log("Heartbeat", $"reloading state written: {_statusFile}");
+            }
+            catch (Exception ex) { BridgeDiagnostics.LogException("Heartbeat WriteReloadingNow", ex); }
         }
 
         static string GetState()
@@ -112,9 +143,11 @@ namespace clibridge4unity
 
         static void Cleanup()
         {
+            BridgeDiagnostics.Log("Heartbeat", "cleanup enter");
             EditorApplication.update -= Tick;
             try { if (File.Exists(_statusFile)) File.Delete(_statusFile); }
-            catch { }
+            catch (Exception ex) { BridgeDiagnostics.LogException("Heartbeat cleanup", ex); }
+            BridgeDiagnostics.Log("Heartbeat", "cleanup exit");
         }
 
         static string EscapeJson(string s)

@@ -22,13 +22,21 @@ namespace clibridge4unity
     {
         static PdbCache()
         {
+            BridgeDiagnostics.Log("PdbCache", "static ctor enter");
             // Initialize PDB cache in background when Unity loads
             // Use SynchronizationContext (not EditorApplication.delayCall) per project mandate
             var ctx = System.Threading.SynchronizationContext.Current;
             if (ctx != null)
+            {
+                BridgeDiagnostics.Log("PdbCache", $"posting InitializeAsync via {ctx.GetType().Name}");
                 ctx.Post(_ => InitializeAsync(), null);
+            }
             else
+            {
+                BridgeDiagnostics.Log("PdbCache", "no sync context - initializing directly");
                 InitializeAsync();
+            }
+            BridgeDiagnostics.Log("PdbCache", "static ctor exit");
         }
         private static Dictionary<string, (string file, int startLine, int endLine)> _methodCache;
         private static bool _isInitialized;
@@ -47,6 +55,7 @@ namespace clibridge4unity
         {
             if (_isInitialized || _isInitializing) return;
             _isInitializing = true;
+            BridgeDiagnostics.Log("PdbCache", "InitializeAsync scheduling background load");
             System.Threading.Tasks.Task.Run(() => Initialize());
         }
 
@@ -62,6 +71,7 @@ namespace clibridge4unity
             {
                 if (_isInitialized) return;
 
+                BridgeDiagnostics.Log("PdbCache", "Initialize begin");
                 _methodCache = new Dictionary<string, (string, int, int)>(StringComparer.Ordinal);
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 int methodCount = 0;
@@ -104,6 +114,7 @@ namespace clibridge4unity
                 sw.Stop();
                 _isInitialized = true;
                 UnityEngine.Debug.Log($"[Bridge] PDB cache initialized: {methodCount} methods in {sw.ElapsedMilliseconds}ms");
+                BridgeDiagnostics.Log("PdbCache", $"Initialize end, methods={methodCount}, ms={sw.ElapsedMilliseconds}");
             }
         }
 
@@ -181,6 +192,7 @@ namespace clibridge4unity
         {
             lock (_lock)
             {
+                BridgeDiagnostics.Log("PdbCache", "Clear");
                 _methodCache?.Clear();
                 _methodCache = null;
                 _isInitialized = false;

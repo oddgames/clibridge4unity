@@ -75,6 +75,7 @@ namespace clibridge4unity
         {
             var sb = new System.Text.StringBuilder();
             sb.AppendLine($"bridgeVersion: {BridgeServer.Version}");
+            sb.AppendLine($"diagnosticLog: {BridgeDiagnostics.LogPath}");
             sb.AppendLine("--- heartbeat ---");
             sb.AppendLine(CommandRegistry.GetHeartbeatInfo());
             sb.AppendLine("--- thread ---");
@@ -176,6 +177,7 @@ namespace clibridge4unity
             return Response.SuccessWithData(new
             {
                 bridgeVersion = BridgeServer.Version,
+                diagnosticLog = BridgeDiagnostics.LogPath,
                 isCompiling = EditorApplication.isCompiling,
                 hasCompileErrors,
                 compileErrorCount,

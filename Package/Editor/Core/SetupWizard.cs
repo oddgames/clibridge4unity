@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using UnityEditor;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
@@ -26,16 +27,19 @@ namespace clibridge4unity
 
         static SetupWizard()
         {
+            BridgeDiagnostics.Log("SetupWizard", "static ctor - scheduling setup check");
             EditorApplication.delayCall += CheckSetup;
         }
 
         static void CheckSetup()
         {
+            BridgeDiagnostics.Log("SetupWizard", "CheckSetup enter");
             // Don't show if already set up or dismissed
             if (EditorPrefs.GetBool(PREF_KEY, false) || EditorPrefs.GetBool(PREF_DISMISSED, false))
             {
                 // Still check for version mismatch even if setup is complete
                 CheckVersionMismatch();
+                BridgeDiagnostics.Log("SetupWizard", "CheckSetup exit - setup complete/dismissed");
                 return;
             }
 
@@ -44,39 +48,57 @@ namespace clibridge4unity
             {
                 EditorPrefs.SetBool(PREF_KEY, true);
                 CheckVersionMismatch();
+                BridgeDiagnostics.Log("SetupWizard", "CheckSetup exit - CLI found");
                 return;
             }
 
             // Show setup wizard
             EditorApplication.delayCall += () =>
             {
+                BridgeDiagnostics.Log("SetupWizard", "opening setup wizard window");
                 GetWindow<SetupWizard>("CLI Bridge Setup", true);
             };
+            BridgeDiagnostics.Log("SetupWizard", "CheckSetup exit - CLI missing");
         }
 
         static void CheckVersionMismatch()
         {
+            BridgeDiagnostics.Log("SetupWizard", "CheckVersionMismatch enter");
+            var mainContext = SynchronizationContext.Current;
+
             // Run on background thread to not block editor
             System.Threading.Tasks.Task.Run(() =>
             {
                 try
                 {
                     string cliVersion = GetCliVersionString();
-                    if (string.IsNullOrEmpty(cliVersion)) return;
+                    if (string.IsNullOrEmpty(cliVersion))
+                    {
+                        BridgeDiagnostics.Log("SetupWizard", "version mismatch check skipped - CLI version unavailable");
+                        return;
+                    }
 
                     string packageVersion = GetPackageVersion();
-                    if (string.IsNullOrEmpty(packageVersion)) return;
+                    if (string.IsNullOrEmpty(packageVersion))
+                    {
+                        BridgeDiagnostics.Log("SetupWizard", "version mismatch check skipped - package version unavailable");
+                        return;
+                    }
+
+                    BridgeDiagnostics.Log("SetupWizard", $"version check: cli={cliVersion}, package={packageVersion}");
 
                     if (cliVersion != packageVersion)
                     {
-                        // Check if user already dismissed this specific mismatch
-                        string dismissedPair = SessionState.GetString(PREF_MISMATCH_DISMISSED, "");
                         string currentPair = $"{cliVersion}|{packageVersion}";
-                        if (dismissedPair == currentPair) return;
 
                         // Show dialog on main thread
-                        EditorApplication.delayCall += () =>
+                        mainContext?.Post(_ =>
                         {
+                            BridgeDiagnostics.Log("SetupWizard", "showing version mismatch dialog");
+                            // Check if user already dismissed this specific mismatch
+                            string dismissedPair = SessionState.GetString(PREF_MISMATCH_DISMISSED, "");
+                            if (dismissedPair == currentPair) return;
+
                             bool update = EditorUtility.DisplayDialog(
                                 "CLI Bridge Version Mismatch",
                                 $"The CLI tool on PATH is v{cliVersion} but the Unity package is v{packageVersion}.\n\n" +
@@ -93,10 +115,10 @@ namespace clibridge4unity
                             {
                                 SessionState.SetString(PREF_MISMATCH_DISMISSED, currentPair);
                             }
-                        };
+                        }, null);
                     }
                 }
-                catch { }
+                catch (Exception ex) { BridgeDiagnostics.LogException("SetupWizard CheckVersionMismatch", ex); }
             });
         }
 
@@ -105,27 +127,11 @@ namespace clibridge4unity
         /// </summary>
         static string GetCliVersionString()
         {
-            try
-            {
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = CLI_NAME,
-                    Arguments = "--version",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
+            if (!TryRunCliVersion(2000, out string output)) return null;
 
-                using (var process = Process.Start(startInfo))
-                {
-                    string output = process.StandardOutput.ReadToEnd();
-                    process.WaitForExit(2000);
-                    // Output is "clibridge4unity version X.Y.Z" — extract version
-                    var parts = output.Trim().Split(' ');
-                    return parts.Length >= 3 ? parts[2].Trim() : null;
-                }
-            }
-            catch { return null; }
+            // Output is "clibridge4unity version X.Y.Z" — extract version
+            var parts = output.Trim().Split(' ');
+            return parts.Length >= 3 ? parts[2].Trim() : null;
         }
 
         /// <summary>
@@ -418,6 +424,17 @@ namespace clibridge4unity
 
         static bool IsCliInPath()
         {
+            return TryRunCliVersion(2000, out _);
+        }
+
+        static string GetCliVersion()
+        {
+            return TryRunCliVersion(2000, out string output) ? output.Trim() : "Unknown";
+        }
+
+        static bool TryRunCliVersion(int timeoutMs, out string output)
+        {
+            output = "";
             try
             {
                 var startInfo = new ProcessStartInfo
@@ -432,39 +449,24 @@ namespace clibridge4unity
 
                 using (var process = Process.Start(startInfo))
                 {
-                    process.WaitForExit(2000);
+                    if (process == null) return false;
+
+                    if (!process.WaitForExit(timeoutMs))
+                    {
+                        BridgeDiagnostics.Log("SetupWizard", $"CLI version timed out after {timeoutMs}ms");
+                        try { process.Kill(); } catch { }
+                        return false;
+                    }
+
+                    output = process.StandardOutput.ReadToEnd();
+                    BridgeDiagnostics.Log("SetupWizard", $"CLI version exitCode={process.ExitCode}, outputChars={output.Length}");
                     return process.ExitCode == 0;
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                BridgeDiagnostics.LogException("SetupWizard TryRunCliVersion", ex);
                 return false;
-            }
-        }
-
-        static string GetCliVersion()
-        {
-            try
-            {
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = CLI_NAME,
-                    Arguments = "--version",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-
-                using (var process = Process.Start(startInfo))
-                {
-                    string output = process.StandardOutput.ReadToEnd();
-                    process.WaitForExit();
-                    return output.Trim();
-                }
-            }
-            catch
-            {
-                return "Unknown";
             }
         }
 

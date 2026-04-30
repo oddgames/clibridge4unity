@@ -20,7 +20,6 @@ namespace clibridge4unity
         private static readonly ConcurrentQueue<LogEntry> _pendingWrites = new ConcurrentQueue<LogEntry>();
         private static string _logFilePath;
         private static long _nextId;
-        private static volatile bool _isRunning = true;
 
         // Compile errors persist across log clears — tracked separately
         private static readonly List<CompilerMessage> _compileErrors = new List<CompilerMessage>();
@@ -28,6 +27,7 @@ namespace clibridge4unity
 
         static LogCommands()
         {
+            BridgeDiagnostics.Log("LogCommands", "static ctor enter");
             // Restore log ID counter across domain reloads
             _nextId = UnityEditor.SessionState.GetInt(SessionKeys.LogNextId, 1);
 
@@ -50,6 +50,7 @@ namespace clibridge4unity
             string normalizedPath = Application.dataPath.Replace("/Assets", "").ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
             string projectHash = BridgeServer.GetDeterministicHashCode(normalizedPath).ToString("X8");
             _logFilePath = Path.Combine(Path.GetTempPath(), $"clibridge4unity_logs_{projectHash}.log");
+            BridgeDiagnostics.Log("LogCommands", $"log file: {_logFilePath}");
 
             // Register hooks with CommandRegistry (avoids circular asmdef dependency)
             CommandRegistry.GetLastLogId = GetLastLogId;
@@ -68,7 +69,8 @@ namespace clibridge4unity
             Application.logMessageReceived += OnLogMessage;
             UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += () =>
             {
-                _isRunning = false;
+                BridgeDiagnostics.Log("LogCommands", "before assembly reload enter");
+                UnityEditor.EditorApplication.update -= FlushPendingWrites;
                 Application.logMessageReceived -= OnLogMessage;
                 CompilationPipeline.assemblyCompilationFinished -= OnAssemblyCompilationFinished;
                 UnityEditor.SessionState.SetInt(SessionKeys.LogNextId, (int)_nextId);
@@ -84,6 +86,7 @@ namespace clibridge4unity
                 }
 
                 FlushPendingWrites();
+                BridgeDiagnostics.Log("LogCommands", "before assembly reload exit");
             };
 
             // Flush pending writes periodically via editor update
@@ -93,9 +96,13 @@ namespace clibridge4unity
             try
             {
                 if (File.Exists(_logFilePath) && new FileInfo(_logFilePath).Length > 1_000_000)
+                {
                     TrimLogFile(500);
+                    BridgeDiagnostics.Log("LogCommands", "trimmed log file");
+                }
             }
-            catch { }
+            catch (Exception ex) { BridgeDiagnostics.LogException("LogCommands trim", ex); }
+            BridgeDiagnostics.Log("LogCommands", "static ctor exit");
         }
 
         private static void OnAssemblyCompilationFinished(string assemblyPath, CompilerMessage[] messages)
@@ -108,6 +115,8 @@ namespace clibridge4unity
                     if (msg.type == CompilerMessageType.Error)
                         _compileErrors.Add(msg);
                 }
+                if (_compileErrors.Count > 0)
+                    BridgeDiagnostics.Log("LogCommands", $"compile errors tracked: {_compileErrors.Count}, assembly={assemblyPath}");
             }
         }
 
@@ -256,8 +265,10 @@ namespace clibridge4unity
             if (_pendingWrites.IsEmpty) return;
 
             var sb = new StringBuilder();
+            int count = 0;
             while (_pendingWrites.TryDequeue(out var entry))
             {
+                count++;
                 string typeTag = LogTypeToTag(entry.Type);
                 // Tab-separated format: ID\tTimestamp\tType\tMessage\tStackTrace
                 string msg = entry.Message?.Replace("\n", "\\n").Replace("\t", " ") ?? "";
@@ -268,7 +279,8 @@ namespace clibridge4unity
             if (sb.Length > 0)
             {
                 try { File.AppendAllText(_logFilePath, sb.ToString()); }
-                catch { }
+                catch (Exception ex) { BridgeDiagnostics.LogException("LogCommands FlushPendingWrites", ex); }
+                BridgeDiagnostics.Log("LogCommands", $"flushed pending writes: {count}");
             }
         }
 

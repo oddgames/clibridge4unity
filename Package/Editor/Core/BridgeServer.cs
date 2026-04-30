@@ -21,11 +21,13 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.88";
+        public const string Version = "1.0.90";
 
         private static CancellationTokenSource serverCts;
-        private static NamedPipeServerStream currentPipeServer;
+        private static readonly object serverLock = new object();
+        private static readonly List<NamedPipeServerStream> activePipeServers = new List<NamedPipeServerStream>();
         private static string pipeName;
+        private static volatile bool isStopping;
 
         // Main thread context for Unity API calls
         private static SynchronizationContext mainThreadContext;
@@ -33,15 +35,20 @@ namespace clibridge4unity
         // Compilation tracking
         private static DateTime lastCompileRequestTime;
         private static DateTime lastCompileCompleteTime;
-        private static TaskCompletionSource<bool> compilationTcs;
 
         static BridgeServer()
         {
             // Don't start the bridge in batch mode (AssetImportWorker processes)
-            if (Application.isBatchMode) return;
+            BridgeDiagnostics.Log("BridgeServer", "static ctor enter");
+            if (Application.isBatchMode)
+            {
+                BridgeDiagnostics.Log("BridgeServer", "batch mode - server disabled");
+                return;
+            }
 
             // Capture main thread context for invoking Unity APIs from background threads
             mainThreadContext = SynchronizationContext.Current;
+            BridgeDiagnostics.Log("BridgeServer", $"captured sync context: {mainThreadContext?.GetType().Name ?? "null"}");
 
             // Force Unity to keep processing in background so commands work without focus
             Application.runInBackground = true;
@@ -60,6 +67,7 @@ namespace clibridge4unity
             AssemblyReloadEvents.beforeAssemblyReload += StopServerImmediately;
             CompilationPipeline.compilationStarted += OnCompilationStarted;
             CompilationPipeline.compilationFinished += OnCompilationFinished;
+            BridgeDiagnostics.Log("BridgeServer", "registered reload/compilation handlers");
 
             // Check if we just came back from a compilation (domain reload completed)
             // lastCompileRequest > lastCompileFinished means compilation was in progress
@@ -76,17 +84,22 @@ namespace clibridge4unity
                 // Record compile duration (request → domain reload complete)
                 int duration = (int)(lastCompileCompleteTime - new DateTime(requestTicks)).TotalSeconds;
                 if (duration > 0 && duration < 600)
+                {
                     RecordCompileDuration(duration);
-
+                    BridgeDiagnostics.Log("BridgeServer", $"domain reload completed after compile request, duration={duration}s");
+                }
 
             }
             else if (finishedTicks > 0)
             {
                 lastCompileCompleteTime = new DateTime(finishedTicks);
+                BridgeDiagnostics.Log("BridgeServer", $"restored last compile complete time: {lastCompileCompleteTime:O}");
             }
 
             pipeName = GeneratePipeName();
+            BridgeDiagnostics.Log("BridgeServer", $"pipe name: {pipeName}");
             StartServer();
+            BridgeDiagnostics.Log("BridgeServer", "static ctor exit");
         }
 
         /// <summary>
@@ -151,34 +164,59 @@ namespace clibridge4unity
 
         private static void StartServer()
         {
-            if (serverCts != null) return;
+            lock (serverLock)
+            {
+                if (serverCts != null) return;
 
-            serverCts = new CancellationTokenSource();
+                isStopping = false;
+                serverCts = new CancellationTokenSource();
+            }
+
             // Run multiple concurrent server loops to handle simultaneous connections
             for (int i = 0; i < 3; i++)
-                Task.Run(async () => await ServerLoop(serverCts.Token));
+            {
+                int listenerId = i + 1;
+                Task.Run(() => ServerLoop(listenerId, serverCts.Token));
+            }
             Debug.Log($"[Bridge] Server started: {pipeName} (3 listeners)");
+            BridgeDiagnostics.Log("BridgeServer", "server started with 3 listeners");
         }
 
         private static void StopServerImmediately()
         {
+            BridgeDiagnostics.Log("BridgeServer", "StopServerImmediately enter");
+            CancellationTokenSource cts = null;
+            NamedPipeServerStream[] pipes;
+
+            lock (serverLock)
+            {
+                if (serverCts == null && activePipeServers.Count == 0) return;
+
+                isStopping = true;
+                cts = serverCts;
+                serverCts = null;
+                pipes = activePipeServers.ToArray();
+                activePipeServers.Clear();
+            }
+
             try
             {
-                serverCts?.Cancel();
-                currentPipeServer?.Dispose();
+                cts?.Cancel();
             }
             catch { }
-            finally
+
+            foreach (var pipe in pipes)
             {
-                serverCts = null;
-                currentPipeServer = null;
+                try { pipe.Dispose(); } catch { }
             }
+            BridgeDiagnostics.Log("BridgeServer", $"StopServerImmediately exit, disposedPipes={pipes.Length}");
         }
 
         private static void OnCompilationStarted(object ctx)
         {
             lastCompileRequestTime = DateTime.Now;
             SessionState.SetString(SessionKeys.LastCompileRequest, lastCompileRequestTime.Ticks.ToString());
+            BridgeDiagnostics.Log("BridgeServer", $"compilation started ctx={ctx}");
         }
 
         private static void RecordCompileDuration(int seconds)
@@ -215,32 +253,64 @@ namespace clibridge4unity
         {
             // Don't set lastCompileTime here — domain reload hasn't happened yet.
             // The [InitializeOnLoad] constructor sets it after domain reload completes.
-            compilationTcs?.TrySetResult(true);
+            BridgeDiagnostics.Log("BridgeServer", $"compilation finished ctx={ctx}");
         }
 
-        private static async Task ServerLoop(CancellationToken ct)
+        private static async Task ServerLoop(int listenerId, CancellationToken ct)
         {
+            BridgeDiagnostics.Log("BridgeServer", $"listener {listenerId} loop enter");
             while (!ct.IsCancellationRequested)
             {
+                NamedPipeServerStream pipe = null;
                 try
                 {
-                    using var pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut,
+                    pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut,
                         NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
-                    currentPipeServer = pipe;
 
+                    lock (serverLock)
+                    {
+                        if (isStopping || ct.IsCancellationRequested)
+                        {
+                            pipe.Dispose();
+                            break;
+                        }
+                        activePipeServers.Add(pipe);
+                    }
+
+                    BridgeDiagnostics.Log("BridgeServer", $"listener {listenerId} waiting for connection");
                     await pipe.WaitForConnectionAsync(ct);
+                    BridgeDiagnostics.Log("BridgeServer", $"listener {listenerId} connected");
                     await HandleClient(pipe, ct);
                 }
-                catch (OperationCanceledException) { break; }
+                catch (OperationCanceledException)
+                {
+                    BridgeDiagnostics.Log("BridgeServer", $"listener {listenerId} canceled");
+                    break;
+                }
+                catch (ObjectDisposedException) when (ct.IsCancellationRequested || isStopping)
+                {
+                    BridgeDiagnostics.Log("BridgeServer", $"listener {listenerId} disposed during shutdown");
+                    break;
+                }
                 catch (Exception ex)
                 {
                     if (!ct.IsCancellationRequested)
                     {
+                        BridgeDiagnostics.LogException($"BridgeServer listener {listenerId}", ex);
                         Debug.LogError($"[Bridge] Error: {ex.Message}");
                         await Task.Delay(1000, ct);
                     }
                 }
+                finally
+                {
+                    if (pipe != null)
+                    {
+                        lock (serverLock) activePipeServers.Remove(pipe);
+                        try { pipe.Dispose(); } catch { }
+                    }
+                }
             }
+            BridgeDiagnostics.Log("BridgeServer", $"listener {listenerId} loop exit");
         }
 
         private static async Task HandleClient(NamedPipeServerStream pipe, CancellationToken ct)
@@ -265,6 +335,7 @@ namespace clibridge4unity
 
                 string rawData = dataBuilder.ToString().Trim();
                 if (string.IsNullOrEmpty(rawData)) return;
+                BridgeDiagnostics.Log("BridgeServer", $"raw request received, chars={rawData.Length}");
 
                 // Plain text format: "COMMAND|data", "COMMAND data", or just "COMMAND"
                 int pipeIdx = rawData.IndexOf('|');
@@ -298,6 +369,8 @@ namespace clibridge4unity
                         data = "";
                     }
                 }
+
+                BridgeDiagnostics.Log("BridgeServer", $"command parsed: {command}, dataChars={data?.Length ?? 0}");
 
                 // Timeout from attribute — no hardcoded fallbacks
                 var cmdInfo = CommandRegistry.GetCommand(command);
@@ -352,10 +425,13 @@ namespace clibridge4unity
                 string response;
                 try
                 {
+                    BridgeDiagnostics.Log("BridgeServer", $"execute begin: {command}, timeoutSec={timeoutSec}");
                     response = await CommandRegistry.ExecuteCommand(command, data, pipe, timeoutCts.Token);
+                    BridgeDiagnostics.Log("BridgeServer", $"execute end: {command}, responseChars={response?.Length ?? 0}");
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
+                    BridgeDiagnostics.Log("BridgeServer", $"execute timeout: {command}");
                     response = Response.Error($"Command '{command}' timed out after {timeoutSec}s");
                 }
                 finally
@@ -381,13 +457,16 @@ namespace clibridge4unity
                     finally { pipeWriteLock.Release(); }
                 }
                 pipe.Disconnect();
+                BridgeDiagnostics.Log("BridgeServer", $"client disconnected after command: {command}");
             }
             catch (IOException)
             {
                 // Pipe broken - client disconnected during operation
+                BridgeDiagnostics.Log("BridgeServer", $"pipe broken during command: {command ?? "unknown"}");
             }
             catch (Exception ex)
             {
+                BridgeDiagnostics.LogException("BridgeServer client", ex);
                 Debug.LogError($"[Bridge] Client error: {ex.Message}");
             }
         }

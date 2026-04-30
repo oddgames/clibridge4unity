@@ -179,12 +179,39 @@ class Program
     //   - At Main exit: read the cached JSON and print the update banner (version + release
     //     notes) to stderr. Never blocks on the network — the banner reflects whatever was
     //     in cache at exit time. Next run picks up the fresh cache.
-    //   - --version calls FetchAndShowUpdate() synchronously (allowed to block up to 5s).
+    //   - --version prints immediately; any update notice comes from the cached JSON.
 
     static string UpdateCacheDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".clibridge4unity");
     static string UpdateCacheFile => Path.Combine(UpdateCacheDir, ".last_update_check");
     static string CompileTimesFile => Path.Combine(UpdateCacheDir, ".compile_times");
+    static string CliTraceFile => Path.Combine(UpdateCacheDir, "clibridge4unity_cli.log");
+    static readonly object CliTraceLock = new object();
+
+    static void CliTrace(string area, string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(UpdateCacheDir);
+            string line = $"{DateTimeOffset.UtcNow:O}\tpid={Process.GetCurrentProcess().Id}\tthread={Thread.CurrentThread.ManagedThreadId}\t{area}\t{message}";
+            lock (CliTraceLock)
+            {
+                try
+                {
+                    var info = new FileInfo(CliTraceFile);
+                    if (info.Exists && info.Length > 1_000_000)
+                    {
+                        string previous = CliTraceFile + ".prev";
+                        if (File.Exists(previous)) File.Delete(previous);
+                        File.Move(CliTraceFile, previous);
+                    }
+                }
+                catch { }
+                File.AppendAllText(CliTraceFile, line + Environment.NewLine);
+            }
+        }
+        catch { }
+    }
 
     /// <summary>Kick off a non-blocking refresh of the release cache if it's stale.</summary>
     static void StartBackgroundUpdateFetch()
@@ -200,7 +227,7 @@ class Program
     }
 
     /// <summary>
-    /// Synchronous fetch + display for --version (allowed to block up to 5s)
+    /// Synchronous fetch + display for explicit update checks.
     /// </summary>
     static void FetchAndShowUpdate()
     {
@@ -571,17 +598,37 @@ class Program
 
     static int Main(string[] args)
     {
-        // Kick off the background update fetch immediately (non-blocking). Runs
-        // concurrently with the command; result is used by PrintUpdateBannerAtExit below.
-        StartBackgroundUpdateFetch();
-        try { return MainImpl(args); }
+        CliTrace("Main", $"enter args={string.Join(" ", args.Select(a => a?.Length > 120 ? a.Substring(0, 120) + "..." : a ?? ""))}");
+        bool versionOnly = args.Length == 1 && args[0] == "--version";
+
+        // Keep --version side-effect-free. Unity's setup wizard calls it from the
+        // editor during startup/reload, so it must not spawn update-check work.
+        if (!versionOnly)
+            StartBackgroundUpdateFetch();
+
+        try
+        {
+            int code = MainImpl(args);
+            CliTrace("Main", $"exit code={code}");
+            return code;
+        }
+        catch (Exception ex)
+        {
+            CliTrace("Main", $"unhandled {ex.GetType().Name}: {ex.Message}");
+            throw;
+        }
         finally
         {
             // Remove the session ledger entry so other agents stop seeing us as active.
             try { if (_sessionFile != null) File.Delete(_sessionFile); } catch { }
+
             // Print the update banner last so it appears at the bottom of the output,
             // after the command's normal stdout/stderr. Uses cached JSON only — no delay.
-            try { ShowCachedUpdateNotice(); } catch { }
+            if (!versionOnly)
+            {
+                try { ShowCachedUpdateNotice(); } catch { }
+            }
+            CliTrace("Main", "finally exit");
         }
     }
 
@@ -629,9 +676,8 @@ class Program
             }
             else if (arg == "--version")
             {
+                CliTrace("MainImpl", "--version requested");
                 Console.WriteLine($"clibridge4unity version {CLI_VERSION}");
-                // --version is allowed to block briefly to fetch and show update info
-                FetchAndShowUpdate();
                 return EXIT_SUCCESS;
             }
             else if (arg == "--wait" || arg == "-w")
@@ -1470,6 +1516,7 @@ class Program
 
     static int SendCommand(string pipeName, string projectPath, string command, string data)
     {
+        CliTrace("SendCommand", $"begin command={command}, dataChars={data?.Length ?? 0}, pipe={pipeName}, project={projectPath}");
         try
         {
             // For CODE_EXEC commands, resolve file paths and fix shell mangling
@@ -1548,18 +1595,22 @@ class Program
             int waitedForBusyMs = HeartbeatAwarePreWait(projectPath, command, out string busyMsg);
             if (busyMsg != null)
             {
+                CliTrace("SendCommand", $"prewait busy command={command}, waitedMs={waitedForBusyMs}, msg={busyMsg.Replace('\n', ' ')}");
                 Console.Error.WriteLine(busyMsg);
                 return EXIT_TIMEOUT;
             }
 
             using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
+            CliTrace("SendCommand", $"connecting pipe command={command}");
             pipe.Connect(1000);
+            CliTrace("SendCommand", $"connected pipe command={command}");
 
             // Send command
             string message = string.IsNullOrEmpty(data) ? command : $"{command}|{data}";
             byte[] msgBytes = Encoding.UTF8.GetBytes(message + "\n");
             pipe.Write(msgBytes, 0, msgBytes.Length);
             pipe.Flush();
+            CliTrace("SendCommand", $"sent command={command}, bytes={msgBytes.Length}");
 
             // Mark command-start time so we can correlate with Unity crash dumps
             DateTime commandStart = DateTime.UtcNow;
@@ -1588,6 +1639,7 @@ class Program
                         readTimeoutMs = Math.Max(2000, hintSec * 1000 - waitedForBusyMs);
                     gotTimeoutHint = true;
                     cts.CancelAfter(readTimeoutMs);
+                    CliTrace("SendCommand", $"timeout hint command={command}, timeoutMs={readTimeoutMs}");
                     return;
                 }
                 Console.WriteLine(line);
@@ -1627,21 +1679,25 @@ class Program
                 string crashReport = DetectUnityCrash(commandStart);
                 if (crashReport != null)
                 {
+                    CliTrace("SendCommand", $"Unity crash detected command={command}");
                     Console.Error.WriteLine($"\nError: Unity CRASHED during '{command}'.");
                     Console.Error.Write(crashReport);
                     return EXIT_COMMAND_ERROR;
                 }
                 if (readEx is IOException)
                 {
+                    CliTrace("SendCommand", $"pipe disconnected command={command}");
                     Console.Error.WriteLine($"\nError: Pipe disconnected during '{command}' (likely domain reload).");
                     return EXIT_CONNECTION;
                 }
                 if (stallFired)
                 {
+                    CliTrace("SendCommand", $"stall command={command}");
                     Console.Error.WriteLine($"\nError: Command '{command}' stalled (no heartbeat for {STALL_IDLE_MS / 1000}s). Unity may be hung.");
                 }
                 else
                 {
+                    CliTrace("SendCommand", $"timeout command={command}, readTimeoutMs={readTimeoutMs}");
                     Console.Error.WriteLine($"\nError: Command '{command}' timed out after {readTimeoutMs / 1000}s.");
                 }
                 Console.Error.Write(BuildDiagnosticReport(projectPath));
@@ -1652,6 +1708,7 @@ class Program
             string response = responseBuilder.ToString();
             if (ShouldWaitForReconnection(response, out int timeoutSeconds))
             {
+                CliTrace("SendCommand", $"reconnect requested command={command}, timeoutSec={timeoutSeconds}");
                 return WaitForCompilationAndReconnect(pipeName, projectPath, timeoutSeconds);
             }
 
@@ -1674,10 +1731,12 @@ class Program
             // Save result to history for retrieval via LAST command
             SaveCommandHistory(command, data, response);
 
+            CliTrace("SendCommand", $"success command={command}, responseChars={response.Length}");
             return EXIT_SUCCESS;
         }
         catch (TimeoutException)
         {
+            CliTrace("SendCommand", $"connect timeout command={command}");
             Console.Error.WriteLine($"Error: Pipe connection timed out for command '{command}'.");
             Console.Error.Write(BuildDiagnosticReport(projectPath));
             Console.Error.WriteLine("action: Try 'clibridge4unity WAKEUP refresh' to wake Unity and force recompile.");
@@ -1685,18 +1744,21 @@ class Program
         }
         catch (OperationCanceledException)
         {
+            CliTrace("SendCommand", $"operation canceled command={command}");
             Console.Error.WriteLine($"Error: Command '{command}' timed out.");
             Console.Error.Write(BuildDiagnosticReport(projectPath));
             return EXIT_TIMEOUT;
         }
         catch (IOException ex)
         {
+            CliTrace("SendCommand", $"io exception command={command}: {ex.Message}");
             Console.Error.WriteLine($"Error: Pipe broken during '{command}': {ex.Message}");
             Console.Error.Write(BuildDiagnosticReport(projectPath));
             return EXIT_CONNECTION;
         }
         catch (Exception ex)
         {
+            CliTrace("SendCommand", $"exception command={command}: {ex.GetType().Name}: {ex.Message}");
             Console.Error.WriteLine($"Error: {ex.Message}");
             Console.Error.Write(BuildDiagnosticReport(projectPath));
             return EXIT_COMMAND_ERROR;
@@ -1773,8 +1835,10 @@ class Program
 
     static string SendCommandGetResponse(string pipeName, string command, string data, int timeoutMs = 15000)
     {
+        CliTrace("SendCommandGetResponse", $"begin command={command}, dataChars={data?.Length ?? 0}, timeoutMs={timeoutMs}");
         using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
         pipe.Connect(1000);
+        CliTrace("SendCommandGetResponse", $"connected command={command}");
 
         string message = string.IsNullOrEmpty(data) ? command : $"{command}|{data}";
         byte[] msgBytes = Encoding.UTF8.GetBytes(message + "\n");
@@ -1798,6 +1862,7 @@ class Program
         catch (OperationCanceledException) { }
         catch (AggregateException ex) when (ex.InnerException is OperationCanceledException) { }
 
+        CliTrace("SendCommandGetResponse", $"end command={command}, responseChars={responseBuilder.Length}");
         return responseBuilder.ToString();
     }
 
@@ -1889,6 +1954,7 @@ class Program
 
     static int WaitForCompilationAndReconnect(string pipeName, string projectPath, int timeoutSeconds, DateTime requestedAt)
     {
+        CliTrace("WaitForCompilationAndReconnect", $"begin timeoutSec={timeoutSeconds}, requestedAt={requestedAt:O}");
         Console.WriteLine($"\n[CLI] Waiting for Unity to complete compilation (up to {timeoutSeconds} seconds)...");
         Console.WriteLine($"[CLI] Pipe name: {pipeName}");
 
@@ -1918,6 +1984,7 @@ class Program
 
                 if (!hasConnectedOnce)
                 {
+                    CliTrace("WaitForCompilationAndReconnect", $"reconnected after {currentSeconds}s attempts={attemptCount}");
                     Console.WriteLine($"[CLI] Reconnected to Unity after {currentSeconds} seconds (attempt #{attemptCount})");
                     hasConnectedOnce = true;
                 }
@@ -1941,6 +2008,7 @@ class Program
                 // Check for compile errors (terminal state — don't keep waiting)
                 if (HasCompileErrors(statusResponse, out int errorCount))
                 {
+                    CliTrace("WaitForCompilationAndReconnect", $"compile errors count={errorCount}, elapsed={currentSeconds}s");
                     Console.Error.WriteLine($"\n[CLI] Compilation finished with {errorCount} error(s) in {currentSeconds} seconds");
                     Console.Error.WriteLine($"[CLI] Total connection attempts: {attemptCount}");
                     Console.Error.WriteLine();
@@ -1959,6 +2027,7 @@ class Program
                 // Check if Unity entered play mode (shouldn't compile during play)
                 if (statusResponse.Contains("isPlaying: True"))
                 {
+                    CliTrace("WaitForCompilationAndReconnect", "Unity entered play mode");
                     Console.Error.WriteLine($"\n[CLI] Unity entered play mode — cannot compile. Use STOP first.");
                     return EXIT_PLAY_MODE;
                 }
@@ -1966,6 +2035,7 @@ class Program
                 // Parse status to check if still compiling
                 if (IsCompilationComplete(statusResponse, requestedAt))
                 {
+                    CliTrace("WaitForCompilationAndReconnect", $"complete elapsed={currentSeconds}s attempts={attemptCount}");
                     Console.WriteLine($"[CLI] Compilation completed in {currentSeconds} seconds");
                     Console.WriteLine($"[CLI] Total connection attempts: {attemptCount}");
                     RecordCompileTime(projectPath, currentSeconds);
@@ -2011,6 +2081,7 @@ class Program
                             // Unity has been idle for 15s without compiling our request.
                             // Re-send COMPILE — original request was likely lost during domain reload.
                             Console.WriteLine($"[CLI] Unity idle for {idleStaleSeconds}s without compiling. Re-triggering...");
+                            CliTrace("WaitForCompilationAndReconnect", "idle stale - retrigger compile");
                             hasRetriggered = true;
                             requestedAt = DateTime.Now;
                             SendCommandGetResponse(pipeName, "COMPILE", "");
@@ -2019,6 +2090,7 @@ class Program
                         {
                             // Already re-triggered and waited another 15s. Accept as done.
                             Console.WriteLine($"[CLI] No compilation needed (Unity reports no changes).");
+                            CliTrace("WaitForCompilationAndReconnect", "no compilation needed after retrigger");
                             Console.WriteLine(statusResponse);
                             return EXIT_SUCCESS;
                         }
@@ -2049,6 +2121,7 @@ class Program
                 // Print status update every 5 seconds when not connected
                 if (currentSeconds - lastUpdateSeconds >= 5)
                 {
+                    CliTrace("WaitForCompilationAndReconnect", $"connect timeout elapsed={currentSeconds}s attempts={attemptCount}");
                     Console.WriteLine($"[CLI] Waiting for Unity to restart... ({currentSeconds}s / {timeoutSeconds}s, attempt #{attemptCount})");
                     lastUpdateSeconds = currentSeconds;
                 }
@@ -2058,6 +2131,7 @@ class Program
                 // Print detailed error for unexpected exceptions
                 if (currentSeconds - lastUpdateSeconds >= 5)
                 {
+                    CliTrace("WaitForCompilationAndReconnect", $"connection error {ex.GetType().Name}: {ex.Message}");
                     Console.WriteLine($"[CLI] Connection error: {ex.GetType().Name} - {ex.Message} ({currentSeconds}s / {timeoutSeconds}s)");
                     lastUpdateSeconds = currentSeconds;
                 }
@@ -2065,6 +2139,7 @@ class Program
         }
 
         Console.Error.WriteLine($"\n[CLI] Error: Timeout after {timeoutSeconds} seconds waiting for compilation");
+        CliTrace("WaitForCompilationAndReconnect", $"timeout timeoutSec={timeoutSeconds}, attempts={attemptCount}, connected={hasConnectedOnce}");
         Console.Error.WriteLine($"[CLI] Total connection attempts: {attemptCount}");
         Console.Error.WriteLine($"[CLI] Reconnected at least once: {hasConnectedOnce}");
         return EXIT_TIMEOUT;
@@ -2612,6 +2687,7 @@ class Program
             // Stale heartbeat = domain reload in progress. Check if it's been frozen too long.
             string stuck = CheckStuckDomainReload(projectPath);
             if (stuck != null) { busyMessage = stuck; return -1; }
+            CliTrace("HeartbeatAwarePreWait", $"no fresh heartbeat command={command}");
             return 0;
         }
 
@@ -2627,6 +2703,7 @@ class Program
         // keep waiting — this handles N-deep reload chains automatically.
         if (state == "ready" || state == "playing" || state == "paused")
         {
+            CliTrace("HeartbeatAwarePreWait", $"state={state}, command={command}");
             if (state == "ready" && enteredAt > 0)
             {
                 int sinceReady = (int)Math.Max(0, nowUnix - enteredAt);
@@ -2648,6 +2725,7 @@ class Program
                         else
                             stableMs = 0; // cascade reload started — reset stability counter
                     }
+                    CliTrace("HeartbeatAwarePreWait", $"ready settle waitedMs={totalWaitMs}, stableMs={stableMs}");
                     return totalWaitMs;
                 }
             }
@@ -2676,6 +2754,7 @@ class Program
             }
             busyMessage = $"Error: Unity stuck in '{state}' for {elapsed}s (avg {avg}s). Possibly wedged.\n" +
                           $"       Try: clibridge4unity DIAG, or 'clibridge4unity KILL' to force-terminate (loses unsaved work).";
+            CliTrace("HeartbeatAwarePreWait", $"wedged state={state}, elapsed={elapsed}, avg={avg}");
             return -1;
         }
 
@@ -2684,12 +2763,14 @@ class Program
         {
             busyMessage = $"busy: {state} (~{estRemaining}s remaining, elapsed {elapsed}s of avg {avg}s)\n" +
                           $"retry: clibridge4unity {command} ...";
+            CliTrace("HeartbeatAwarePreWait", $"busy state={state}, elapsed={elapsed}, avg={avg}, estRemaining={estRemaining}");
             return -1;
         }
 
         // Short enough to wait inline — but consume from the read budget so we still fail fast if Unity hangs.
         if (estRemaining > 0)
         {
+            CliTrace("HeartbeatAwarePreWait", $"inline wait state={state}, estRemaining={estRemaining}s");
             System.Threading.Thread.Sleep(estRemaining * 1000);
             return estRemaining * 1000;
         }

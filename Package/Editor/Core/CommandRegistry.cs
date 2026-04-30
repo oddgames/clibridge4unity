@@ -80,17 +80,7 @@ namespace clibridge4unity
         private const uint WM_PAINT = 0x000F;
         private static IntPtr _unityWindowHandle;
 
-        // Win32 timer for reliable main thread processing even when Unity is in background.
-        // Unlike EditorApplication.update or SynchronizationContext.Post, this fires via
-        // DispatchMessage in the Win32 message pump — which runs even when Unity is idle/background.
-        private delegate void TimerProc(IntPtr hWnd, uint uMsg, UIntPtr nIDEvent, uint dwTime);
-        [DllImport("user32.dll")]
-        private static extern UIntPtr SetTimer(IntPtr hWnd, UIntPtr nIDEvent, uint uElapse, TimerProc lpTimerFunc);
-        [DllImport("user32.dll")]
-        private static extern bool KillTimer(IntPtr hWnd, UIntPtr uIDEvent);
-        private static TimerProc _timerCallback; // prevent GC of the delegate
-        private static UIntPtr _timerId;
-        private static long _timerTickCount; // increments on each timer tick for diagnostics
+        private static long _timerTickCount; // increments on each editor update for diagnostics
         private static DateTime _lastTimerTick;
 
         private class MainThreadWork
@@ -104,87 +94,70 @@ namespace clibridge4unity
 
         // Captured on main thread for SynchronizationContext.Post
         private static SynchronizationContext _mainThreadContext;
+        private static double _lastHwndRefreshTime;
 
         static CommandRegistry()
         {
             // Don't initialize in batch mode (AssetImportWorker processes)
-            if (Application.isBatchMode) return;
+            BridgeDiagnostics.Log("CommandRegistry", "static ctor enter");
+            if (Application.isBatchMode)
+            {
+                BridgeDiagnostics.Log("CommandRegistry", "batch mode - registry disabled");
+                return;
+            }
 
-            // Capture main thread context + window handle
+            // Keep InitializeOnLoad cheap. Unity can run static constructors while the
+            // reload progress UI owns the message pump; Win32 window enumeration/timers in
+            // this path have caused reload hangs before the bridge can log anything.
             _mainThreadContext = SynchronizationContext.Current;
+            _lastTimerTick = DateTime.Now;
+            BridgeDiagnostics.Log("CommandRegistry", $"captured sync context: {_mainThreadContext?.GetType().Name ?? "null"}");
 
-            // Restore HWND from SessionState first (survives domain reloads)
-            // CRITICAL: GetClassName can hang if the saved HWND is stale/invalid (blocks domain reload).
-            // Use IsWindow to validate the handle exists before calling GetClassName.
-            string rawSessionHwnd = SessionState.GetString(SessionKeys.UnityHwnd, "0");
-            long savedHwnd = 0;
-            if (long.TryParse(rawSessionHwnd, out savedHwnd) && savedHwnd != 0)
-            {
-                var candidate = new IntPtr(savedHwnd);
-                if (IsWindow(candidate))
-                {
-                    var classBuf = new StringBuilder(256);
-                    GetClassName(candidate, classBuf, 256);
-                    if (classBuf.ToString() == "UnityContainerWndClass")
-                        _unityWindowHandle = candidate;
-                }
-            }
+            EditorApplication.update += OnEditorUpdate;
 
-            // If no valid HWND, discover it by matching project name in window title
-            if (_unityWindowHandle == IntPtr.Zero)
-            {
-                _unityWindowHandle = FindUnityMainWindow();
-                if (_unityWindowHandle != IntPtr.Zero)
-                    SessionState.SetString(SessionKeys.UnityHwnd, _unityWindowHandle.ToInt64().ToString());
-                else
-                    Debug.LogWarning($"[Bridge] FindUnityMainWindow returned 0! SessionState raw='{rawSessionHwnd}'");
-            }
-
-            // Three redundant main-thread processing paths:
-            // 1. EditorApplication.update - fires when Unity's editor loop ticks
-            EditorApplication.update += ProcessAllPendingWork;
-
-            // 2. Win32 timer - fires via DispatchMessage even when Unity is in background/idle.
-            //    This is the most reliable path because it doesn't depend on Unity's editor loop.
-            _timerCallback = OnTimerTick;
-            _timerId = SetTimer(IntPtr.Zero, UIntPtr.Zero, 50, _timerCallback);
-
-            // 3. Background thread that posts via SynchronizationContext AND sends wake messages
             var wakeThread = new Thread(WakeLoop)
             {
                 Name = "Bridge Wake Thread",
                 IsBackground = true
             };
             wakeThread.Start();
+            BridgeDiagnostics.Log("CommandRegistry", "wake thread started");
 
-            AssemblyReloadEvents.beforeAssemblyReload += () =>
-            {
-                _isRunning = false;
-                EditorApplication.update -= ProcessAllPendingWork;
-                // Kill the Win32 timer
-                if (_timerId != UIntPtr.Zero)
-                {
-                    KillTimer(IntPtr.Zero, _timerId);
-                    _timerId = UIntPtr.Zero;
-                }
-                // Save HWND for next domain reload
-                if (_unityWindowHandle != IntPtr.Zero)
-                    SessionState.SetString(SessionKeys.UnityHwnd, _unityWindowHandle.ToInt64().ToString());
-            };
+            AssemblyReloadEvents.beforeAssemblyReload += ShutdownForReload;
 
             Debug.Log($"[Bridge] CommandRegistry init - HWND: {_unityWindowHandle}, SyncCtx: {_mainThreadContext?.GetType().Name}");
+            BridgeDiagnostics.Log("CommandRegistry", "static ctor exit");
         }
 
-        /// <summary>
-        /// Win32 timer callback — fires via DispatchMessage even when Unity is backgrounded.
-        /// This is the most reliable way to process main thread work when Unity doesn't have focus.
-        /// </summary>
-        private static void OnTimerTick(IntPtr hWnd, uint uMsg, UIntPtr nIDEvent, uint dwTime)
+        private static void ShutdownForReload()
+        {
+            BridgeDiagnostics.Log("CommandRegistry", "ShutdownForReload enter");
+            _isRunning = false;
+            EditorApplication.update -= OnEditorUpdate;
+
+            if (_unityWindowHandle != IntPtr.Zero)
+            {
+                SessionState.SetString(SessionKeys.UnityHwnd, _unityWindowHandle.ToInt64().ToString());
+                BridgeDiagnostics.Log("CommandRegistry", $"saved hwnd={_unityWindowHandle}");
+            }
+            BridgeDiagnostics.Log("CommandRegistry", "ShutdownForReload exit");
+        }
+
+        private static void OnEditorUpdate()
         {
             _timerTickCount++;
             _lastTimerTick = DateTime.Now;
-            if (!_mainThreadQueue.IsEmpty)
-                ProcessAllPendingWork();
+
+            if (_unityWindowHandle == IntPtr.Zero &&
+                !EditorApplication.isCompiling &&
+                !EditorApplication.isUpdating &&
+                EditorApplication.timeSinceStartup - _lastHwndRefreshTime > 1.0)
+            {
+                _lastHwndRefreshTime = EditorApplication.timeSinceStartup;
+                TryRefreshUnityHwnd();
+            }
+
+            ProcessAllPendingWork();
         }
 
         /// <summary>
@@ -200,10 +173,12 @@ namespace clibridge4unity
                     continue;
 
                 work.IsExecuting = true;
+                BridgeDiagnostics.Log("CommandRegistry", $"main-thread work begin: {work.Description}");
                 try
                 {
                     var result = work.Action();
                     work.CompletionSource.TrySetResult(result);
+                    BridgeDiagnostics.Log("CommandRegistry", $"main-thread work end: {work.Description}");
                 }
                 catch (Exception ex)
                 {
@@ -211,6 +186,7 @@ namespace clibridge4unity
                     // abstraction leak from MethodInfo.Invoke; callers care about the real cause.
                     var inner = (ex is System.Reflection.TargetInvocationException tie && tie.InnerException != null)
                         ? tie.InnerException : ex;
+                    BridgeDiagnostics.LogException($"CommandRegistry main-thread work failed: {work.Description}", inner);
                     Debug.LogError($"[Bridge] Main thread action failed: {inner}");
                     work.CompletionSource.TrySetException(inner);
                 }
@@ -223,6 +199,7 @@ namespace clibridge4unity
         /// </summary>
         private static void WakeLoop()
         {
+            BridgeDiagnostics.Log("CommandRegistry", "WakeLoop enter");
             int cycle = 0;
             while (_isRunning)
             {
@@ -235,7 +212,7 @@ namespace clibridge4unity
                         // Post via SynchronizationContext (processed during Unity's sync context pump)
                         _mainThreadContext?.Post(_ => ProcessAllPendingWork(), null);
 
-                        var hwnd = GetUnityHwnd();
+                        var hwnd = _unityWindowHandle;
                         if (hwnd != IntPtr.Zero)
                         {
                             // Send message barrage to trigger Unity's message pump
@@ -258,6 +235,7 @@ namespace clibridge4unity
                     Thread.Sleep(100);
                 }
             }
+            BridgeDiagnostics.Log("CommandRegistry", "WakeLoop exit");
         }
 
         [DllImport("user32.dll")]
@@ -296,15 +274,53 @@ namespace clibridge4unity
             return found;
         }
 
+        private static void TryRefreshUnityHwnd()
+        {
+            try
+            {
+                string rawSessionHwnd = SessionState.GetString(SessionKeys.UnityHwnd, "0");
+                if (long.TryParse(rawSessionHwnd, out long savedHwnd) && savedHwnd != 0)
+                {
+                    var candidate = new IntPtr(savedHwnd);
+                    if (IsWindow(candidate))
+                    {
+                        var classBuf = new StringBuilder(256);
+                        GetClassName(candidate, classBuf, 256);
+                        if (classBuf.ToString() == "UnityContainerWndClass")
+                        {
+                            _unityWindowHandle = candidate;
+                            return;
+                        }
+                    }
+                }
+
+                var found = FindUnityMainWindow();
+                if (found != IntPtr.Zero)
+                {
+                    _unityWindowHandle = found;
+                    SessionState.SetString(SessionKeys.UnityHwnd, found.ToInt64().ToString());
+                    BridgeDiagnostics.Log("CommandRegistry", $"refreshed hwnd={found}");
+                }
+                else
+                {
+                    BridgeDiagnostics.Log("CommandRegistry", "hwnd refresh found no Unity window");
+                }
+            }
+            catch (Exception ex) { BridgeDiagnostics.LogException("CommandRegistry hwnd refresh", ex); }
+        }
+
         /// <summary>
-        /// Get the HWND, re-discovering if needed (it can be zero at init time when backgrounded).
-        /// NOTE: Do NOT call SessionState from here — this is called from background threads.
+        /// Get the HWND. Background callers must not enumerate windows; that can block while
+        /// Unity is reloading. The editor update loop refreshes the handle once Unity is idle.
         /// </summary>
         public static IntPtr GetUnityHwnd()
         {
-            if (_unityWindowHandle == IntPtr.Zero)
+            if (_unityWindowHandle == IntPtr.Zero &&
+                SynchronizationContext.Current == _mainThreadContext &&
+                !EditorApplication.isCompiling &&
+                !EditorApplication.isUpdating)
             {
-                _unityWindowHandle = FindUnityMainWindow();
+                TryRefreshUnityHwnd();
             }
             return _unityWindowHandle;
         }
@@ -398,6 +414,7 @@ namespace clibridge4unity
         {
             if (_isInitialized) return;
 
+            BridgeDiagnostics.Log("CommandRegistry", "command scan begin");
             _commands = new Dictionary<string, CommandInfo>(StringComparer.OrdinalIgnoreCase);
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -458,6 +475,7 @@ namespace clibridge4unity
             sw.Stop();
             _isInitialized = true;
             Debug.Log($"[Bridge] Command registry initialized: {_commands.Count} commands in {sw.ElapsedMilliseconds}ms");
+            BridgeDiagnostics.Log("CommandRegistry", $"command scan end, count={_commands.Count}, ms={sw.ElapsedMilliseconds}");
         }
 
         public static CommandInfo GetCommand(string name)
@@ -891,6 +909,7 @@ namespace clibridge4unity
             };
 
             _mainThreadQueue.Enqueue(work);
+            BridgeDiagnostics.Log("CommandRegistry", $"main-thread work queued: {work.Description}");
 
             // Poll: check completion every 500ms
             // If work is queued and heartbeat stale >3s → bail (Unity is stuck before our work)
@@ -905,6 +924,7 @@ namespace clibridge4unity
                 if (!work.IsExecuting && _timerTickCount > 0 && (DateTime.Now - _lastTimerTick).TotalSeconds > 3.0)
                 {
                     work.CompletionSource.TrySetCanceled();
+                    BridgeDiagnostics.Log("CommandRegistry", $"main-thread work canceled before start: {work.Description}");
                     throw new TimeoutException(BuildBusyReport(
                         (DateTime.Now - _lastTimerTick).TotalSeconds, work.Description));
                 }
@@ -912,6 +932,7 @@ namespace clibridge4unity
 
             // 30s hard limit — something is genuinely stuck
             work.CompletionSource.TrySetCanceled();
+            BridgeDiagnostics.Log("CommandRegistry", $"main-thread work hard-timeout: {work.Description}");
             throw new TimeoutException(BuildBusyReport(
                 _timerTickCount > 0 ? (DateTime.Now - _lastTimerTick).TotalSeconds : 30, work.Description));
         }
