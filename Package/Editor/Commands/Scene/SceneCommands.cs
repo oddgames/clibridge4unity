@@ -5,6 +5,7 @@ using System.Text;
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.SceneManagement;
+using UnityEngine.SceneManagement;
 using Newtonsoft.Json.Linq;
 
 namespace clibridge4unity
@@ -123,10 +124,63 @@ namespace clibridge4unity
                 }
 
                 var all = UnityEngine.Object.FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None);
-                var matches = all.Where(go => go.name.Contains(query)).Take(10).ToList();
+
+                // Case-insensitive substring first.
+                var matches = all
+                    .Where(go => go.name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .Take(10).ToList();
 
                 if (matches.Count == 0)
-                    return Response.Error($"No GameObjects found matching '{query}'");
+                {
+                    // No substring hit — offer fuzzy GameObject suggestions, then expand to assets.
+                    var activeScene = SceneManager.GetActiveScene();
+                    var qLower = query.ToLowerInvariant();
+                    var suggestions = all
+                        .Where(go => go != null && !string.IsNullOrEmpty(go.name))
+                        .Select(go => new { go, score = FuzzyScore(qLower, go.name.ToLowerInvariant()) })
+                        .Where(s => s.score > 0)
+                        .OrderByDescending(s => s.score)
+                        .Take(10)
+                        .Select(s => new { name = s.go.name, path = GetPath(s.go) })
+                        .ToArray();
+
+                    // Asset fallback: maybe the user meant an asset (prefab, scene, script, scriptable object).
+                    // AssetDatabase.FindAssets does substring on filename — fast, indexed.
+                    var assetGuids = AssetDatabase.FindAssets(query);
+                    var assetMatches = assetGuids
+                        .Select(g => AssetDatabase.GUIDToAssetPath(g))
+                        .Where(p => !string.IsNullOrEmpty(p))
+                        .Take(20)
+                        .Select(p => new
+                        {
+                            path = p,
+                            name = System.IO.Path.GetFileNameWithoutExtension(p),
+                            type = AssetDatabase.GetMainAssetTypeAtPath(p)?.Name ?? "Unknown"
+                        })
+                        .ToArray();
+
+                    string hint;
+                    if (suggestions.Length > 0 && assetMatches.Length > 0)
+                        hint = "Closest scene names + matching assets above. INSPECTOR <path> or FIND prefab:<assetpath>/<name>.";
+                    else if (suggestions.Length > 0)
+                        hint = "Closest scene names above. Try INSPECTOR <path> or FIND with a partial substring.";
+                    else if (assetMatches.Length > 0)
+                        hint = "No scene match — but assets matched. Use INSPECTOR <assetpath> for prefabs/scenes, or PREFAB_INSTANTIATE <path>.";
+                    else
+                        hint = "Nothing matched in scene or assets. Try INSPECTOR (no path) for whole-scene hierarchy, or ASSET_SEARCH <query>.";
+
+                    return Response.SuccessWithData(new
+                    {
+                        error = $"No GameObjects found matching '{query}'",
+                        scene = activeScene.name,
+                        scenePath = activeScene.path,
+                        rootCount = activeScene.rootCount,
+                        totalGameObjects = all.Length,
+                        sceneSuggestions = suggestions,
+                        assetMatches,
+                        hint
+                    });
+                }
 
                 if (matches.Count == 1)
                 {
@@ -421,6 +475,28 @@ namespace clibridge4unity
                 }).ToArray(),
                 truncated = matches.Count > 50
             });
+        }
+
+        /// <summary>
+        /// Lightweight similarity score for FIND suggestions. Higher = closer match.
+        /// Rewards substring containment in either direction, then character overlap.
+        /// Not Levenshtein — cheap and good enough for "did you mean" hints.
+        /// </summary>
+        private static int FuzzyScore(string query, string candidate)
+        {
+            if (string.IsNullOrEmpty(query) || string.IsNullOrEmpty(candidate)) return 0;
+            if (candidate.Contains(query)) return 1000 + (1000 / candidate.Length);
+            if (query.Contains(candidate)) return 800 + (1000 / query.Length);
+
+            int common = 0;
+            int qi = 0;
+            for (int i = 0; i < candidate.Length && qi < query.Length; i++)
+            {
+                if (candidate[i] == query[qi]) { common++; qi++; }
+            }
+            // Require at least half of the query's chars to appear in order.
+            if (common * 2 < query.Length) return 0;
+            return common * 100 / Math.Max(query.Length, candidate.Length);
         }
 
         private static string GetPath(GameObject go)

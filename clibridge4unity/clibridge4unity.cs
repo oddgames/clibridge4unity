@@ -1564,52 +1564,66 @@ class Program
             // Mark command-start time so we can correlate with Unity crash dumps
             DateTime commandStart = DateTime.UtcNow;
 
-            // Read the server's timeout hint, then read the actual response
-            int readTimeoutMs = 10000; // initial timeout for the hint itself
+            // Two timers:
+            //   cts        — total command budget (driven by server's __timeout hint)
+            //   stallCts   — short idle threshold (STALL_IDLE_MS). Server emits "__hb:N\n"
+            //                every 1.5s while a command runs, so 8s of silence = 4+ missed
+            //                heartbeats → assume Unity is hung and bail.
+            int readTimeoutMs = 10000; // initial timeout — gets bumped to server's hint
+            const int STALL_IDLE_MS = 8000;
             using var cts = new CancellationTokenSource(readTimeoutMs);
+            using var stallCts = new CancellationTokenSource(STALL_IDLE_MS);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, stallCts.Token);
             var responseBuilder = new StringBuilder();
+            var lineBuf = new StringBuilder(); // accumulates bytes until newline so sentinel filtering is clean
             byte[] buffer = new byte[4096];
             bool gotTimeoutHint = false;
+
+            void EmitLine(string line)
+            {
+                if (line.StartsWith("__hb:")) return; // heartbeat — already reset stall, drop
+                if (!gotTimeoutHint && line.StartsWith("__timeout:"))
+                {
+                    if (int.TryParse(line.Substring("__timeout:".Length), out int hintSec))
+                        readTimeoutMs = Math.Max(2000, hintSec * 1000 - waitedForBusyMs);
+                    gotTimeoutHint = true;
+                    cts.CancelAfter(readTimeoutMs);
+                    return;
+                }
+                Console.WriteLine(line);
+                responseBuilder.Append(line).Append('\n');
+            }
+
             try
             {
                 while (true)
                 {
-                    var readTask = pipe.ReadAsync(buffer, 0, buffer.Length, cts.Token);
-                    readTask.Wait(cts.Token);
+                    var readTask = pipe.ReadAsync(buffer, 0, buffer.Length, linkedCts.Token);
+                    readTask.Wait(linkedCts.Token);
                     int bytesRead = readTask.Result;
                     if (bytesRead == 0) break;
-                    string chunk = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
-                    // Parse timeout hint from server (first message: "__timeout:30\n")
-                    if (!gotTimeoutHint && chunk.StartsWith("__timeout:"))
-                    {
-                        int nlIdx = chunk.IndexOf('\n');
-                        if (nlIdx > 0)
-                        {
-                            string hintStr = chunk.Substring(10, nlIdx - 10);
-                            if (int.TryParse(hintStr, out int hintSec))
-                            {
-                                // Subtract any time we already spent waiting on heartbeat-busy
-                                // so the total budget (pre-wait + read) stays roughly constant.
-                                readTimeoutMs = Math.Max(2000, hintSec * 1000 - waitedForBusyMs);
-                            }
-                            gotTimeoutHint = true;
-                            cts.CancelAfter(readTimeoutMs);
-                            // Process any data after the hint line
-                            chunk = chunk.Substring(nlIdx + 1);
-                            if (chunk.Length == 0) continue;
-                        }
-                    }
-
-                    Console.Write(chunk);
-                    responseBuilder.Append(chunk);
-
-                    // Reset idle timeout on each chunk (supports streaming commands)
+                    // Any byte (including a heartbeat) resets the stall + total timers.
+                    stallCts.CancelAfter(STALL_IDLE_MS);
                     cts.CancelAfter(readTimeoutMs);
+
+                    lineBuf.Append(Encoding.UTF8.GetString(buffer, 0, bytesRead));
+                    while (true)
+                    {
+                        string s = lineBuf.ToString();
+                        int nl = s.IndexOf('\n');
+                        if (nl < 0) break;
+                        EmitLine(s.Substring(0, nl));
+                        lineBuf.Remove(0, nl + 1);
+                    }
                 }
+                if (lineBuf.Length > 0) EmitLine(lineBuf.ToString());
             }
-            catch (OperationCanceledException)
+            catch (Exception readEx) when (readEx is OperationCanceledException
+                                         || (readEx is AggregateException ae && ae.InnerException is OperationCanceledException)
+                                         || readEx is IOException)
             {
+                bool stallFired = stallCts.IsCancellationRequested && !cts.IsCancellationRequested;
                 string crashReport = DetectUnityCrash(commandStart);
                 if (crashReport != null)
                 {
@@ -1617,34 +1631,21 @@ class Program
                     Console.Error.Write(crashReport);
                     return EXIT_COMMAND_ERROR;
                 }
-                Console.Error.WriteLine($"\nError: Command '{command}' timed out after {readTimeoutMs / 1000}s.");
+                if (readEx is IOException)
+                {
+                    Console.Error.WriteLine($"\nError: Pipe disconnected during '{command}' (likely domain reload).");
+                    return EXIT_CONNECTION;
+                }
+                if (stallFired)
+                {
+                    Console.Error.WriteLine($"\nError: Command '{command}' stalled (no heartbeat for {STALL_IDLE_MS / 1000}s). Unity may be hung.");
+                }
+                else
+                {
+                    Console.Error.WriteLine($"\nError: Command '{command}' timed out after {readTimeoutMs / 1000}s.");
+                }
                 Console.Error.Write(BuildDiagnosticReport(projectPath));
                 return EXIT_TIMEOUT;
-            }
-            catch (AggregateException ex) when (ex.InnerException is OperationCanceledException)
-            {
-                string crashReport = DetectUnityCrash(commandStart);
-                if (crashReport != null)
-                {
-                    Console.Error.WriteLine($"\nError: Unity CRASHED during '{command}'.");
-                    Console.Error.Write(crashReport);
-                    return EXIT_COMMAND_ERROR;
-                }
-                Console.Error.WriteLine($"\nError: Command '{command}' timed out after {readTimeoutMs / 1000}s.");
-                Console.Error.Write(BuildDiagnosticReport(projectPath));
-                return EXIT_TIMEOUT;
-            }
-            catch (IOException) // pipe disconnected mid-command — usually crash or domain reload
-            {
-                string crashReport = DetectUnityCrash(commandStart);
-                if (crashReport != null)
-                {
-                    Console.Error.WriteLine($"\nError: Unity CRASHED during '{command}'.");
-                    Console.Error.Write(crashReport);
-                    return EXIT_COMMAND_ERROR;
-                }
-                Console.Error.WriteLine($"\nError: Pipe disconnected during '{command}' (likely domain reload).");
-                return EXIT_CONNECTION;
             }
 
             // Check if response indicates we need to wait for reconnection

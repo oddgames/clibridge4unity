@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.87";
+        public const string Version = "1.0.88";
 
         private static CancellationTokenSource serverCts;
         private static NamedPipeServerStream currentPipeServer;
@@ -306,10 +306,48 @@ namespace clibridge4unity
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeoutCts.CancelAfter(timeoutMs);
 
-                // Send timeout hint so CLI can set its read timeout dynamically
+                // Send timeout hint so CLI can set its read timeout dynamically.
+                // Pipe writes from the heartbeat task and main flow share a lock to avoid
+                // interleaved bytes corrupting the stream.
+                var pipeWriteLock = new SemaphoreSlim(1, 1);
                 var hintBytes = Encoding.UTF8.GetBytes($"__timeout:{timeoutSec}\n");
-                await pipe.WriteAsync(hintBytes, 0, hintBytes.Length, ct);
-                await pipe.FlushAsync();
+                await pipeWriteLock.WaitAsync(ct);
+                try
+                {
+                    await pipe.WriteAsync(hintBytes, 0, hintBytes.Length, ct);
+                    await pipe.FlushAsync();
+                }
+                finally { pipeWriteLock.Release(); }
+
+                // Heartbeat task: emits "__hb:<staleness>\n" every 1.5s while the command runs.
+                // CLI uses this to detect stalls — if no bytes (heartbeat or response) arrive
+                // within its idle threshold, it bails instead of waiting for the full timeout.
+                var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var heartbeatTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        while (!heartbeatCts.IsCancellationRequested)
+                        {
+                            await Task.Delay(1500, heartbeatCts.Token);
+                            if (heartbeatCts.IsCancellationRequested) break;
+                            double staleness = CommandRegistry.GetHeartbeatStaleness();
+                            byte[] hb = Encoding.UTF8.GetBytes($"__hb:{staleness:F1}\n");
+                            await pipeWriteLock.WaitAsync(heartbeatCts.Token);
+                            try
+                            {
+                                if (pipe.IsConnected)
+                                {
+                                    await pipe.WriteAsync(hb, 0, hb.Length, heartbeatCts.Token);
+                                    await pipe.FlushAsync(heartbeatCts.Token);
+                                }
+                            }
+                            finally { pipeWriteLock.Release(); }
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                    catch { /* pipe closed or write failed — main flow will surface the error */ }
+                }, heartbeatCts.Token);
 
                 string response;
                 try
@@ -320,6 +358,12 @@ namespace clibridge4unity
                 {
                     response = Response.Error($"Command '{command}' timed out after {timeoutSec}s");
                 }
+                finally
+                {
+                    heartbeatCts.Cancel();
+                    try { await heartbeatTask; } catch { }
+                    heartbeatCts.Dispose();
+                }
 
                 // Send final response (may be empty for streaming commands)
                 // Use a 5s per-write timeout so a stalled client can't freeze this handler
@@ -328,8 +372,13 @@ namespace clibridge4unity
                     byte[] responseBytes = Encoding.UTF8.GetBytes(response + "\n");
                     using var writeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     writeCts.CancelAfter(5000);
-                    await pipe.WriteAsync(responseBytes, 0, responseBytes.Length, writeCts.Token);
-                    await pipe.FlushAsync();
+                    await pipeWriteLock.WaitAsync(writeCts.Token);
+                    try
+                    {
+                        await pipe.WriteAsync(responseBytes, 0, responseBytes.Length, writeCts.Token);
+                        await pipe.FlushAsync();
+                    }
+                    finally { pipeWriteLock.Release(); }
                 }
                 pipe.Disconnect();
             }
