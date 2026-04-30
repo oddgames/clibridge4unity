@@ -27,8 +27,13 @@ namespace clibridge4unity
 
         static LogCommands()
         {
-            BridgeDiagnostics.Log("LogCommands", "static ctor - subscribing to afterAssemblyReload");
-            AssemblyReloadEvents.afterAssemblyReload += Initialize;
+            EditorApplication.update += InitOnFirstTick;
+        }
+
+        private static void InitOnFirstTick()
+        {
+            EditorApplication.update -= InitOnFirstTick;
+            Initialize();
         }
 
         private static void Initialize()

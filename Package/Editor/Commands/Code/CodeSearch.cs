@@ -22,13 +22,13 @@ namespace clibridge4unity
     {
         static PdbCache()
         {
-            BridgeDiagnostics.Log("PdbCache", "static ctor - subscribing to afterAssemblyReload");
-            AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
+            EditorApplication.update += InitOnFirstTick;
         }
 
-        private static void OnAfterAssemblyReload()
+        private static void InitOnFirstTick()
         {
-            BridgeDiagnostics.Log("PdbCache", "OnAfterAssemblyReload - scheduling background load");
+            EditorApplication.update -= InitOnFirstTick;
+            BridgeDiagnostics.Log("PdbCache", "InitOnFirstTick - scheduling background load");
             InitializeAsync();
         }
         private static Dictionary<string, (string file, int startLine, int endLine)> _methodCache;

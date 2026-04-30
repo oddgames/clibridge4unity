@@ -27,8 +27,13 @@ namespace clibridge4unity
 
         static SetupWizard()
         {
-            BridgeDiagnostics.Log("SetupWizard", "static ctor - subscribing to afterAssemblyReload");
-            AssemblyReloadEvents.afterAssemblyReload += CheckSetup;
+            EditorApplication.update += InitOnFirstTick;
+        }
+
+        static void InitOnFirstTick()
+        {
+            EditorApplication.update -= InitOnFirstTick;
+            CheckSetup();
         }
 
         static void CheckSetup()

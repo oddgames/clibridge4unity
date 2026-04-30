@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.97";
+        public const string Version = "1.0.98";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -42,8 +42,13 @@ namespace clibridge4unity
 
         static BridgeServer()
         {
-            BridgeDiagnostics.Log("BridgeServer", "static ctor - subscribing to afterAssemblyReload");
-            AssemblyReloadEvents.afterAssemblyReload += Initialize;
+            EditorApplication.update += InitOnFirstTick;
+        }
+
+        private static void InitOnFirstTick()
+        {
+            EditorApplication.update -= InitOnFirstTick;
+            Initialize();
         }
 
         private static void Initialize()

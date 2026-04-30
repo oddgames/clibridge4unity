@@ -98,8 +98,13 @@ namespace clibridge4unity
 
         static CommandRegistry()
         {
-            BridgeDiagnostics.Log("CommandRegistry", "static ctor - subscribing to afterAssemblyReload");
-            AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
+            EditorApplication.update += InitOnFirstTick;
+        }
+
+        private static void InitOnFirstTick()
+        {
+            EditorApplication.update -= InitOnFirstTick;
+            OnAfterAssemblyReload();
         }
 
         private static void OnAfterAssemblyReload()

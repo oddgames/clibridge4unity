@@ -21,8 +21,13 @@ namespace clibridge4unity
 
         static Heartbeat()
         {
-            BridgeDiagnostics.Log("Heartbeat", "static ctor - subscribing to afterAssemblyReload");
-            AssemblyReloadEvents.afterAssemblyReload += Initialize;
+            EditorApplication.update += InitOnFirstTick;
+        }
+
+        private static void InitOnFirstTick()
+        {
+            EditorApplication.update -= InitOnFirstTick;
+            Initialize();
         }
 
         private static void Initialize()
