@@ -2,7 +2,7 @@
 
 ## What We Built
 
-A Unity Editor automation framework with **33 commands** for controlling Unity via Named Pipes, designed for AI-powered development (Claude integration), CI/CD pipelines, and scripted workflows.
+A Unity Editor automation framework with **46 commands** for controlling Unity via Named Pipes, designed for AI-powered development (Claude integration), CI/CD pipelines, and scripted workflows.
 
 ## Project Structure
 
@@ -67,4 +67,4 @@ clibridge4unity LOG since:42
 
 ## Version
 
-Current: 1.0.90
+Current: 1.0.91

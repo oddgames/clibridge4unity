@@ -248,9 +248,11 @@ namespace clibridge4unity
             if (uxml != null)
             {
                 var waitStart = System.DateTime.UtcNow;
-                while ((EditorApplication.isCompiling || EditorApplication.isUpdating)
-                       && (System.DateTime.UtcNow - waitStart).TotalSeconds < 30)
+                while ((System.DateTime.UtcNow - waitStart).TotalSeconds < 30)
                 {
+                    bool busy = await CommandRegistry.RunOnMainThreadAsync(() =>
+                        EditorApplication.isCompiling || EditorApplication.isUpdating);
+                    if (!busy) break;
                     await Task.Delay(100);
                 }
             }
