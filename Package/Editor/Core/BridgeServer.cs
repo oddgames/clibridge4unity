@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.92";
+        public const string Version = "1.0.93";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -38,13 +38,22 @@ namespace clibridge4unity
 
         static BridgeServer()
         {
-            // Don't start the bridge in batch mode (AssetImportWorker processes)
-            BridgeDiagnostics.Log("BridgeServer", "static ctor enter");
+            BridgeDiagnostics.Log("BridgeServer", "static ctor - subscribing to afterAssemblyReload");
+            AssemblyReloadEvents.afterAssemblyReload += Initialize;
+        }
+
+        private static void Initialize()
+        {
+            BridgeDiagnostics.Log("BridgeServer", "Initialize enter");
             if (Application.isBatchMode)
             {
                 BridgeDiagnostics.Log("BridgeServer", "batch mode - server disabled");
                 return;
             }
+
+            AssemblyReloadEvents.beforeAssemblyReload += StopServerImmediately;
+            CompilationPipeline.compilationStarted += OnCompilationStarted;
+            CompilationPipeline.compilationFinished += OnCompilationFinished;
 
             // Capture main thread context for invoking Unity APIs from background threads
             mainThreadContext = SynchronizationContext.Current;
@@ -54,7 +63,6 @@ namespace clibridge4unity
             Application.runInBackground = true;
 
             // Enable console timestamps so log entries have time data
-            // LogEntries.SetConsoleFlag(ShowTimestamp = 1 << 10, true)
             try
             {
                 var logEntriesType = typeof(EditorWindow).Assembly.GetType("UnityEditor.LogEntries");
@@ -64,31 +72,24 @@ namespace clibridge4unity
             }
             catch { }
 
-            AssemblyReloadEvents.beforeAssemblyReload += StopServerImmediately;
-            CompilationPipeline.compilationStarted += OnCompilationStarted;
-            CompilationPipeline.compilationFinished += OnCompilationFinished;
             BridgeDiagnostics.Log("BridgeServer", "registered reload/compilation handlers");
 
             // Check if we just came back from a compilation (domain reload completed)
-            // lastCompileRequest > lastCompileFinished means compilation was in progress
             long requestTicks = 0, finishedTicks = 0;
             long.TryParse(SessionState.GetString(SessionKeys.LastCompileRequest, "0"), out requestTicks);
             long.TryParse(SessionState.GetString(SessionKeys.LastCompileTime, "0"), out finishedTicks);
 
             if (requestTicks > finishedTicks)
             {
-                // Domain reload just completed — update the finish time NOW
                 lastCompileCompleteTime = DateTime.Now;
                 SessionState.SetString(SessionKeys.LastCompileTime, lastCompileCompleteTime.Ticks.ToString());
 
-                // Record compile duration (request → domain reload complete)
                 int duration = (int)(lastCompileCompleteTime - new DateTime(requestTicks)).TotalSeconds;
                 if (duration > 0 && duration < 600)
                 {
                     RecordCompileDuration(duration);
                     BridgeDiagnostics.Log("BridgeServer", $"domain reload completed after compile request, duration={duration}s");
                 }
-
             }
             else if (finishedTicks > 0)
             {
@@ -99,7 +100,7 @@ namespace clibridge4unity
             pipeName = GeneratePipeName();
             BridgeDiagnostics.Log("BridgeServer", $"pipe name: {pipeName}");
             StartServer();
-            BridgeDiagnostics.Log("BridgeServer", "static ctor exit");
+            BridgeDiagnostics.Log("BridgeServer", "Initialize exit");
         }
 
         /// <summary>

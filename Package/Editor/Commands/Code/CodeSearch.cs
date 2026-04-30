@@ -22,21 +22,14 @@ namespace clibridge4unity
     {
         static PdbCache()
         {
-            BridgeDiagnostics.Log("PdbCache", "static ctor enter");
-            // Initialize PDB cache in background when Unity loads
-            // Use SynchronizationContext (not EditorApplication.delayCall) per project mandate
-            var ctx = System.Threading.SynchronizationContext.Current;
-            if (ctx != null)
-            {
-                BridgeDiagnostics.Log("PdbCache", $"posting InitializeAsync via {ctx.GetType().Name}");
-                ctx.Post(_ => InitializeAsync(), null);
-            }
-            else
-            {
-                BridgeDiagnostics.Log("PdbCache", "no sync context - initializing directly");
-                InitializeAsync();
-            }
-            BridgeDiagnostics.Log("PdbCache", "static ctor exit");
+            BridgeDiagnostics.Log("PdbCache", "static ctor - subscribing to afterAssemblyReload");
+            AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
+        }
+
+        private static void OnAfterAssemblyReload()
+        {
+            BridgeDiagnostics.Log("PdbCache", "OnAfterAssemblyReload - scheduling background load");
+            InitializeAsync();
         }
         private static Dictionary<string, (string file, int startLine, int endLine)> _methodCache;
         private static bool _isInitialized;

@@ -109,92 +109,90 @@ namespace clibridge4unity
                 if (query.StartsWith("prefab:", StringComparison.OrdinalIgnoreCase))
                     return FindInPrefab(query.Substring("prefab:".Length).TrimStart());
 
-                // Scene scope — original behaviour.
-                var found = GameObject.Find(query);
-                if (found != null)
-                {
-                    Selection.activeGameObject = found;
-                    return Response.SuccessWithData(new
-                    {
-                        name = found.name,
-                        path = GetPath(found),
-                        position = new { x = found.transform.position.x, y = found.transform.position.y, z = found.transform.position.z },
-                        components = found.GetComponents<Component>().Select(c => c.GetType().Name).ToArray()
-                    });
-                }
-
+                // Scene scope: run name search and component type search together.
                 var all = UnityEngine.Object.FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None);
 
-                // Case-insensitive substring first.
-                var matches = all
+                // Exact name match via GameObject.Find (handles paths like "Parent/Child").
+                var exactFound = GameObject.Find(query);
+
+                // Case-insensitive substring name match.
+                var nameMatches = all
                     .Where(go => go.name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
-                    .Take(10).ToList();
+                    .Take(20).ToList();
 
-                if (matches.Count == 0)
+                // Component type match — always tried, not just as fallback.
+                var compType = FindComponentType(query);
+                List<GameObject> compMatches = compType != null
+                    ? UnityEngine.Object.FindObjectsByType(compType, FindObjectsInactive.Include, FindObjectsSortMode.None)
+                        .OfType<Component>().Select(c => c.gameObject).Distinct().Take(20).ToList()
+                    : new List<GameObject>();
+
+                // Merge: exact > name > component, deduplicated by instance ID.
+                var seen = new HashSet<int>();
+                var matches = new List<(GameObject go, string matchedBy)>();
+                if (exactFound != null && seen.Add(exactFound.GetInstanceID()))
+                    matches.Add((exactFound, "name"));
+                foreach (var go in nameMatches)
+                    if (seen.Add(go.GetInstanceID()))
+                        matches.Add((go, "name"));
+                foreach (var go in compMatches)
+                    if (seen.Add(go.GetInstanceID()))
+                        matches.Add((go, compType.Name));
+
+                // Asset search — always run alongside scene search.
+                var assetGuids = AssetDatabase.FindAssets(query);
+                var assetMatches = assetGuids
+                    .Select(g => AssetDatabase.GUIDToAssetPath(g))
+                    .Where(p => !string.IsNullOrEmpty(p))
+                    .Take(20)
+                    .Select(p => new
+                    {
+                        path = p,
+                        name = System.IO.Path.GetFileNameWithoutExtension(p),
+                        type = AssetDatabase.GetMainAssetTypeAtPath(p)?.Name ?? "Unknown"
+                    })
+                    .ToArray();
+
+                if (matches.Count > 0 || assetMatches.Length > 0)
                 {
-                    // No substring hit — offer fuzzy GameObject suggestions, then expand to assets.
-                    var activeScene = SceneManager.GetActiveScene();
-                    var qLower = query.ToLowerInvariant();
-                    var suggestions = all
-                        .Where(go => go != null && !string.IsNullOrEmpty(go.name))
-                        .Select(go => new { go, score = FuzzyScore(qLower, go.name.ToLowerInvariant()) })
-                        .Where(s => s.score > 0)
-                        .OrderByDescending(s => s.score)
-                        .Take(10)
-                        .Select(s => new { name = s.go.name, path = GetPath(s.go) })
-                        .ToArray();
-
-                    // Asset fallback: maybe the user meant an asset (prefab, scene, script, scriptable object).
-                    // AssetDatabase.FindAssets does substring on filename — fast, indexed.
-                    var assetGuids = AssetDatabase.FindAssets(query);
-                    var assetMatches = assetGuids
-                        .Select(g => AssetDatabase.GUIDToAssetPath(g))
-                        .Where(p => !string.IsNullOrEmpty(p))
-                        .Take(20)
-                        .Select(p => new
+                    if (matches.Count == 1 && assetMatches.Length == 0)
+                        Selection.activeGameObject = matches[0].go;
+                    return Response.SuccessWithData(new
+                    {
+                        sceneMatches = matches.Take(20).Select(m => new
                         {
-                            path = p,
-                            name = System.IO.Path.GetFileNameWithoutExtension(p),
-                            type = AssetDatabase.GetMainAssetTypeAtPath(p)?.Name ?? "Unknown"
-                        })
-                        .ToArray();
-
-                    string hint;
-                    if (suggestions.Length > 0 && assetMatches.Length > 0)
-                        hint = "Closest scene names + matching assets above. INSPECTOR <path> or FIND prefab:<assetpath>/<name>.";
-                    else if (suggestions.Length > 0)
-                        hint = "Closest scene names above. Try INSPECTOR <path> or FIND with a partial substring.";
-                    else if (assetMatches.Length > 0)
-                        hint = "No scene match — but assets matched. Use INSPECTOR <assetpath> for prefabs/scenes, or PREFAB_INSTANTIATE <path>.";
-                    else
-                        hint = "Nothing matched in scene or assets. Try INSPECTOR (no path) for whole-scene hierarchy, or ASSET_SEARCH <query>.";
-
-                    return Response.SuccessWithData(new
-                    {
-                        error = $"No GameObjects found matching '{query}'",
-                        scene = activeScene.name,
-                        scenePath = activeScene.path,
-                        rootCount = activeScene.rootCount,
-                        totalGameObjects = all.Length,
-                        sceneSuggestions = suggestions,
-                        assetMatches,
-                        hint
+                            name = m.go.name,
+                            path = GetPath(m.go),
+                            matchedBy = m.matchedBy,
+                            components = m.go.GetComponents<Component>()
+                                .Where(c => c != null).Select(c => c.GetType().Name).ToArray()
+                        }).ToArray(),
+                        assetMatches
                     });
                 }
 
-                if (matches.Count == 1)
-                {
-                    Selection.activeGameObject = matches[0];
-                    return Response.SuccessWithData(new
-                    {
-                        name = matches[0].name,
-                        path = GetPath(matches[0])
-                    });
-                }
+                // Nothing found anywhere — fuzzy suggestions.
+                var activeScene = SceneManager.GetActiveScene();
+                var qLower = query.ToLowerInvariant();
+                var suggestions = all
+                    .Where(go => go != null && !string.IsNullOrEmpty(go.name))
+                    .Select(go => new { go, score = FuzzyScore(qLower, go.name.ToLowerInvariant()) })
+                    .Where(s => s.score > 0)
+                    .OrderByDescending(s => s.score)
+                    .Take(10)
+                    .Select(s => new { name = s.go.name, path = GetPath(s.go) })
+                    .ToArray();
 
                 return Response.SuccessWithData(new
                 {
-                    matches = matches.Select(go => new { name = go.name, path = GetPath(go) }).ToArray()
+                    error = $"No GameObjects found matching '{query}'",
+                    scene = activeScene.name,
+                    scenePath = activeScene.path,
+                    totalGameObjects = all.Length,
+                    sceneSuggestions = suggestions,
+                    hint = suggestions.Length > 0
+                        ? "Closest scene names above. Try INSPECTOR <path> or a partial substring."
+                        : "Nothing matched. Try INSPECTOR (no path) for whole-scene hierarchy, or ASSET_SEARCH <query>."
                 });
             }
             catch (Exception ex)
@@ -475,6 +473,15 @@ namespace clibridge4unity
                 }).ToArray(),
                 truncated = matches.Count > 50
             });
+        }
+
+        private static Type FindComponentType(string name)
+        {
+            return AppDomain.CurrentDomain.GetAssemblies()
+                .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
+                .FirstOrDefault(t => !t.IsAbstract
+                    && t.IsSubclassOf(typeof(Component))
+                    && string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>

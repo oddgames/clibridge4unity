@@ -21,7 +21,13 @@ namespace clibridge4unity
 
         static Heartbeat()
         {
-            BridgeDiagnostics.Log("Heartbeat", "static ctor enter");
+            BridgeDiagnostics.Log("Heartbeat", "static ctor - subscribing to afterAssemblyReload");
+            AssemblyReloadEvents.afterAssemblyReload += Initialize;
+        }
+
+        private static void Initialize()
+        {
+            BridgeDiagnostics.Log("Heartbeat", "Initialize enter");
             string projectRoot = Application.dataPath.Replace("/Assets", "");
             string normalizedPath = projectRoot.ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
             string hash = BridgeServer.GetDeterministicHashCode(normalizedPath).ToString("X8");
@@ -29,17 +35,13 @@ namespace clibridge4unity
             _statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash}_{projectName}.status");
             BridgeDiagnostics.Log("Heartbeat", $"status file: {_statusFile}");
 
+            AssemblyReloadEvents.beforeAssemblyReload += WriteReloadingNow;
             EditorApplication.update += Tick;
-            AssemblyReloadEvents.beforeAssemblyReload += () =>
-            {
-                WriteReloadingNow();
-            };
             EditorApplication.playModeStateChanged += _ => WriteNow();
             EditorApplication.quitting += Cleanup;
 
-            // Write immediately on init
             WriteNow();
-            BridgeDiagnostics.Log("Heartbeat", "static ctor exit");
+            BridgeDiagnostics.Log("Heartbeat", "Initialize exit");
         }
 
         static void Tick()

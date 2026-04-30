@@ -27,7 +27,16 @@ namespace clibridge4unity
 
         static LogCommands()
         {
-            BridgeDiagnostics.Log("LogCommands", "static ctor enter");
+            BridgeDiagnostics.Log("LogCommands", "static ctor - subscribing to afterAssemblyReload");
+            AssemblyReloadEvents.afterAssemblyReload += Initialize;
+        }
+
+        private static void Initialize()
+        {
+            BridgeDiagnostics.Log("LogCommands", "Initialize enter");
+
+            AssemblyReloadEvents.beforeAssemblyReload += ShutdownForReload;
+
             // Restore log ID counter across domain reloads
             _nextId = UnityEditor.SessionState.GetInt(SessionKeys.LogNextId, 1);
 
@@ -45,8 +54,6 @@ namespace clibridge4unity
                 }
             }
 
-            // Log file in temp directory - survives domain reloads, cleared on Unity restart
-            // Use the same deterministic hash as the pipe name so the CLI can find this file
             string projectRoot = Application.dataPath.Replace("/Assets", "");
             string normalizedPath = projectRoot.ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
             string projectHash = BridgeServer.GetDeterministicHashCode(normalizedPath).ToString("X8");
@@ -54,13 +61,11 @@ namespace clibridge4unity
             _logFilePath = Path.Combine(Path.GetTempPath(), $"clibridge4unity_logs_{projectHash}_{projectName}.log");
             BridgeDiagnostics.Log("LogCommands", $"log file: {_logFilePath}");
 
-            // Register hooks with CommandRegistry (avoids circular asmdef dependency)
             CommandRegistry.GetLastLogId = GetLastLogId;
             CommandRegistry.GetLogsSinceFormatted = GetLogsSinceFormatted;
             CommandRegistry.GetCompileErrors = GetCompileErrorsSummary;
             CommandRegistry.ShortenResponsePaths = StackTraceMinimizer.ShortenPaths;
 
-            // Track compile errors via CompilationPipeline (persists until fixed)
             CompilationPipeline.assemblyCompilationFinished += OnAssemblyCompilationFinished;
             CompilationPipeline.compilationStarted += _ =>
             {
@@ -69,32 +74,8 @@ namespace clibridge4unity
             };
 
             Application.logMessageReceived += OnLogMessage;
-            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += () =>
-            {
-                BridgeDiagnostics.Log("LogCommands", "before assembly reload enter");
-                UnityEditor.EditorApplication.update -= FlushPendingWrites;
-                Application.logMessageReceived -= OnLogMessage;
-                CompilationPipeline.assemblyCompilationFinished -= OnAssemblyCompilationFinished;
-                UnityEditor.SessionState.SetInt(SessionKeys.LogNextId, (int)_nextId);
-
-                // Persist compile errors to SessionState so they survive domain reload
-                lock (_compileErrorLock)
-                {
-                    if (_compileErrors.Count > 0)
-                    {
-                        var errors = string.Join("\n", _compileErrors.Select(e => e.message).Take(20));
-                        SessionState.SetString("Bridge_CompileErrors", errors);
-                    }
-                }
-
-                FlushPendingWrites();
-                BridgeDiagnostics.Log("LogCommands", "before assembly reload exit");
-            };
-
-            // Flush pending writes periodically via editor update
             UnityEditor.EditorApplication.update += FlushPendingWrites;
 
-            // Trim log file if it's grown too large (>1MB)
             try
             {
                 if (File.Exists(_logFilePath) && new FileInfo(_logFilePath).Length > 1_000_000)
@@ -104,7 +85,28 @@ namespace clibridge4unity
                 }
             }
             catch (Exception ex) { BridgeDiagnostics.LogException("LogCommands trim", ex); }
-            BridgeDiagnostics.Log("LogCommands", "static ctor exit");
+            BridgeDiagnostics.Log("LogCommands", "Initialize exit");
+        }
+
+        private static void ShutdownForReload()
+        {
+            BridgeDiagnostics.Log("LogCommands", "ShutdownForReload enter");
+            UnityEditor.EditorApplication.update -= FlushPendingWrites;
+            Application.logMessageReceived -= OnLogMessage;
+            CompilationPipeline.assemblyCompilationFinished -= OnAssemblyCompilationFinished;
+            UnityEditor.SessionState.SetInt(SessionKeys.LogNextId, (int)_nextId);
+
+            lock (_compileErrorLock)
+            {
+                if (_compileErrors.Count > 0)
+                {
+                    var errors = string.Join("\n", _compileErrors.Select(e => e.message).Take(20));
+                    SessionState.SetString("Bridge_CompileErrors", errors);
+                }
+            }
+
+            FlushPendingWrites();
+            BridgeDiagnostics.Log("LogCommands", "ShutdownForReload exit");
         }
 
         private static void OnAssemblyCompilationFinished(string assemblyPath, CompilerMessage[] messages)

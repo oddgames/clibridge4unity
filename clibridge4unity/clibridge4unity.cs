@@ -2181,10 +2181,11 @@ class Program
         }
 
         // Only trust error count when compilation is fully done
-        // During compilation, early assemblies may have errors while later ones haven't compiled yet
-        if (isCompiling) return false;
+        if (isCompiling) { CliTrace("HasCompileErrors", $"still compiling, deferring check"); return false; }
 
-        return hasErrors && errorCount > 0;
+        bool result = hasErrors && errorCount > 0;
+        CliTrace("HasCompileErrors", $"result={result} hasErrors={hasErrors} errorCount={errorCount}");
+        return result;
     }
 
     static bool IsCompilationComplete(string statusResponse, DateTime? requestedAt = null)
@@ -2208,24 +2209,19 @@ class Program
             }
         }
 
-        if (isCompiling) return false;
+        if (isCompiling) { CliTrace("IsCompilationComplete", "still compiling"); return false; }
 
         // isCompiling is false — Unity is not currently compiling.
-        // If we have a requestedAt time, do a sanity check that compilation finished
-        // at or after our request. Use 2-second tolerance for clock/timestamp precision.
         if (requestedAt.HasValue && lastCompileFinished.HasValue)
         {
             if (lastCompileFinished.Value < requestedAt.Value.AddSeconds(-2))
             {
-                // Unity is idle but last compile was before our request.
-                // Could be: (a) compile hasn't started yet, or (b) request was lost.
-                // Return false to keep waiting — caller handles re-trigger after timeout.
+                CliTrace("IsCompilationComplete", $"false - lastFinished={lastCompileFinished.Value:O} before requestedAt={requestedAt.Value:O}");
                 return false;
             }
         }
 
-        // If isCompiling is false and lastCompileFinished is "never" or missing,
-        // Unity didn't need to recompile (no code changes). That's still success.
+        CliTrace("IsCompilationComplete", $"true - lastFinished={lastCompileFinished?.ToString("O") ?? "none"} requestedAt={requestedAt?.ToString("O") ?? "none"}");
         return true;
     }
 
@@ -2803,11 +2799,19 @@ class Program
             int hash = hash1 + (hash2 * 1566083941);
             string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}_{GetProjectName(projectPath)}.status");
 
-            if (!File.Exists(statusFile)) return null;
+            if (!File.Exists(statusFile))
+            {
+                CliTrace("ReadHeartbeatFile", $"no file: {statusFile}");
+                return null;
+            }
 
             // Check freshness — stale files are unreliable
             var age = DateTime.UtcNow - File.GetLastWriteTimeUtc(statusFile);
-            if (age.TotalSeconds > 10) return null;
+            if (age.TotalSeconds > 10)
+            {
+                CliTrace("ReadHeartbeatFile", $"stale ageSec={age.TotalSeconds:F1} file={statusFile}");
+                return null;
+            }
 
             string json = File.ReadAllText(statusFile);
 
@@ -2823,9 +2827,10 @@ class Program
             var enMatch = System.Text.RegularExpressions.Regex.Match(json, @"""stateEnteredAt"":\s*(\d+)");
             if (enMatch.Success) enteredAt = long.Parse(enMatch.Groups[1].Value);
 
+            CliTrace("ReadHeartbeatFile", $"state={state} errors={errors} errorCount={errorCount} ageSec={age.TotalSeconds:F1}");
             return (state, errors, errorCount, avgTime, enteredAt);
         }
-        catch { return null; }
+        catch (Exception ex) { CliTrace("ReadHeartbeatFile", $"exception: {ex.Message}"); return null; }
     }
 
     // Reads heartbeat file ignoring the freshness limit — used to detect stuck domain reloads.
@@ -2843,7 +2848,7 @@ class Program
             }
             int hash = hash1 + (hash2 * 1566083941);
             string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}_{GetProjectName(projectPath)}.status");
-            if (!File.Exists(statusFile)) return null;
+            if (!File.Exists(statusFile)) { CliTrace("ReadStaleHeartbeat", "no file"); return null; }
 
             double ageSec = (DateTime.UtcNow - File.GetLastWriteTimeUtc(statusFile)).TotalSeconds;
             string json = File.ReadAllText(statusFile);
@@ -2851,9 +2856,10 @@ class Program
             long enteredAt = 0;
             var m = System.Text.RegularExpressions.Regex.Match(json, @"""stateEnteredAt"":\s*(\d+)");
             if (m.Success) enteredAt = long.Parse(m.Groups[1].Value);
+            CliTrace("ReadStaleHeartbeat", $"state={state} ageSec={ageSec:F1} enteredAt={enteredAt}");
             return (state, enteredAt, ageSec);
         }
-        catch { return null; }
+        catch (Exception ex) { CliTrace("ReadStaleHeartbeat", $"exception: {ex.Message}"); return null; }
     }
 
     // Returns a KILL+OPEN suggestion string if heartbeat shows Unity stuck in reload/compile >thresholdSec.
@@ -2863,13 +2869,17 @@ class Program
         var stale = ReadStaleHeartbeat(projectPath);
         if (stale == null) return null;
         var (state, enteredAt, fileAgeSec) = stale.Value;
-        if (state != "reloading" && state != "compiling" && state != "importing") return null;
-        if (fileAgeSec < thresholdSec) return null;
-
+        if (state != "reloading" && state != "compiling" && state != "importing")
+        {
+            CliTrace("CheckStuckDomainReload", $"not stuck state={state}");
+            return null;
+        }
         long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         int elapsedSec = enteredAt > 0 ? (int)(nowUnix - enteredAt) : (int)fileAgeSec;
-        if (elapsedSec < thresholdSec) return null;
+        CliTrace("CheckStuckDomainReload", $"state={state} elapsedSec={elapsedSec} fileAgeSec={fileAgeSec:F1} thresholdSec={thresholdSec}");
+        if (fileAgeSec < thresholdSec || elapsedSec < thresholdSec) return null;
 
+        CliTrace("CheckStuckDomainReload", $"STUCK state={state} elapsedSec={elapsedSec}");
         return $"Error: Unity stuck in '{state}' for {elapsedSec}s (heartbeat last updated {(int)fileAgeSec}s ago — domain reload frozen).\n" +
                $"action: clibridge4unity KILL && clibridge4unity OPEN";
     }

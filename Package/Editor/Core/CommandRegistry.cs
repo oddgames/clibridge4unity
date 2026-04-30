@@ -98,17 +98,21 @@ namespace clibridge4unity
 
         static CommandRegistry()
         {
-            // Don't initialize in batch mode (AssetImportWorker processes)
-            BridgeDiagnostics.Log("CommandRegistry", "static ctor enter");
+            BridgeDiagnostics.Log("CommandRegistry", "static ctor - subscribing to afterAssemblyReload");
+            AssemblyReloadEvents.afterAssemblyReload += Initialize;
+        }
+
+        private static void Initialize()
+        {
+            BridgeDiagnostics.Log("CommandRegistry", "Initialize enter");
             if (Application.isBatchMode)
             {
                 BridgeDiagnostics.Log("CommandRegistry", "batch mode - registry disabled");
                 return;
             }
 
-            // Keep InitializeOnLoad cheap. Unity can run static constructors while the
-            // reload progress UI owns the message pump; Win32 window enumeration/timers in
-            // this path have caused reload hangs before the bridge can log anything.
+            AssemblyReloadEvents.beforeAssemblyReload += ShutdownForReload;
+
             _mainThreadContext = SynchronizationContext.Current;
             _lastTimerTick = DateTime.Now;
             BridgeDiagnostics.Log("CommandRegistry", $"captured sync context: {_mainThreadContext?.GetType().Name ?? "null"}");
@@ -123,10 +127,8 @@ namespace clibridge4unity
             wakeThread.Start();
             BridgeDiagnostics.Log("CommandRegistry", "wake thread started");
 
-            AssemblyReloadEvents.beforeAssemblyReload += ShutdownForReload;
-
             Debug.Log($"[Bridge] CommandRegistry init - HWND: {_unityWindowHandle}, SyncCtx: {_mainThreadContext?.GetType().Name}");
-            BridgeDiagnostics.Log("CommandRegistry", "static ctor exit");
+            BridgeDiagnostics.Log("CommandRegistry", "Initialize exit");
         }
 
         private static void ShutdownForReload()
