@@ -99,12 +99,12 @@ namespace clibridge4unity
         static CommandRegistry()
         {
             BridgeDiagnostics.Log("CommandRegistry", "static ctor - subscribing to afterAssemblyReload");
-            AssemblyReloadEvents.afterAssemblyReload += Initialize;
+            AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
         }
 
-        private static void Initialize()
+        private static void OnAfterAssemblyReload()
         {
-            BridgeDiagnostics.Log("CommandRegistry", "Initialize enter");
+            BridgeDiagnostics.Log("CommandRegistry", "OnAfterAssemblyReload enter");
             if (Application.isBatchMode)
             {
                 BridgeDiagnostics.Log("CommandRegistry", "batch mode - registry disabled");
@@ -128,7 +128,7 @@ namespace clibridge4unity
             BridgeDiagnostics.Log("CommandRegistry", "wake thread started");
 
             Debug.Log($"[Bridge] CommandRegistry init - HWND: {_unityWindowHandle}, SyncCtx: {_mainThreadContext?.GetType().Name}");
-            BridgeDiagnostics.Log("CommandRegistry", "Initialize exit");
+            BridgeDiagnostics.Log("CommandRegistry", "OnAfterAssemblyReload exit");
         }
 
         private static void ShutdownForReload()
