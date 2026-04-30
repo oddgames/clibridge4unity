@@ -477,10 +477,10 @@ namespace clibridge4unity
 
         private static Type FindComponentType(string name)
         {
+            if (string.IsNullOrEmpty(name)) return null;
             return AppDomain.CurrentDomain.GetAssemblies()
                 .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
-                .FirstOrDefault(t => !t.IsAbstract
-                    && t.IsSubclassOf(typeof(Component))
+                .FirstOrDefault(t => typeof(Component).IsAssignableFrom(t)
                     && string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase));
         }
 
@@ -518,22 +518,5 @@ namespace clibridge4unity
             return path;
         }
 
-        private static Type FindComponentType(string name)
-        {
-            if (string.IsNullOrEmpty(name)) return null;
-
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                try
-                {
-                    var type = assembly.GetTypes()
-                        .FirstOrDefault(t => typeof(Component).IsAssignableFrom(t) &&
-                            t.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-                    if (type != null) return type;
-                }
-                catch { }
-            }
-            return null;
-        }
     }
 }

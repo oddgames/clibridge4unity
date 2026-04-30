@@ -153,7 +153,7 @@ namespace clibridge4unity
             BridgeDiagnostics.Log("Heartbeat", "cleanup exit");
         }
 
-        internal static string SanitizeName(string name)
+        public static string SanitizeName(string name)
         {
             if (string.IsNullOrEmpty(name)) return "unknown";
             var sb = new System.Text.StringBuilder();
