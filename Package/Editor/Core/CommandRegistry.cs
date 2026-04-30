@@ -98,11 +98,13 @@ namespace clibridge4unity
 
         static CommandRegistry()
         {
+            BridgeDiagnostics.Log("CommandRegistry", "static ctor");
             EditorApplication.update += InitOnFirstTick;
         }
 
         private static void InitOnFirstTick()
         {
+            BridgeDiagnostics.Log("CommandRegistry", "InitOnFirstTick");
             EditorApplication.update -= InitOnFirstTick;
             OnAfterAssemblyReload();
         }
@@ -117,12 +119,14 @@ namespace clibridge4unity
             }
 
             AssemblyReloadEvents.beforeAssemblyReload += ShutdownForReload;
+            BridgeDiagnostics.Log("CommandRegistry", "beforeAssemblyReload registered");
 
             _mainThreadContext = SynchronizationContext.Current;
             _lastTimerTick = DateTime.Now;
-            BridgeDiagnostics.Log("CommandRegistry", $"captured sync context: {_mainThreadContext?.GetType().Name ?? "null"}");
+            BridgeDiagnostics.Log("CommandRegistry", $"sync context: {_mainThreadContext?.GetType().Name ?? "null"}");
 
             EditorApplication.update += OnEditorUpdate;
+            BridgeDiagnostics.Log("CommandRegistry", "EditorUpdate subscribed");
 
             var wakeThread = new Thread(WakeLoop)
             {

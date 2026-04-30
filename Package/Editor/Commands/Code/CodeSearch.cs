@@ -22,13 +22,14 @@ namespace clibridge4unity
     {
         static PdbCache()
         {
+            BridgeDiagnostics.Log("PdbCache", "static ctor");
             EditorApplication.update += InitOnFirstTick;
         }
 
         private static void InitOnFirstTick()
         {
             EditorApplication.update -= InitOnFirstTick;
-            BridgeDiagnostics.Log("PdbCache", "InitOnFirstTick - scheduling background load");
+            BridgeDiagnostics.Log("PdbCache", "InitOnFirstTick");
             InitializeAsync();
         }
         private static Dictionary<string, (string file, int startLine, int endLine)> _methodCache;

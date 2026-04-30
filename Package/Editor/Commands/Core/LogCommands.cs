@@ -27,11 +27,13 @@ namespace clibridge4unity
 
         static LogCommands()
         {
+            BridgeDiagnostics.Log("LogCommands", "static ctor");
             EditorApplication.update += InitOnFirstTick;
         }
 
         private static void InitOnFirstTick()
         {
+            BridgeDiagnostics.Log("LogCommands", "InitOnFirstTick");
             EditorApplication.update -= InitOnFirstTick;
             Initialize();
         }
@@ -70,11 +72,13 @@ namespace clibridge4unity
             _logFilePath = Path.Combine(Path.GetTempPath(), $"clibridge4unity_logs_{projectHash}_{projectName}.log");
             BridgeDiagnostics.Log("LogCommands", $"log file: {_logFilePath}");
 
+            BridgeDiagnostics.Log("LogCommands", "registering hooks");
             CommandRegistry.GetLastLogId = GetLastLogId;
             CommandRegistry.GetLogsSinceFormatted = GetLogsSinceFormatted;
             CommandRegistry.GetCompileErrors = GetCompileErrorsSummary;
             CommandRegistry.ShortenResponsePaths = StackTraceMinimizer.ShortenPaths;
 
+            BridgeDiagnostics.Log("LogCommands", "subscribing events");
             CompilationPipeline.assemblyCompilationFinished += OnAssemblyCompilationFinished;
             CompilationPipeline.compilationStarted += _ =>
             {
@@ -84,6 +88,7 @@ namespace clibridge4unity
 
             Application.logMessageReceived += OnLogMessage;
             UnityEditor.EditorApplication.update += FlushPendingWrites;
+            BridgeDiagnostics.Log("LogCommands", "events subscribed");
 
             try
             {

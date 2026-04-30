@@ -27,11 +27,13 @@ namespace clibridge4unity
 
         static SetupWizard()
         {
+            BridgeDiagnostics.Log("SetupWizard", "static ctor");
             EditorApplication.update += InitOnFirstTick;
         }
 
         static void InitOnFirstTick()
         {
+            BridgeDiagnostics.Log("SetupWizard", "InitOnFirstTick");
             EditorApplication.update -= InitOnFirstTick;
             CheckSetup();
         }

@@ -21,11 +21,13 @@ namespace clibridge4unity
 
         static Heartbeat()
         {
+            BridgeDiagnostics.Log("Heartbeat", "static ctor");
             EditorApplication.update += InitOnFirstTick;
         }
 
         private static void InitOnFirstTick()
         {
+            BridgeDiagnostics.Log("Heartbeat", "InitOnFirstTick");
             EditorApplication.update -= InitOnFirstTick;
             Initialize();
         }

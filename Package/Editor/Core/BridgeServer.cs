@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.98";
+        public const string Version = "1.0.99";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -42,11 +42,13 @@ namespace clibridge4unity
 
         static BridgeServer()
         {
+            BridgeDiagnostics.Log("BridgeServer", "static ctor");
             EditorApplication.update += InitOnFirstTick;
         }
 
         private static void InitOnFirstTick()
         {
+            BridgeDiagnostics.Log("BridgeServer", "InitOnFirstTick");
             EditorApplication.update -= InitOnFirstTick;
             Initialize();
         }
@@ -63,12 +65,11 @@ namespace clibridge4unity
             AssemblyReloadEvents.beforeAssemblyReload += StopServerImmediately;
             CompilationPipeline.compilationStarted += OnCompilationStarted;
             CompilationPipeline.compilationFinished += OnCompilationFinished;
+            BridgeDiagnostics.Log("BridgeServer", "handlers registered");
 
-            // Capture main thread context for invoking Unity APIs from background threads
             mainThreadContext = SynchronizationContext.Current;
-            BridgeDiagnostics.Log("BridgeServer", $"captured sync context: {mainThreadContext?.GetType().Name ?? "null"}");
+            BridgeDiagnostics.Log("BridgeServer", $"sync context: {mainThreadContext?.GetType().Name ?? "null"}");
 
-            // Force Unity to keep processing in background so commands work without focus
             Application.runInBackground = true;
 
             // Enable console timestamps so log entries have time data
@@ -108,6 +109,7 @@ namespace clibridge4unity
 
             pipeName = GeneratePipeName();
             BridgeDiagnostics.Log("BridgeServer", $"pipe name: {pipeName}");
+            BridgeDiagnostics.Log("BridgeServer", "StartServer begin");
             StartServer();
             BridgeDiagnostics.Log("BridgeServer", "Initialize exit");
         }
