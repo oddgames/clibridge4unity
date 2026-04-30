@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.83";
+        public const string Version = "1.0.84";
 
         private static CancellationTokenSource serverCts;
         private static NamedPipeServerStream currentPipeServer;
@@ -311,27 +311,48 @@ namespace clibridge4unity
                 await pipe.WriteAsync(hintBytes, 0, hintBytes.Length, ct);
                 await pipe.FlushAsync();
 
-                string response;
+                // Lock assembly reload for the entire request — including response write —
+                // so a stray asset write or import inside the command can't trigger a
+                // mid-request domain reload that strands the pipe and shows the
+                // "Reloading Domain" progress dialog. Any queued reload (e.g. from COMPILE
+                // or REFRESH) fires cleanly after Unlock, with the response already on the
+                // wire and the pipe disconnected.
+                bool didLockReload = false;
+                try { EditorApplication.LockReloadAssemblies(); didLockReload = true; }
+                catch (Exception ex) { Debug.LogWarning($"[Bridge] LockReloadAssemblies failed: {ex.Message}"); }
+
                 try
                 {
-                    response = await CommandRegistry.ExecuteCommand(command, data, pipe, timeoutCts.Token);
-                }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-                {
-                    response = Response.Error($"Command '{command}' timed out after {timeoutSec}s");
-                }
+                    string response;
+                    try
+                    {
+                        response = await CommandRegistry.ExecuteCommand(command, data, pipe, timeoutCts.Token);
+                    }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                    {
+                        response = Response.Error($"Command '{command}' timed out after {timeoutSec}s");
+                    }
 
-                // Send final response (may be empty for streaming commands)
-                // Use a 5s per-write timeout so a stalled client can't freeze this handler
-                if (!string.IsNullOrEmpty(response))
-                {
-                    byte[] responseBytes = Encoding.UTF8.GetBytes(response + "\n");
-                    using var writeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    writeCts.CancelAfter(5000);
-                    await pipe.WriteAsync(responseBytes, 0, responseBytes.Length, writeCts.Token);
-                    await pipe.FlushAsync();
+                    // Send final response (may be empty for streaming commands)
+                    // Use a 5s per-write timeout so a stalled client can't freeze this handler
+                    if (!string.IsNullOrEmpty(response))
+                    {
+                        byte[] responseBytes = Encoding.UTF8.GetBytes(response + "\n");
+                        using var writeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        writeCts.CancelAfter(5000);
+                        await pipe.WriteAsync(responseBytes, 0, responseBytes.Length, writeCts.Token);
+                        await pipe.FlushAsync();
+                    }
+                    pipe.Disconnect();
                 }
-                pipe.Disconnect();
+                finally
+                {
+                    if (didLockReload)
+                    {
+                        try { EditorApplication.UnlockReloadAssemblies(); }
+                        catch (Exception ex) { Debug.LogWarning($"[Bridge] UnlockReloadAssemblies failed: {ex.Message}"); }
+                    }
+                }
             }
             catch (IOException)
             {
