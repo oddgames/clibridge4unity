@@ -919,7 +919,7 @@ class Program
 
             if (daemonPipe != null)
             {
-                string dResult = RoslynDaemon.Query(daemonPipe, "analyze", data ?? "");
+                string dResult = QueryDaemonWithIndexingHeartbeat(daemonPipe, "analyze", data ?? "");
                 if (dResult != null)
                 {
                     Console.WriteLine(dResult);
@@ -933,7 +933,7 @@ class Program
                 daemonPipe = RoslynDaemon.StartBackground(projectPath);
                 if (daemonPipe != null)
                 {
-                    string retry = RoslynDaemon.Query(daemonPipe, "analyze", data ?? "");
+                    string retry = QueryDaemonWithIndexingHeartbeat(daemonPipe, "analyze", data ?? "");
                     if (retry != null)
                     {
                         Console.WriteLine(retry);
@@ -3314,6 +3314,38 @@ class Program
 
         Console.WriteLine($"Claude Code will now know about clibridge4unity in this project.");
         return EXIT_SUCCESS;
+    }
+
+    /// <summary>
+    /// Query the Roslyn daemon, polling through the "__indexing:N/M" sentinel.
+    /// Renders a single-line stderr heartbeat while the daemon's background indexer
+    /// catches up, then returns the real response. Caps total wait at 120s.
+    /// </summary>
+    static string QueryDaemonWithIndexingHeartbeat(string pipeName, string endpoint, string query)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(120);
+        bool printedHeartbeat = false;
+        while (DateTime.UtcNow < deadline)
+        {
+            string r = RoslynDaemon.Query(pipeName, endpoint, query);
+            if (r == null)
+            {
+                if (printedHeartbeat) Console.Error.WriteLine();
+                return null;
+            }
+            if (r.StartsWith("__indexing:"))
+            {
+                string progress = r.Substring("__indexing:".Length);
+                Console.Error.Write($"\r[roslyn] indexing {progress}        ");
+                printedHeartbeat = true;
+                Thread.Sleep(500);
+                continue;
+            }
+            if (printedHeartbeat) Console.Error.WriteLine();
+            return r;
+        }
+        if (printedHeartbeat) Console.Error.WriteLine();
+        return "Error: Daemon indexing exceeded 120s. Retry shortly or run `clibridge4unity DAEMON status`.";
     }
 
     static int HandleWakeup(string projectPath, bool sendRefresh = false)

@@ -90,12 +90,32 @@ static class RoslynDaemon
             pipe.Write(msg, 0, msg.Length);
             pipe.Flush();
 
-            // Read response
+            // Read response with the same timeout — pipe.Read with no token blocks forever
+            // if the daemon hangs (e.g., long parse, stuck handler), so wrap in a CTS.
+            using var cts = new CancellationTokenSource(timeoutMs);
             var sb = new StringBuilder();
             byte[] buf = new byte[8192];
-            int bytesRead;
-            while ((bytesRead = pipe.Read(buf, 0, buf.Length)) > 0)
-                sb.Append(Encoding.UTF8.GetString(buf, 0, bytesRead));
+            try
+            {
+                while (true)
+                {
+                    var readTask = pipe.ReadAsync(buf, 0, buf.Length, cts.Token);
+                    readTask.Wait(cts.Token);
+                    int bytesRead = readTask.Result;
+                    if (bytesRead == 0) break;
+                    sb.Append(Encoding.UTF8.GetString(buf, 0, bytesRead));
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                error = $"daemon read timed out after {timeoutMs}ms (pipe={pipeName})";
+                return null;
+            }
+            catch (AggregateException ex) when (ex.InnerException is OperationCanceledException)
+            {
+                error = $"daemon read timed out after {timeoutMs}ms (pipe={pipeName})";
+                return null;
+            }
 
             return sb.ToString();
         }
@@ -217,6 +237,7 @@ static class RoslynDaemon
     static int RunServer(string projectPath)
     {
         string assetsDir = Path.Combine(projectPath, "Assets");
+        string packagesDir = Path.Combine(projectPath, "Packages");
         if (!Directory.Exists(assetsDir))
         {
             Console.Error.WriteLine("Error: Assets/ directory not found.");
@@ -228,34 +249,38 @@ static class RoslynDaemon
         Directory.CreateDirectory(daemonDir);
         File.WriteAllText(GetPidFile(projectPath), Process.GetCurrentProcess().Id.ToString());
 
-        var sw = Stopwatch.StartNew();
-
-        // Phase 1: Parse all source files
-        Console.Error.Write("Parsing source files...");
-        var allFiles = Directory.EnumerateFiles(assetsDir, "*.cs", SearchOption.AllDirectories).ToArray();
         var trees = new ConcurrentDictionary<string, SyntaxTree>();
         var fileTexts = new ConcurrentDictionary<string, string>();
+        int totalFilesToIndex = 0;
+        var indexReady = new ManualResetEventSlim(false);
 
-        Parallel.ForEach(allFiles, file =>
+        // Phase 1 (background): Parse all source files. Pipe server starts in parallel
+        // so queries can be answered (or queued with "still indexing" status) immediately.
+        Task indexTask = Task.Run(() =>
         {
-            try
+            var sw = Stopwatch.StartNew();
+            Console.Error.Write("Parsing source files...");
+            var allFiles = new List<string>(Directory.EnumerateFiles(assetsDir, "*.cs", SearchOption.AllDirectories));
+            if (Directory.Exists(packagesDir))
+                allFiles.AddRange(Directory.EnumerateFiles(packagesDir, "*.cs", SearchOption.AllDirectories));
+            Interlocked.Exchange(ref totalFilesToIndex, allFiles.Count);
+
+            Parallel.ForEach(allFiles, file =>
             {
-                string text = File.ReadAllText(file);
-                trees[file] = CSharpSyntaxTree.ParseText(text, path: file);
-                fileTexts[file] = text;
-            }
-            catch { }
+                try
+                {
+                    string text = File.ReadAllText(file);
+                    trees[file] = CSharpSyntaxTree.ParseText(text, path: file);
+                    fileTexts[file] = text;
+                }
+                catch { }
+            });
+            sw.Stop();
+            Console.Error.WriteLine($" {trees.Count} files in {sw.ElapsedMilliseconds}ms");
+            indexReady.Set();
         });
-        sw.Stop();
-        Console.Error.WriteLine($" {trees.Count} files in {sw.ElapsedMilliseconds}ms");
 
-        // Phase 2: File watcher
-        var watcher = new FileSystemWatcher(assetsDir, "*.cs")
-        {
-            IncludeSubdirectories = true,
-            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName
-        };
-
+        // Phase 2: File watcher (covers both Assets and Packages)
         int reParseCount = 0;
         void OnFileChanged(string filePath)
         {
@@ -270,28 +295,40 @@ static class RoslynDaemon
             catch { }
         }
 
-        watcher.Changed += (_, e) => Task.Run(() => OnFileChanged(e.FullPath));
-        watcher.Created += (_, e) => Task.Run(() => OnFileChanged(e.FullPath));
-        watcher.Renamed += (_, e) =>
+        FileSystemWatcher MakeWatcher(string root)
         {
-            trees.TryRemove(e.OldFullPath, out SyntaxTree _);
-            fileTexts.TryRemove(e.OldFullPath, out string _);
-            Task.Run(() => OnFileChanged(e.FullPath));
-        };
-        watcher.Deleted += (_, e) =>
-        {
-            trees.TryRemove(e.FullPath, out SyntaxTree _2);
-            fileTexts.TryRemove(e.FullPath, out string _3);
-        };
-        watcher.EnableRaisingEvents = true;
+            var w = new FileSystemWatcher(root, "*.cs")
+            {
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName
+            };
+            w.Changed += (_, e) => Task.Run(() => OnFileChanged(e.FullPath));
+            w.Created += (_, e) => Task.Run(() => OnFileChanged(e.FullPath));
+            w.Renamed += (_, e) =>
+            {
+                trees.TryRemove(e.OldFullPath, out SyntaxTree _);
+                fileTexts.TryRemove(e.OldFullPath, out string _);
+                Task.Run(() => OnFileChanged(e.FullPath));
+            };
+            w.Deleted += (_, e) =>
+            {
+                trees.TryRemove(e.FullPath, out SyntaxTree _2);
+                fileTexts.TryRemove(e.FullPath, out string _3);
+            };
+            w.EnableRaisingEvents = true;
+            return w;
+        }
+
+        var watchers = new List<FileSystemWatcher> { MakeWatcher(assetsDir) };
+        if (Directory.Exists(packagesDir)) watchers.Add(MakeWatcher(packagesDir));
 
         // Phase 3: Start pipe server (PID file already written at startup)
         string pipeName = GeneratePipeName(projectPath);
-        Console.Error.WriteLine($"Daemon started: {pipeName}");
-        Console.Error.WriteLine($"  {trees.Count} files indexed, watching for changes");
+        Console.Error.WriteLine($"Daemon started: {pipeName} (indexing in background)");
         Console.Error.WriteLine($"  Auto-shutdown after {TTL_MINUTES} minutes of inactivity");
 
-        // Signal parent that we're ready
+        // Signal parent that we're ready to ACCEPT — even before indexing finishes.
+        // Queries that arrive during indexing block briefly waiting for it to complete.
         Console.WriteLine($"pipe:{pipeName}");
         Console.Out.Flush();
 
@@ -324,12 +361,20 @@ static class RoslynDaemon
                 switch (endpoint)
                 {
                     case "health":
-                        response = "ok";
+                        response = indexReady.IsSet ? "ok" : "indexing";
                         break;
                     case "status":
-                        response = $"files: {trees.Count}\nreparses: {reParseCount}\nuptime: {(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds:F0}s\nproject: {projectPath}";
+                        response = $"files: {trees.Count}/{Volatile.Read(ref totalFilesToIndex)}\nready: {indexReady.IsSet}\nreparses: {reParseCount}\nuptime: {(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds:F0}s\nproject: {projectPath}";
                         break;
                     case "analyze":
+                        // Don't block the connection on indexing — return a progress sentinel
+                        // immediately so the client can poll + render a heartbeat. Each request
+                        // is short and stateless; client retries until indexReady.IsSet.
+                        if (!indexReady.IsSet)
+                        {
+                            response = $"__indexing:{trees.Count}/{Volatile.Read(ref totalFilesToIndex)}";
+                            break;
+                        }
                         response = HandleAnalyze(trees, fileTexts, projectPath, query);
                         break;
                     case "shutdown":
@@ -421,8 +466,11 @@ static class RoslynDaemon
         try { Task.WaitAll(listenerTasks); }
         catch (AggregateException) { /* cancellation */ }
 
-        watcher.EnableRaisingEvents = false;
-        watcher.Dispose();
+        foreach (var w in watchers)
+        {
+            try { w.EnableRaisingEvents = false; } catch { }
+            try { w.Dispose(); } catch { }
+        }
         CleanupFiles(projectPath);
         return 0;
     }
