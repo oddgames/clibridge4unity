@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.99";
+        public const string Version = "1.1.0";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -329,6 +329,7 @@ namespace clibridge4unity
         {
             string command = null;
             string data = null;
+            BridgeDiagnostics.Log("BridgeServer", "HandleClient enter");
 
             try
             {
@@ -435,7 +436,9 @@ namespace clibridge4unity
                 }, heartbeatCts.Token);
 
                 string response;
+                BridgeDiagnostics.Log("BridgeServer", $"slot wait: {command}");
                 await _commandSlot.WaitAsync(ct);
+                BridgeDiagnostics.Log("BridgeServer", $"slot acquired: {command}");
                 try
                 {
                     BridgeDiagnostics.Log("BridgeServer", $"execute begin: {command}, timeoutSec={timeoutSec}");
@@ -452,8 +455,11 @@ namespace clibridge4unity
                     heartbeatCts.Cancel();
                     try { await heartbeatTask; } catch { }
                     heartbeatCts.Dispose();
-                    try { await Task.Delay(CommandIdleMs); } catch { }
+                    // Skip idle when shutting down so domain reload isn't delayed.
+                    if (!ct.IsCancellationRequested)
+                        try { await Task.Delay(CommandIdleMs, ct); } catch { }
                     _commandSlot.Release();
+                    BridgeDiagnostics.Log("BridgeServer", $"slot released: {command}");
                 }
 
                 // Send final response (may be empty for streaming commands)
@@ -474,16 +480,20 @@ namespace clibridge4unity
                 pipe.Disconnect();
                 BridgeDiagnostics.Log("BridgeServer", $"client disconnected after command: {command}");
             }
+            catch (OperationCanceledException)
+            {
+                BridgeDiagnostics.Log("BridgeServer", $"HandleClient canceled: {command ?? "pre-parse"}");
+            }
             catch (IOException)
             {
-                // Pipe broken - client disconnected during operation
-                BridgeDiagnostics.Log("BridgeServer", $"pipe broken during command: {command ?? "unknown"}");
+                BridgeDiagnostics.Log("BridgeServer", $"pipe broken: {command ?? "pre-parse"}");
             }
             catch (Exception ex)
             {
                 BridgeDiagnostics.LogException("BridgeServer client", ex);
                 Debug.LogError($"[Bridge] Client error: {ex.Message}");
             }
+            BridgeDiagnostics.Log("BridgeServer", $"HandleClient exit: {command ?? "pre-parse"}");
         }
     }
 
