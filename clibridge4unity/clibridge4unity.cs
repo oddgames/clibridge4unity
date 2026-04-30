@@ -951,6 +951,20 @@ class Program
             return fallbackResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
         }
 
+        // Offline YAML fallback: INSPECTOR with a prefab/scene asset path works without Unity
+        if ((unityInfo.State == UnityProcessState.NotRunning || unityInfo.State == UnityProcessState.DifferentProject)
+            && command.Equals("INSPECTOR", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrEmpty(data))
+        {
+            string yamlResult = TryYamlInspector(projectPath, data);
+            if (yamlResult != null)
+            {
+                Console.Error.WriteLine("[offline] Unity not running — reading YAML from disk");
+                Console.WriteLine(yamlResult);
+                return EXIT_SUCCESS;
+            }
+        }
+
         // Pre-flight: check if Unity is running for this project (instant, no pipe needed)
         if (unityInfo.State == UnityProcessState.NotRunning)
         {
@@ -3406,6 +3420,346 @@ class Program
 
         Console.WriteLine($"Woke {unityWindows.Count} Unity window(s), focus returned to '{previousTitle}'");
         return EXIT_SUCCESS;
+    }
+
+    // ---- Offline YAML Inspector ----
+
+    class YamlObj
+    {
+        public long   FileId;
+        public int    TypeId;
+        public string TypeName = "";
+        public string Name     = "";
+        public bool   IsActive = true;
+        public bool   Enabled  = true;
+        public long   Father;       // Transform: parent Transform fileId (0 = root)
+        public long   GameObjectId; // component: owning GameObject fileId
+        public string ScriptGuid;   // MonoBehaviour: m_Script guid
+        public List<long>              Components = new();
+        public List<long>              Children   = new();
+        public Dictionary<string,string> Fields   = new();
+    }
+
+    static readonly HashSet<string> _yamlSkipFields = new(StringComparer.Ordinal)
+    {
+        "m_ObjectHideFlags", "m_CorrespondingSourceObject", "m_PrefabInstance", "m_PrefabAsset",
+        "m_EditorHideFlags", "m_EditorClassIdentifier", "m_PrefabParentObject", "m_PrefabInternal",
+        "serializedVersion", "m_LocalEulerAnglesHint", "m_RootOrder", "m_ConstrainProportionsScale",
+    };
+
+    static readonly Dictionary<int, string> _unityTypeNames = new()
+    {
+        [1]   = "GameObject",      [4]   = "Transform",       [20]  = "Camera",
+        [23]  = "MeshRenderer",    [25]  = "Renderer",        [33]  = "MeshFilter",
+        [54]  = "Rigidbody",       [64]  = "MeshCollider",    [65]  = "BoxCollider",
+        [95]  = "Animator",        [108] = "Light",           [114] = "MonoBehaviour",
+        [115] = "MonoScript",      [222] = "CanvasRenderer",  [223] = "Canvas",
+        [224] = "RectTransform",   [225] = "CanvasGroup",     [226] = "GraphicRaycaster",
+    };
+
+    static readonly Dictionary<string, string> _guidToScriptCache = new();
+
+    /// Returns a formatted INSPECTOR result read directly from .prefab/.unity YAML on disk.
+    /// Returns null if the asset path isn't recognisable or the file doesn't exist.
+    static string TryYamlInspector(string projectPath, string rawData)
+    {
+        // Strip flags: --brief, --children, --depth N, --filter X
+        bool brief = false, showChildren = false;
+        int  depth = 0;
+        string filter = null;
+        var tokens = rawData.Split(' ');
+        var pathTokens = new List<string>();
+        for (int ti = 0; ti < tokens.Length; ti++)
+        {
+            switch (tokens[ti])
+            {
+                case "--brief":    brief = true; break;
+                case "--children": showChildren = true; depth = 100; break;
+                case "--depth":    if (ti + 1 < tokens.Length) int.TryParse(tokens[++ti], out depth); break;
+                case "--filter":   if (ti + 1 < tokens.Length) filter = tokens[++ti]; break;
+                default:           pathTokens.Add(tokens[ti]); break;
+            }
+        }
+        string cleanData = string.Join(" ", pathTokens).Trim('"', '\'');
+
+        // Match "Assets/Foo.prefab" or "Assets/Foo.prefab/Root/Child/..."
+        var m = System.Text.RegularExpressions.Regex.Match(cleanData,
+            @"^(Assets[/\\].+?\.(?:prefab|unity))(?:[/\\](.+))?$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!m.Success) return null;
+
+        string assetPath = m.Groups[1].Value.Replace('\\', '/');
+        string nodePath  = m.Groups[2].Success ? m.Groups[2].Value.Replace('\\', '/') : null;
+        string filePath  = Path.Combine(projectPath, assetPath.Replace('/', Path.DirectorySeparatorChar));
+        if (!File.Exists(filePath)) return null;
+
+        Dictionary<long, YamlObj> all;
+        try { all = ParseUnityYamlFile(filePath); }
+        catch { return null; }
+        if (all.Count == 0) return null;
+
+        // Index GameObjects and transforms
+        var goById      = new Dictionary<long, YamlObj>();
+        var xformByGoId = new Dictionary<long, YamlObj>(); // go fileId → its transform
+        foreach (var obj in all.Values)
+        {
+            if (obj.TypeId == 1) goById[obj.FileId] = obj;
+            else if ((obj.TypeId == 4 || obj.TypeId == 224) && obj.GameObjectId != 0)
+                xformByGoId[obj.GameObjectId] = obj;
+        }
+
+        // Find root transform (Father == 0 or Father not in document)
+        YamlObj rootXform = null;
+        foreach (var obj in all.Values)
+        {
+            if ((obj.TypeId == 4 || obj.TypeId == 224) && (obj.Father == 0 || !all.ContainsKey(obj.Father)))
+            { rootXform = obj; break; }
+        }
+        if (rootXform == null || !goById.TryGetValue(rootXform.GameObjectId, out var rootGo))
+            return null;
+
+        // Navigate path
+        YamlObj targetGo;
+        if (string.IsNullOrEmpty(nodePath))
+        {
+            targetGo = rootGo;
+        }
+        else
+        {
+            var segs  = nodePath.Split('/');
+            var cur   = rootGo;
+            int start = (cur.Name == segs[0]) ? 1 : 0;
+            for (int si = start; si < segs.Length && cur != null; si++)
+            {
+                if (!xformByGoId.TryGetValue(cur.FileId, out var xf)) { cur = null; break; }
+                YamlObj next = null;
+                foreach (var cid in xf.Children)
+                {
+                    if (!all.TryGetValue(cid, out var cxf)) continue;
+                    if (!goById.TryGetValue(cxf.GameObjectId, out var cgo)) continue;
+                    if (cgo.Name == segs[si]) { next = cgo; break; }
+                }
+                cur = next;
+            }
+            targetGo = cur;
+        }
+
+        if (targetGo == null)
+            return $"Error: GameObject not found at '{nodePath}' in {assetPath}";
+
+        // Format output (mirrors live INSPECTOR style)
+        var sb = new StringBuilder();
+        sb.AppendLine($"--- {targetGo.Name} [{assetPath}] [offline YAML]");
+        sb.AppendLine($"Active: {(targetGo.IsActive ? "true" : "false")}");
+        string fullPath = BuildYamlGoPath(targetGo, goById, xformByGoId, all);
+        if (!string.IsNullOrEmpty(fullPath))
+            sb.AppendLine($"Path: {fullPath}");
+        if (targetGo.Fields.TryGetValue("m_TagString", out var tag))
+            sb.Append($"Tag: {tag}");
+        if (targetGo.Fields.TryGetValue("m_Layer", out var layer))
+            sb.AppendLine($" | Layer: {layer}");
+        else
+            sb.AppendLine();
+
+        if (!brief)
+        {
+            sb.AppendLine("Components:");
+            foreach (var cid in targetGo.Components)
+            {
+                if (!all.TryGetValue(cid, out var comp)) continue;
+                bool hasEnabled = comp.TypeId != 222 && comp.TypeId != 4 && comp.TypeId != 224 && comp.TypeId != 225;
+                string compName = GetYamlComponentName(comp, projectPath);
+                sb.AppendLine($"  {compName}{(hasEnabled && !comp.Enabled ? " (disabled)" : "")}");
+                foreach (var kv in comp.Fields)
+                {
+                    if (string.IsNullOrEmpty(kv.Value) || kv.Value == "{fileID: 0}") continue;
+                    sb.AppendLine($"    {kv.Key}: {kv.Value}");
+                }
+            }
+        }
+
+        if (showChildren && depth > 0 && xformByGoId.TryGetValue(targetGo.FileId, out var tXform))
+        {
+            sb.AppendLine("Children:");
+            AppendYamlChildTree(sb, tXform, goById, xformByGoId, all, 1, depth, projectPath, filter, brief);
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
+    static string BuildYamlGoPath(YamlObj go, Dictionary<long, YamlObj> goById,
+        Dictionary<long, YamlObj> xformByGoId, Dictionary<long, YamlObj> all)
+    {
+        var parts = new List<string>();
+        var cur = go;
+        for (int safety = 0; safety < 64 && cur != null; safety++)
+        {
+            parts.Add(cur.Name);
+            if (!xformByGoId.TryGetValue(cur.FileId, out var xf) || xf.Father == 0 || !all.TryGetValue(xf.Father, out var pxf)) break;
+            goById.TryGetValue(pxf.GameObjectId, out cur);
+        }
+        parts.Reverse();
+        return string.Join("/", parts);
+    }
+
+    static void AppendYamlChildTree(StringBuilder sb, YamlObj xform, Dictionary<long, YamlObj> goById,
+        Dictionary<long, YamlObj> xformByGoId, Dictionary<long, YamlObj> all,
+        int curDepth, int maxDepth, string projectPath, string filter, bool brief)
+    {
+        foreach (var cid in xform.Children)
+        {
+            if (!all.TryGetValue(cid, out var cxf)) continue;
+            if (!goById.TryGetValue(cxf.GameObjectId, out var cgo)) continue;
+            if (filter != null && !cgo.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
+            string pad = new string(' ', curDepth * 2);
+            sb.AppendLine($"{pad}{cgo.Name}{(cgo.IsActive ? "" : " [inactive]")}");
+            if (!brief)
+                foreach (var compId in cgo.Components)
+                    if (all.TryGetValue(compId, out var comp))
+                        sb.AppendLine($"{pad}  [{GetYamlComponentName(comp, projectPath)}]");
+            if (curDepth < maxDepth && xformByGoId.TryGetValue(cgo.FileId, out var nextXf))
+                AppendYamlChildTree(sb, nextXf, goById, xformByGoId, all, curDepth + 1, maxDepth, projectPath, filter, brief);
+        }
+    }
+
+    static string GetYamlComponentName(YamlObj comp, string projectPath)
+    {
+        if (comp.TypeId != 114)
+            return _unityTypeNames.TryGetValue(comp.TypeId, out var n) ? n : $"Type{comp.TypeId}";
+        if (string.IsNullOrEmpty(comp.ScriptGuid)) return "MonoBehaviour";
+        if (_guidToScriptCache.TryGetValue(comp.ScriptGuid, out var cached)) return cached;
+        string assetsDir = Path.Combine(projectPath, "Assets");
+        try
+        {
+            foreach (var mf in Directory.EnumerateFiles(assetsDir, "*.cs.meta", SearchOption.AllDirectories))
+            {
+                foreach (var line in File.ReadLines(mf))
+                {
+                    if (!line.TrimStart().StartsWith("guid: ")) continue;
+                    if (line.Trim().Substring(6) != comp.ScriptGuid) continue;
+                    string name = Path.GetFileNameWithoutExtension(Path.GetFileNameWithoutExtension(mf));
+                    _guidToScriptCache[comp.ScriptGuid] = name;
+                    return name;
+                }
+            }
+        }
+        catch { }
+        string fallback = $"MonoBehaviour({comp.ScriptGuid[..8]})";
+        _guidToScriptCache[comp.ScriptGuid] = fallback;
+        return fallback;
+    }
+
+    static Dictionary<long, YamlObj> ParseUnityYamlFile(string filePath)
+    {
+        var result = new Dictionary<long, YamlObj>();
+        string[] lines = File.ReadAllLines(filePath);
+        int i = 0;
+        while (i < lines.Length)
+        {
+            if (!lines[i].StartsWith("--- ")) { i++; continue; }
+            var hm = System.Text.RegularExpressions.Regex.Match(lines[i], @"!u!(\d+)\s+&(\d+)");
+            if (!hm.Success) { i++; continue; }
+            int  typeId = int.Parse(hm.Groups[1].Value);
+            long fileId = long.Parse(hm.Groups[2].Value);
+            i++;
+            string typeName = (i < lines.Length) ? lines[i].Trim().TrimEnd(':') : "";
+            if (i < lines.Length) i++;
+            var block = new List<string>();
+            while (i < lines.Length && !lines[i].StartsWith("--- "))
+                block.Add(lines[i++]);
+            var obj = new YamlObj { FileId = fileId, TypeId = typeId, TypeName = typeName };
+            ParseUnityYamlBlock(obj, block);
+            result[fileId] = obj;
+        }
+        return result;
+    }
+
+    static void ParseUnityYamlBlock(YamlObj obj, List<string> lines)
+    {
+        bool inComp = false, inChild = false;
+        int  listIndent = -1, skipDepth = -1;
+
+        foreach (var raw in lines)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            string t   = raw.TrimStart();
+            int    ind = raw.Length - t.Length;
+
+            // Skip nested blocks we don't need (entered when a key has an empty value)
+            if (skipDepth >= 0)
+            {
+                if (ind <= skipDepth && !t.StartsWith("- ")) skipDepth = -1; // exit skip
+                else continue;
+            }
+
+            // m_Component list
+            if (t == "m_Component:") { inComp = true; inChild = false; listIndent = ind; continue; }
+            if (inComp)
+            {
+                if (t.StartsWith("- "))
+                {
+                    var fm = System.Text.RegularExpressions.Regex.Match(t, @"fileID:\s*(-?\d+)");
+                    if (fm.Success && long.TryParse(fm.Groups[1].Value, out long cid) && cid != 0)
+                        obj.Components.Add(cid);
+                    continue;
+                }
+                if (ind <= listIndent) inComp = false; // fall through to process as key
+            }
+
+            // m_Children list
+            if (t == "m_Children:") { inChild = true; inComp = false; listIndent = ind; continue; }
+            if (inChild)
+            {
+                if (t == "[]")       { inChild = false; continue; }
+                if (t.StartsWith("- "))
+                {
+                    var fm = System.Text.RegularExpressions.Regex.Match(t, @"fileID:\s*(-?\d+)");
+                    if (fm.Success && long.TryParse(fm.Groups[1].Value, out long cid) && cid != 0)
+                        obj.Children.Add(cid);
+                    continue;
+                }
+                if (ind <= listIndent) inChild = false; // fall through to process as key
+            }
+
+            if (t.StartsWith("- ")) continue; // stray list item
+
+            // Key: value
+            int col = t.IndexOf(':');
+            if (col < 0) continue;
+            string key = t.Substring(0, col);
+            string val = t.Substring(col + 1).Trim();
+
+            if (string.IsNullOrEmpty(val)) { skipDepth = ind; continue; } // nested block start
+
+            switch (key)
+            {
+                case "m_Name":     obj.Name    = val; break;
+                case "m_IsActive": obj.IsActive = val != "0"; break;
+                case "m_Enabled":  obj.Enabled  = val != "0"; break;
+                case "m_Father":
+                {
+                    var fm = System.Text.RegularExpressions.Regex.Match(val, @"fileID:\s*(-?\d+)");
+                    if (fm.Success) long.TryParse(fm.Groups[1].Value, out obj.Father);
+                    break;
+                }
+                case "m_GameObject":
+                {
+                    var fm = System.Text.RegularExpressions.Regex.Match(val, @"fileID:\s*(-?\d+)");
+                    if (fm.Success) long.TryParse(fm.Groups[1].Value, out obj.GameObjectId);
+                    break;
+                }
+                case "m_Script":
+                {
+                    var gm = System.Text.RegularExpressions.Regex.Match(val, @"guid:\s*([a-f0-9]+)");
+                    if (gm.Success) obj.ScriptGuid = gm.Groups[1].Value;
+                    break;
+                }
+                default:
+                    if (!_yamlSkipFields.Contains(key))
+                        obj.Fields[key] = val;
+                    break;
+            }
+        }
     }
 
     /// <summary>

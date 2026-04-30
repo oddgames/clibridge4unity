@@ -219,11 +219,17 @@ namespace clibridge4unity
         {
             // Force-reimport the UXML and its USS dependencies so on-disk edits show up
             // immediately — without this, AssetDatabase serves the previously imported version.
+            // Skip when Unity is mid-compile/import: ForceSynchronousImport on top of an
+            // in-progress operation can trigger cascading domain reloads.
             var uxml = await CommandRegistry.RunOnMainThreadAsync(() =>
             {
-                if (File.Exists(uxmlPath))
+                if (File.Exists(uxmlPath)
+                    && !EditorApplication.isCompiling
+                    && !EditorApplication.isUpdating)
                 {
-                    const ImportAssetOptions opts = ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport;
+                    // ForceUpdate without ForceSynchronousImport: queues import without forcing
+                    // a refresh batch. Editor still imports on main thread before returning.
+                    const ImportAssetOptions opts = ImportAssetOptions.ForceUpdate;
                     AssetDatabase.ImportAsset(uxmlPath, opts);
                     foreach (var dep in AssetDatabase.GetDependencies(uxmlPath, recursive: true))
                     {
@@ -236,6 +242,18 @@ namespace clibridge4unity
                 }
                 return AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(uxmlPath);
             });
+
+            // If Unity was busy when we tried, wait briefly for it to settle so the next
+            // render gets fresh content. Cap to avoid blocking forever.
+            if (uxml != null)
+            {
+                var waitStart = System.DateTime.UtcNow;
+                while ((EditorApplication.isCompiling || EditorApplication.isUpdating)
+                       && (System.DateTime.UtcNow - waitStart).TotalSeconds < 30)
+                {
+                    await Task.Delay(100);
+                }
+            }
 
             if (uxml == null)
             {

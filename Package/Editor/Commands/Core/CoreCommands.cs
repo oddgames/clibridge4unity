@@ -210,15 +210,34 @@ namespace clibridge4unity
             if (EditorApplication.isPlaying)
                 return Response.Error("Cannot compile during play mode. Use STOP first.");
 
-            // If Unity is already compiling OR updating assets (e.g. post-play-mode cleanup),
-            // skip the Refresh — triggering it on top of an in-progress compile/update causes
-            // cascading domain reloads, especially on large projects with packages that hook
-            // into the asset pipeline (Addressables, Google Play Services Resolver, etc.).
-            if (!EditorApplication.isCompiling && !EditorApplication.isUpdating)
+            // Already compiling/updating? Don't stack — return immediately, caller waits.
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
             {
-                AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
-                EditorApplication.QueuePlayerLoopUpdate();
+                return Response.SuccessWithData(new
+                {
+                    message = "Compilation already in progress. Connection will be lost during reload.",
+                    timeoutSeconds = 300,
+                    reconnect = true,
+                    alreadyCompiling = true
+                });
             }
+
+            // No script changes since last compile? Skip — avoids needless domain reload.
+            if (!ScriptsModifiedSinceCompile())
+            {
+                return Response.SuccessWithData(new
+                {
+                    message = "No script changes since last compile. Skipped.",
+                    skipped = true,
+                    reconnect = false
+                });
+            }
+
+            // Targeted: recompile scripts only, no asset reimport.
+            // AssetDatabase.Refresh would reimport all dirty assets and risk cascading reloads
+            // from package hooks (Addressables, GooglePlayServicesResolver, etc.).
+            CompilationPipeline.RequestScriptCompilation();
+            EditorApplication.QueuePlayerLoopUpdate();
 
             return Response.SuccessWithData(new
             {
@@ -240,11 +259,20 @@ namespace clibridge4unity
             if (EditorApplication.isPlaying)
                 return Response.Error("Cannot refresh during play mode. Use STOP first.");
 
-            // Trigger asset database refresh - may trigger compilation if assets change
-            // If compilation is triggered, Unity will reload assemblies and connection will be lost
-            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
+            // Already compiling/updating? Don't stack — refresh on top of in-progress compile
+            // causes cascading domain reloads (Addressables, GooglePlayServicesResolver, etc.).
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+            {
+                return Response.SuccessWithData(new
+                {
+                    message = "Compile/import already in progress. Connection will be lost during reload.",
+                    timeoutSeconds = 300,
+                    reconnect = true,
+                    alreadyBusy = true
+                });
+            }
 
-            // Force Unity to process the refresh even when in background
+            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
             EditorApplication.QueuePlayerLoopUpdate();
 
             return Response.SuccessWithData(new

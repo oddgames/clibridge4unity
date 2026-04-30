@@ -87,7 +87,8 @@ namespace clibridge4unity
                 if (prefab == null)
                     return Response.Error($"Failed to create prefab at {path}");
 
-                    AssetDatabase.Refresh();
+                    // SaveAsPrefabAsset already imports the prefab — Refresh would just risk a
+                    // cascading domain reload from package hooks. Skip it.
                     await Task.Yield();
 
                     return Response.SuccessWithData(new
@@ -354,11 +355,20 @@ namespace clibridge4unity
 
         private static void EnsureDirectory(string filePath)
         {
-            var directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            var directory = Path.GetDirectoryName(filePath)?.Replace('\\', '/');
+            if (string.IsNullOrEmpty(directory)) return;
+            if (AssetDatabase.IsValidFolder(directory)) return;
+
+            // Walk parents, create each missing segment via AssetDatabase so the folder is
+            // tracked without a global Refresh (which can cascade into a domain reload).
+            var parts = directory.Split('/');
+            var accum = parts[0];
+            for (int i = 1; i < parts.Length; i++)
             {
-                Directory.CreateDirectory(directory);
-                AssetDatabase.Refresh();
+                var next = $"{accum}/{parts[i]}";
+                if (!AssetDatabase.IsValidFolder(next))
+                    AssetDatabase.CreateFolder(accum, parts[i]);
+                accum = next;
             }
         }
 
