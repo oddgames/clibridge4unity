@@ -21,13 +21,17 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.0.96";
+        public const string Version = "1.0.97";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
         private static readonly List<NamedPipeServerStream> activePipeServers = new List<NamedPipeServerStream>();
         private static string pipeName;
         private static volatile bool isStopping;
+
+        // Serializes all command execution: one command at a time, brief idle between each.
+        private static readonly SemaphoreSlim _commandSlot = new SemaphoreSlim(1, 1);
+        private const int CommandIdleMs = 100;
 
         // Main thread context for Unity API calls
         private static SynchronizationContext mainThreadContext;
@@ -424,6 +428,7 @@ namespace clibridge4unity
                 }, heartbeatCts.Token);
 
                 string response;
+                await _commandSlot.WaitAsync(ct);
                 try
                 {
                     BridgeDiagnostics.Log("BridgeServer", $"execute begin: {command}, timeoutSec={timeoutSec}");
@@ -440,6 +445,8 @@ namespace clibridge4unity
                     heartbeatCts.Cancel();
                     try { await heartbeatTask; } catch { }
                     heartbeatCts.Dispose();
+                    try { await Task.Delay(CommandIdleMs); } catch { }
+                    _commandSlot.Release();
                 }
 
                 // Send final response (may be empty for streaming commands)
