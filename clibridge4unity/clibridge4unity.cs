@@ -3319,12 +3319,17 @@ class Program
     /// <summary>
     /// Query the Roslyn daemon, polling through the "__indexing:N/M" sentinel.
     /// Renders a single-line stderr heartbeat while the daemon's background indexer
-    /// catches up, then returns the real response. Caps total wait at 120s.
+    /// catches up. Returns early if progress stalls (no heartbeat for 5s) — better to
+    /// fall back to single-pass than block on a wedged indexer.
     /// </summary>
     static string QueryDaemonWithIndexingHeartbeat(string pipeName, string endpoint, string query)
     {
         var deadline = DateTime.UtcNow.AddSeconds(120);
         bool printedHeartbeat = false;
+        string lastProgress = null;
+        DateTime lastProgressChange = DateTime.UtcNow;
+        const int STALL_SECONDS = 5;
+
         while (DateTime.UtcNow < deadline)
         {
             string r = RoslynDaemon.Query(pipeName, endpoint, query);
@@ -3336,6 +3341,17 @@ class Program
             if (r.StartsWith("__indexing:"))
             {
                 string progress = r.Substring("__indexing:".Length);
+                if (progress != lastProgress)
+                {
+                    lastProgress = progress;
+                    lastProgressChange = DateTime.UtcNow;
+                }
+                else if ((DateTime.UtcNow - lastProgressChange).TotalSeconds >= STALL_SECONDS)
+                {
+                    if (printedHeartbeat) Console.Error.WriteLine();
+                    Console.Error.WriteLine($"[roslyn] daemon stalled at {progress} for {STALL_SECONDS}s — falling back");
+                    return null; // Caller falls back to single-pass.
+                }
                 Console.Error.Write($"\r[roslyn] indexing {progress}        ");
                 printedHeartbeat = true;
                 Thread.Sleep(500);
