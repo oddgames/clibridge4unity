@@ -1514,6 +1514,15 @@ class Program
         }
     }
 
+    static string GetProjectName(string projectPath)
+    {
+        string raw = Path.GetFileName(Path.GetFullPath(projectPath).TrimEnd('/', '\\')) ?? "";
+        var sb = new System.Text.StringBuilder();
+        foreach (char c in raw)
+            sb.Append(char.IsLetterOrDigit(c) || c == '-' || c == '_' ? c : '_');
+        return sb.Length > 32 ? sb.ToString().Substring(0, 32) : (sb.Length > 0 ? sb.ToString() : "unknown");
+    }
+
     static int SendCommand(string pipeName, string projectPath, string command, string data)
     {
         CliTrace("SendCommand", $"begin command={command}, dataChars={data?.Length ?? 0}, pipe={pipeName}, project={projectPath}");
@@ -2792,7 +2801,7 @@ class Program
                 hash2 = ((hash2 << 5) + hash2) ^ normalizedPath[i + 1];
             }
             int hash = hash1 + (hash2 * 1566083941);
-            string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}.status");
+            string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}_{GetProjectName(projectPath)}.status");
 
             if (!File.Exists(statusFile)) return null;
 
@@ -2833,7 +2842,7 @@ class Program
                 hash2 = ((hash2 << 5) + hash2) ^ normalizedPath[i + 1];
             }
             int hash = hash1 + (hash2 * 1566083941);
-            string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}.status");
+            string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}_{GetProjectName(projectPath)}.status");
             if (!File.Exists(statusFile)) return null;
 
             double ageSec = (DateTime.UtcNow - File.GetLastWriteTimeUtc(statusFile)).TotalSeconds;
@@ -3076,7 +3085,7 @@ class Program
         {
             string normalizedPath = Path.GetFullPath(projectPath).ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
             int hash = GetDeterministicHashCode(normalizedPath);
-            string bridgeLog = Path.Combine(Path.GetTempPath(), $"clibridge4unity_logs_{hash:X8}.log");
+            string bridgeLog = Path.Combine(Path.GetTempPath(), $"clibridge4unity_logs_{hash:X8}_{GetProjectName(projectPath)}.log");
             if (File.Exists(bridgeLog))
             {
                 string tail = TailFile(bridgeLog, 16384);

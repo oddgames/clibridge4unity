@@ -47,9 +47,11 @@ namespace clibridge4unity
 
             // Log file in temp directory - survives domain reloads, cleared on Unity restart
             // Use the same deterministic hash as the pipe name so the CLI can find this file
-            string normalizedPath = Application.dataPath.Replace("/Assets", "").ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
+            string projectRoot = Application.dataPath.Replace("/Assets", "");
+            string normalizedPath = projectRoot.ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
             string projectHash = BridgeServer.GetDeterministicHashCode(normalizedPath).ToString("X8");
-            _logFilePath = Path.Combine(Path.GetTempPath(), $"clibridge4unity_logs_{projectHash}.log");
+            string projectName = Heartbeat.SanitizeName(Path.GetFileName(projectRoot.TrimEnd('/', '\\')));
+            _logFilePath = Path.Combine(Path.GetTempPath(), $"clibridge4unity_logs_{projectHash}_{projectName}.log");
             BridgeDiagnostics.Log("LogCommands", $"log file: {_logFilePath}");
 
             // Register hooks with CommandRegistry (avoids circular asmdef dependency)

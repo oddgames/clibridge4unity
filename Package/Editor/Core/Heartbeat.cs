@@ -22,10 +22,11 @@ namespace clibridge4unity
         static Heartbeat()
         {
             BridgeDiagnostics.Log("Heartbeat", "static ctor enter");
-            string normalizedPath = Application.dataPath.Replace("/Assets", "")
-                .ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
+            string projectRoot = Application.dataPath.Replace("/Assets", "");
+            string normalizedPath = projectRoot.ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
             string hash = BridgeServer.GetDeterministicHashCode(normalizedPath).ToString("X8");
-            _statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash}.status");
+            string projectName = SanitizeName(Path.GetFileName(projectRoot.TrimEnd('/', '\\')));
+            _statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash}_{projectName}.status");
             BridgeDiagnostics.Log("Heartbeat", $"status file: {_statusFile}");
 
             EditorApplication.update += Tick;
@@ -148,6 +149,15 @@ namespace clibridge4unity
             try { if (File.Exists(_statusFile)) File.Delete(_statusFile); }
             catch (Exception ex) { BridgeDiagnostics.LogException("Heartbeat cleanup", ex); }
             BridgeDiagnostics.Log("Heartbeat", "cleanup exit");
+        }
+
+        internal static string SanitizeName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "unknown";
+            var sb = new System.Text.StringBuilder();
+            foreach (char c in name)
+                sb.Append(char.IsLetterOrDigit(c) || c == '-' || c == '_' ? c : '_');
+            return sb.Length > 32 ? sb.ToString().Substring(0, 32) : sb.ToString();
         }
 
         static string EscapeJson(string s)

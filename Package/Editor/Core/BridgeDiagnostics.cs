@@ -44,15 +44,21 @@ namespace clibridge4unity
             if (_logPath != null) return _logPath;
 
             string normalizedPath = "unknown";
+            string projectName = "unknown";
             try
             {
-                normalizedPath = Application.dataPath.Replace("/Assets", "")
-                    .ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
+                string projectRoot = Application.dataPath.Replace("/Assets", "");
+                normalizedPath = projectRoot.ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
+                string raw = Path.GetFileName(projectRoot.TrimEnd('/', '\\')) ?? "";
+                var sb = new System.Text.StringBuilder();
+                foreach (char c in raw)
+                    sb.Append(char.IsLetterOrDigit(c) || c == '-' || c == '_' ? c : '_');
+                projectName = sb.Length > 32 ? sb.ToString().Substring(0, 32) : (sb.Length > 0 ? sb.ToString() : "unknown");
             }
             catch { }
 
             int hash = GetDeterministicHashCode(normalizedPath);
-            _logPath = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}.diag.log");
+            _logPath = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}_{projectName}.diag.log");
             return _logPath;
         }
 
