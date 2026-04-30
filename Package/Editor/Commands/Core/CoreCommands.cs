@@ -227,6 +227,8 @@ namespace clibridge4unity
             // No script changes since last compile? Skip — avoids needless domain reload.
             if (!ScriptsModifiedSinceCompile())
             {
+                // Scripts are clean — any stale compile errors in state are false positives, clear them.
+                LogCommands.ClearCompileErrors();
                 return Response.SuccessWithData(new
                 {
                     message = "No script changes since last compile. Skipped.",

@@ -41,6 +41,8 @@ namespace clibridge4unity
             _nextId = UnityEditor.SessionState.GetInt(SessionKeys.LogNextId, 1);
 
             // Restore compile errors from SessionState (survive domain reload)
+            // Only restore genuine Unity compiler errors (path.cs(line,col): error CS...)
+            // to prevent CODE_EXEC Roslyn errors or other Bridge messages from persisting.
             string savedErrors = SessionState.GetString("Bridge_CompileErrors", "");
             if (!string.IsNullOrEmpty(savedErrors))
             {
@@ -48,7 +50,9 @@ namespace clibridge4unity
                 {
                     foreach (var line in savedErrors.Split('\n'))
                     {
-                        if (!string.IsNullOrWhiteSpace(line))
+                        if (!string.IsNullOrWhiteSpace(line)
+                            && !line.StartsWith("[Bridge]")
+                            && System.Text.RegularExpressions.Regex.IsMatch(line, @"error CS\d+"))
                             _compileErrors.Add(new CompilerMessage { message = line, type = CompilerMessageType.Error });
                     }
                 }
@@ -107,6 +111,12 @@ namespace clibridge4unity
 
             FlushPendingWrites();
             BridgeDiagnostics.Log("LogCommands", "ShutdownForReload exit");
+        }
+
+        public static void ClearCompileErrors()
+        {
+            lock (_compileErrorLock) _compileErrors.Clear();
+            SessionState.SetString("Bridge_CompileErrors", "");
         }
 
         private static void OnAssemblyCompilationFinished(string assemblyPath, CompilerMessage[] messages)
@@ -197,7 +207,9 @@ namespace clibridge4unity
                         if ((bool)getEntry.Invoke(null, new object[] { i, entry }))
                         {
                             var msg = logEntryType.GetField("message")?.GetValue(entry)?.ToString();
-                            if (msg != null && msg.Contains("error CS"))
+                            // Require Unity compiler format: path/to/file.cs(line,col): error CS
+                            // This avoids matching CODE_EXEC Roslyn errors logged to console.
+                            if (msg != null && System.Text.RegularExpressions.Regex.IsMatch(msg, @"\.cs\(\d+,\d+\).*error CS"))
                             {
                                 string firstLine = msg.Split('\n')[0];
                                 if (!fallback.Contains(firstLine))
