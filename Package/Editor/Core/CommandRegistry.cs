@@ -50,6 +50,10 @@ namespace clibridge4unity
         // Compile error hook - set by LogCommands to check for active compiler errors
         public static Func<string> GetCompileErrors;
 
+        // Asset verification hooks - set by UI commands without making Core reference UI.
+        public static Func<string, object> VerifyAsset;
+        public static Func<IEnumerable<string>, object> VerifyAssets;
+
         // Path shortening hook - set by StackTraceMinimizer to shorten paths in all responses
         public static Func<string, string> ShortenResponsePaths;
 

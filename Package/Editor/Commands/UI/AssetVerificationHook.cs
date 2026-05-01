@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using UnityEditor;
@@ -144,7 +145,7 @@ namespace clibridge4unity
             }
 
             // Get log ID before import to detect only new errors
-            long beforeLogId = LogCommands.GetLastLogId();
+            long beforeLogId = CommandRegistry.GetLastLogId != null ? CommandRegistry.GetLastLogId() : 0;
 
             // Force-reimport the asset and its dependencies
             try
