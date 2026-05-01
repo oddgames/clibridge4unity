@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.0";
+        public const string Version = "1.1.1";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -40,15 +40,27 @@ namespace clibridge4unity
         private static DateTime lastCompileRequestTime;
         private static DateTime lastCompileCompleteTime;
 
+        private static readonly DateTime _staticCtorTime;
+
         static BridgeServer()
         {
+            _staticCtorTime = DateTime.UtcNow;
             BridgeDiagnostics.Log("BridgeServer", "static ctor");
+            AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
             EditorApplication.update += InitOnFirstTick;
+        }
+
+        private static void OnAfterAssemblyReload()
+        {
+            AssemblyReloadEvents.afterAssemblyReload -= OnAfterAssemblyReload;
+            var lag = (DateTime.UtcNow - _staticCtorTime).TotalSeconds;
+            BridgeDiagnostics.Log("BridgeServer", $"afterAssemblyReload, lag from static ctor: {lag:F2}s");
         }
 
         private static void InitOnFirstTick()
         {
-            BridgeDiagnostics.Log("BridgeServer", "InitOnFirstTick");
+            var lag = (DateTime.UtcNow - _staticCtorTime).TotalSeconds;
+            BridgeDiagnostics.Log("BridgeServer", $"InitOnFirstTick, lag from static ctor: {lag:F2}s");
             EditorApplication.update -= InitOnFirstTick;
             Initialize();
         }
