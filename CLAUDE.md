@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.1)
+│   └── package.json           # UPM manifest (v1.1.2)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -307,4 +307,3 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `WAKEUP` - Bring Unity to foreground (targets project via -d)
 - `WAKEUP refresh` - Bring to foreground + send Ctrl+R to force recompile
 - `DISMISS` - Close modal dialogs
-

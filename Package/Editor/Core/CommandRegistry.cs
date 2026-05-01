@@ -75,9 +75,15 @@ namespace clibridge4unity
         private static extern bool IsWindowVisible(IntPtr hWnd);
         [DllImport("user32.dll")]
         private static extern bool IsWindow(IntPtr hWnd);
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam,
+            StringBuilder lParam, uint flags, uint timeoutMs, out IntPtr result);
         private const uint WM_NULL = 0x0000;
+        private const uint WM_GETTEXT = 0x000D;
         private const uint WM_TIMER = 0x0113;
         private const uint WM_PAINT = 0x000F;
+        private const uint SMTO_BLOCK = 0x0001;
+        private const uint SMTO_ABORTIFHUNG = 0x0002;
         private static IntPtr _unityWindowHandle;
 
         private static long _timerTickCount; // increments on each editor update for diagnostics
@@ -249,8 +255,20 @@ namespace clibridge4unity
             BridgeDiagnostics.Log("CommandRegistry", "WakeLoop exit");
         }
 
-        [DllImport("user32.dll")]
-        private static extern int GetWindowTextLength(IntPtr hWnd);
+        private static string GetWindowTitleSafe(IntPtr hwnd, int maxChars = 256)
+        {
+            try
+            {
+                var titleBuf = new StringBuilder(maxChars);
+                var ok = SendMessageTimeout(hwnd, WM_GETTEXT, new IntPtr(maxChars), titleBuf,
+                    SMTO_BLOCK | SMTO_ABORTIFHUNG, 50, out _);
+                return ok == IntPtr.Zero ? "" : titleBuf.ToString();
+            }
+            catch
+            {
+                return "";
+            }
+        }
 
         private static IntPtr FindUnityMainWindow()
         {
@@ -262,7 +280,6 @@ namespace clibridge4unity
 
             IntPtr found = IntPtr.Zero;
             var classNameBuf = new StringBuilder(256);
-            var titleBuf = new StringBuilder(512);
 
             EnumWindows((hwnd, _) =>
             {
@@ -271,9 +288,8 @@ namespace clibridge4unity
                 if (classNameBuf.ToString() != "UnityContainerWndClass")
                     return true;
 
-                titleBuf.Clear();
-                GetWindowText(hwnd, titleBuf, 512);
-                if (titleBuf.ToString().StartsWith(projectName + " -"))
+                var title = GetWindowTitleSafe(hwnd, 512);
+                if (title.StartsWith(projectName + " -"))
                 {
                     found = hwnd;
                     return false;
@@ -356,21 +372,19 @@ namespace clibridge4unity
             }, IntPtr.Zero);
         }
 
-        [DllImport("user32.dll", CharSet = CharSet.Auto)]
-        private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
         /// <summary>
         /// Enumerate windows whose title contains a substring (diagnostic helper).
         /// </summary>
         public static void EnumWindowsByTitle(string titleSubstring, StringBuilder sb)
         {
             var classNameBuf = new StringBuilder(256);
-            var titleBuf = new StringBuilder(256);
             EnumWindows((hwnd, _) =>
             {
-                titleBuf.Clear();
-                GetWindowText(hwnd, titleBuf, 256);
-                string title = titleBuf.ToString();
+                if (!IsWindowVisible(hwnd)) return true;
+
+                string title = GetWindowTitleSafe(hwnd);
+                if (string.IsNullOrEmpty(title)) return true;
+
                 if (title.IndexOf(titleSubstring, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     classNameBuf.Clear();
@@ -760,7 +774,6 @@ namespace clibridge4unity
             GetWindowThreadProcessId(hwnd, out uint unityPid);
             if (unityPid == 0) return dialogs;
 
-            var titleBuf = new StringBuilder(256);
             EnumWindows((wnd, _) =>
             {
                 if (wnd == hwnd) return true;
@@ -774,9 +787,7 @@ namespace clibridge4unity
                 GetClassName(wnd, classBuf, 256);
                 if (classBuf.ToString() == "UnityContainerWndClass") return true;
 
-                titleBuf.Clear();
-                GetWindowText(wnd, titleBuf, 256);
-                string title = titleBuf.ToString();
+                string title = GetWindowTitleSafe(wnd);
                 if (!string.IsNullOrEmpty(title))
                     dialogs.Add(title);
 

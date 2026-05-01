@@ -82,7 +82,7 @@ namespace clibridge4unity
             sb.AppendLine($"thread: {System.Threading.Thread.CurrentThread.ManagedThreadId} ({System.Threading.Thread.CurrentThread.Name})");
             sb.AppendLine($"syncCtx: {System.Threading.SynchronizationContext.Current?.GetType().Name ?? "null"}");
             sb.AppendLine(CommandRegistry.GetQueueDiagnostics());
-            sb.AppendLine($"processMainWndHandle: {System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle}");
+            sb.AppendLine($"processMainWndHandle: {CommandRegistry.GetUnityHwnd()}");
             var pid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
             sb.AppendLine($"pid: {pid}");
             sb.AppendLine($"processName: {System.Diagnostics.Process.GetCurrentProcess().ProcessName}");
