@@ -34,7 +34,7 @@ tool_claude_unity_bridge/
 - Manual project path override (`-d`)
 - Reconnection after assembly reload
 
-### Commands (33)
+### Commands (46)
 - **Core**: PING, HELP, PROBE, DIAG, STATUS, COMPILE, REFRESH, LOG, STACK_MINIMIZE
 - **Code**: CODE_ANALYZE, CODE_EXEC, CODE_EXEC_RETURN, TEST
 - **Scene**: CREATE, FIND, DELETE, SAVE, LOAD, SCENE, SCENEVIEW, WINDOWS, PLAY, STOP, PAUSE, STEP, PLAYMODE, GAMEVIEW
@@ -53,6 +53,7 @@ clibridge4unity COMPILE --wait --log-filter errors
 
 # Get logs
 clibridge4unity LOG errors
+clibridge4unity LOG ui errors
 clibridge4unity LOG last:20
 clibridge4unity LOG since:42
 ```
@@ -67,4 +68,4 @@ clibridge4unity LOG since:42
 
 ## Version
 
-Current: 1.1.2
+Current: 1.1.3

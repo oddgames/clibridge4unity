@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.2)
+│   └── package.json           # UPM manifest (v1.1.3)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -223,10 +223,11 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `HELP` - List all available commands
 - `PROBE` - Quick main thread health check
 - `DIAG` - Diagnostic info (no main thread needed)
-- `STATUS` - Get Unity Editor status
+- `STATUS` - Get Unity Editor status, including C# compile and UI Toolkit import errors
 - `COMPILE` - Force script recompilation
 - `REFRESH` - Force asset database refresh
-- `LOG [filter]` - Get Unity console logs
+- `LOG [filter]` - Get bridge-captured Unity logs; use `LOG ui errors` for current USS/UXML/TSS import errors
+  - Commands that reference `.uss`, `.uxml`, or `.tss` assets append matching UI Toolkit import errors automatically
 - `STACK_MINIMIZE` - Minimize a stack trace for AI
 - `MENU path` - Execute a Unity menu item (e.g. `MENU Window/General/Console`)
 - `PROFILE [enable|disable|clear|hierarchy]` - Control profiler and read performance data
@@ -302,7 +303,7 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `SCREENSHOT path1.prefab path2.prefab` - Grid render (multi-asset)
 
 ### CLI-side (no Unity connection needed)
-- `SETUP` - Install UPM package + verify Unity + generate CLAUDE.md (alias: `INSTALL`)
+- `SETUP` - Install UPM package + verify Unity + generate CLAUDE.md and AGENTS.md (alias: `INSTALL`)
 - `UPDATE` - Self-update CLI exe + UPM package tag (no Unity connection needed)
 - `WAKEUP` - Bring Unity to foreground (targets project via -d)
 - `WAKEUP refresh` - Bring to foreground + send Ctrl+R to force recompile

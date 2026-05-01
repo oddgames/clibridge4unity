@@ -427,9 +427,9 @@ class Program
                 Console.WriteLine($"CLI already up to date (v{CLI_VERSION}).");
                 // Still check manifest — CLI may be updated but manifest lagging
                 UpdateManifestTag(CLI_VERSION);
-                // And still refresh CLAUDE.md — content template may have shifted between
+                // And still refresh assistant docs — content template may have shifted between
                 // CLI installs even when the version number stayed the same.
-                RefreshProjectClaudeMd();
+                RefreshProjectAgentDocs();
                 return EXIT_SUCCESS;
             }
 
@@ -495,7 +495,7 @@ class Program
             Console.WriteLine($"  {exePath}");
 
             UpdateManifestTag(latestVersion);
-            RefreshProjectClaudeMd();
+            RefreshProjectAgentDocs();
             return EXIT_SUCCESS;
         }
         catch (UnauthorizedAccessException ex)
@@ -533,25 +533,25 @@ class Program
     }
 
     /// <summary>
-    /// Regenerate the per-project CLAUDE.md so its command reference reflects this CLI build.
+    /// Regenerate per-project assistant docs so their command reference reflects this CLI build.
     /// Called from UPDATE (both "up to date" and "upgraded" paths). No-ops when invoked
-    /// outside a Unity project or when HandleInstall fails.
+    /// outside a Unity project or when doc generation fails.
     /// </summary>
-    static void RefreshProjectClaudeMd()
+    static void RefreshProjectAgentDocs()
     {
         try
         {
             string projectPath = AutoDetectProjectPath();
             if (projectPath == null)
             {
-                Console.WriteLine("  (Run 'clibridge4unity SETUP' inside a Unity project to refresh its CLAUDE.md.)");
+                Console.WriteLine("  (Run 'clibridge4unity SETUP' inside a Unity project to refresh assistant docs.)");
                 return;
             }
-            HandleInstall(null, projectPath, null);
+            HandleInstallAll(null, projectPath);
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"  (Could not refresh CLAUDE.md: {ex.GetType().Name}: {ex.Message})");
+            Console.Error.WriteLine($"  (Could not refresh assistant docs: {ex.GetType().Name}: {ex.Message})");
         }
     }
 
@@ -798,8 +798,9 @@ class Program
         }
         catch { }
 
-        // Quick manifest check: warn if UPM package not installed (skip for SETUP/PREFLIGHT)
+        // Quick manifest check: warn if UPM package not installed (skip setup/install paths)
         if (!command.Equals("SETUP", StringComparison.OrdinalIgnoreCase) &&
+            !command.Equals("INSTALL", StringComparison.OrdinalIgnoreCase) &&
             !command.Equals("PREFLIGHT", StringComparison.OrdinalIgnoreCase))
         {
             string manifestPath = Path.Combine(projectPath, "Packages", "manifest.json");
@@ -813,6 +814,14 @@ class Program
                     Console.Error.WriteLine();
                 }
             }
+        }
+
+        // SETUP / INSTALL are CLI-side: they can update manifest.json and assistant docs
+        // even when Unity is closed or still importing the package.
+        if (command.Equals("SETUP", StringComparison.OrdinalIgnoreCase) ||
+            command.Equals("INSTALL", StringComparison.OrdinalIgnoreCase))
+        {
+            return HandleSetup(pipeName, projectPath, data);
         }
 
         // DISMISS: close dialogs or click specific buttons — works on ANY Unity process, no pipe needed
@@ -1044,7 +1053,7 @@ class Program
             Console.Error.WriteLine($"Error: Unity is busy — {unityInfo.ImportStatus}");
             if (unityInfo.RecentErrors.Count > 0)
             {
-                Console.Error.WriteLine("       Recent compile errors (from Editor.log):");
+                Console.Error.WriteLine("       Recent project errors (from Editor.log):");
                 foreach (var err in unityInfo.RecentErrors)
                     Console.Error.WriteLine($"         {err}");
             }
@@ -1060,23 +1069,16 @@ class Program
                 Console.Error.WriteLine($"       estimatedWait: unknown (no compile history yet)");
             return EXIT_TIMEOUT;
         }
-        // When importing, show any compile errors found in logs
+        // When importing, show any actionable project errors found in logs
         if (unityInfo.RecentErrors.Count > 0)
         {
-            Console.Error.WriteLine($"       Compile errors found in logs:");
+            Console.Error.WriteLine($"       Project errors found in logs:");
             foreach (var err in unityInfo.RecentErrors)
                 Console.Error.WriteLine($"         {err}");
         }
 
         // Wake Unity's message pump before any command (ensures responsiveness in background)
         WakeUnityEditor(projectPath);
-
-        // SETUP (or INSTALL): install UPM package + generate CLAUDE.md
-        if (command.Equals("SETUP", StringComparison.OrdinalIgnoreCase) ||
-            command.Equals("INSTALL", StringComparison.OrdinalIgnoreCase))
-        {
-            return HandleSetup(pipeName, projectPath, data);
-        }
 
         // Pre-flight: report dialogs as warning (don't block — let the command try)
         if (unityInfo.Dialogs.Count > 0)
@@ -1204,7 +1206,7 @@ class Program
         Console.Error.WriteLine("  --version               Show version information");
         Console.Error.WriteLine();
         Console.Error.WriteLine("CLI-side commands (no Unity pipe needed):");
-        Console.Error.WriteLine("  SETUP                      Install UPM package + generate CLAUDE.md");
+        Console.Error.WriteLine("  SETUP                      Install UPM package + generate CLAUDE.md and AGENTS.md");
         Console.Error.WriteLine("  UPDATE                     Self-update CLI + UPM package");
         Console.Error.WriteLine("  SERVE [--port N] [--ttl M] Start local file server (port 8420)");
         Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");
@@ -2386,13 +2388,13 @@ class Program
         }
         catch { }
 
-        // Compile errors
+        // Project errors
         if (info.RecentErrors.Count > 0)
         {
-            sb.AppendLine($"compileErrors ({info.RecentErrors.Count}):");
+            sb.AppendLine($"projectErrors ({info.RecentErrors.Count}):");
             foreach (var err in info.RecentErrors)
                 sb.AppendLine($"  - {err}");
-            sb.AppendLine("action: Fix compile errors first, then COMPILE.");
+            sb.AppendLine("action: Fix the reported script/UI asset errors, then retry.");
         }
 
         // Assembly build time
@@ -3107,7 +3109,7 @@ class Program
                     // Skip errors older than the last successful build
                     if (DateTime.TryParse(parts[1], out var ts) && ts < lastBuild) continue;
                     string message = parts[3].Replace("\\n", "\n").Split('\n')[0];
-                    if (IsCompileError(message) && info.RecentErrors.Count < 10)
+                    if (IsProjectError(message) && info.RecentErrors.Count < 10)
                         info.RecentErrors.Add(message);
                 }
             }
@@ -3129,12 +3131,12 @@ class Program
 
                 if (editorLog == null || !File.Exists(editorLog)) return;
 
-                // Tail last ~256KB and scan for compile errors
+                // Tail last ~256KB and scan for compile/UI asset errors
                 string tail = TailFile(editorLog, 256 * 1024);
                 foreach (var line in tail.Split('\n'))
                 {
                     var trimmed = line.Trim();
-                    if (IsCompileError(trimmed) && info.RecentErrors.Count < 10)
+                    if (IsProjectError(trimmed) && info.RecentErrors.Count < 10)
                         info.RecentErrors.Add(trimmed);
                 }
             }
@@ -3186,6 +3188,19 @@ class Program
         // CODE_EXEC errors are just "(13,20): error CS1002:" with no path — skip those
         return (line.Contains("error CS") && line.Contains("Assets"))
             || (line.Contains("): error") && line.Contains(".cs(") && line.Contains("Assets"));
+    }
+
+    static bool IsProjectError(string line)
+    {
+        return IsCompileError(line) || IsUiToolkitImportError(line);
+    }
+
+    static bool IsUiToolkitImportError(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return false;
+        return System.Text.RegularExpressions.Regex.IsMatch(line,
+            @"(?:Assets|Packages)/[^\r\n]*\.(?:uss|uxml|tss)\s*(?:\((?:line|Line)\s*\d+\))?\s*:\s*error\s*:",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     }
 
     /// <summary>
@@ -3374,7 +3389,7 @@ class Program
         // breaks and every re-run duplicates the block.
         if (!content.Contains(marker))
         {
-            Console.Error.WriteLine($"BUG: CLAUDE.md content missing start marker '{marker}'. Aborting.");
+            Console.Error.WriteLine($"BUG: assistant docs content missing start marker '{marker}'. Aborting.");
             return EXIT_COMMAND_ERROR;
         }
 
@@ -3413,8 +3428,43 @@ class Program
             Console.WriteLine($"Created: {targetPath}");
         }
 
-        Console.WriteLine($"Claude Code will now know about clibridge4unity in this project.");
+        Console.WriteLine($"AI assistants will now know about clibridge4unity in this project.");
         return EXIT_SUCCESS;
+    }
+
+    static int HandleInstallAll(string pipeName, string projectPath)
+    {
+        int claudeResult = HandleInstall(pipeName, projectPath, Path.Combine(projectPath, "CLAUDE.md"));
+        if (claudeResult != EXIT_SUCCESS) return claudeResult;
+
+        int agentsResult = HandleInstall(pipeName, projectPath, Path.Combine(projectPath, "AGENTS.md"));
+        if (agentsResult != EXIT_SUCCESS) return agentsResult;
+
+        Console.WriteLine("Generated assistant docs for Claude Code and ChatGPT/Codex.");
+        return EXIT_SUCCESS;
+    }
+
+    static int HandleInstallForSetup(string pipeName, string projectPath, string data)
+    {
+        string target = data?.Trim().Trim('"', '\'');
+        if (string.IsNullOrEmpty(target) || target.Equals("all", StringComparison.OrdinalIgnoreCase))
+            return HandleInstallAll(pipeName, projectPath);
+
+        if (target.Equals("chatgpt", StringComparison.OrdinalIgnoreCase) ||
+            target.Equals("codex", StringComparison.OrdinalIgnoreCase) ||
+            target.Equals("agents", StringComparison.OrdinalIgnoreCase) ||
+            target.Equals("agents.md", StringComparison.OrdinalIgnoreCase))
+        {
+            return HandleInstall(pipeName, projectPath, Path.Combine(projectPath, "AGENTS.md"));
+        }
+
+        if (target.Equals("claude", StringComparison.OrdinalIgnoreCase) ||
+            target.Equals("claude.md", StringComparison.OrdinalIgnoreCase))
+        {
+            return HandleInstall(pipeName, projectPath, Path.Combine(projectPath, "CLAUDE.md"));
+        }
+
+        return HandleInstall(pipeName, projectPath, data);
     }
 
     /// <summary>
@@ -4391,7 +4441,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         return crc ^ 0xFFFFFFFF;
     }
 
-    // ─── SETUP: install UPM package + CLAUDE.md ─────────────────────────
+    // ─── SETUP: install UPM package + assistant docs ───────────────────
 
     static int HandleSetup(string pipeName, string projectPath, string data)
     {
@@ -4426,16 +4476,16 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         }
         catch
         {
-            Console.WriteLine("[!!] Unity Editor not responding — start Unity and re-run SETUP to generate full docs");
+            Console.WriteLine("[!!] Unity Editor not responding — continuing with manifest/docs setup only");
         }
 
-        // Step 3: Install Claude Code hooks
+        // Step 3: Install Claude Code hooks (Codex/ChatGPT reads AGENTS.md; no hook support needed)
         Console.WriteLine();
         InstallHooks(projectPath);
 
-        // Step 4: Generate CLAUDE.md (reuse existing INSTALL logic)
+        // Step 4: Generate assistant docs
         Console.WriteLine();
-        return HandleInstall(pipeName, projectPath, data);
+        return HandleInstallForSetup(pipeName, projectPath, data);
     }
 
     static int HandleHook()

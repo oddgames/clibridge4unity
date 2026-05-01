@@ -49,17 +49,19 @@ clibridge4unity SETUP
 This does three things:
 1. Adds the UPM package to your Unity project's `Packages/manifest.json` (via git URL with `?path=Package`, version-matched)
 2. Checks Unity Editor connectivity
-3. Generates a `CLAUDE.md` with tool documentation for AI-assisted development
+3. Generates `CLAUDE.md` and `AGENTS.md` with tool documentation for AI-assisted development
 
 ## Quick Start
 
 ```bash
 clibridge4unity PING                    # Test connection
-clibridge4unity STATUS                  # Editor state, compile status
+clibridge4unity STATUS                  # Editor state, compile/UI Toolkit status
 clibridge4unity HELP                    # List all commands from Unity
 clibridge4unity COMPILE --wait          # Recompile and wait for results
-clibridge4unity LOG errors              # Show Unity console errors
+clibridge4unity LOG errors              # Show bridge-captured Unity errors
+clibridge4unity LOG ui errors           # Show current USS/UXML/TSS import errors
 ```
+Commands that reference `.uss`, `.uxml`, or `.tss` assets also append matching UI Toolkit import errors to their normal response.
 
 The CLI auto-detects the Unity project from the current directory. Use `-d <path>` to specify explicitly.
 
@@ -122,7 +124,7 @@ Use `clibridge4unity -h` to get the full list from your running Unity instance.
 ### CLI-side (no Unity connection needed)
 | Command | Description |
 |---------|-------------|
-| `SETUP` | Install UPM package + verify Unity + generate CLAUDE.md |
+| `SETUP` | Install UPM package + verify Unity + generate CLAUDE.md and AGENTS.md |
 | `SCREENSHOT [view]` | Capture Unity window (editor/scene/game/inspector) |
 | `WAKEUP` | Bring Unity windows to foreground |
 | `DISMISS` | Close modal dialogs |

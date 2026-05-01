@@ -156,6 +156,14 @@ namespace clibridge4unity
                 compileErrorCount = compileErrorMessages.Count;
             }
 
+            var uiToolkitDiagnostics = (consoleErrors > 0 || consoleWarnings > 0)
+                ? LogCommands.GetUiToolkitDiagnosticsFromConsole(20)
+                : new List<LogCommands.UiToolkitDiagnostic>();
+            var uiToolkitErrors = uiToolkitDiagnostics
+                .Where(d => d.IsError)
+                .Select(d => d.ToString())
+                .ToArray();
+
             // Play mode duration
             string playModeDuration = null;
             if (EditorApplication.isPlaying)
@@ -182,6 +190,9 @@ namespace clibridge4unity
                 hasCompileErrors,
                 compileErrorCount,
                 compileErrors = compileErrorMessages.Count > 0 ? compileErrorMessages.ToArray() : null,
+                hasUiToolkitErrors = uiToolkitErrors.Length > 0,
+                uiToolkitErrorCount = uiToolkitErrors.Length,
+                uiToolkitErrors = uiToolkitErrors.Length > 0 ? uiToolkitErrors : null,
                 consoleErrors,
                 consoleWarnings,
                 isPlaying = EditorApplication.isPlaying,

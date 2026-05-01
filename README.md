@@ -1,6 +1,6 @@
 # CLI Bridge for Unity
 
-A CLI tool for automating Unity Editor via Named Pipes. Send commands from your terminal, scripts, or AI assistants like Claude.
+A CLI tool for automating Unity Editor via Named Pipes. Send commands from your terminal, scripts, or AI assistants like Claude, ChatGPT/Codex, and other coding agents.
 
 ## Install
 
@@ -14,7 +14,7 @@ Then in your Unity project directory:
 clibridge4unity SETUP
 ```
 
-This installs the UPM package and generates a `CLAUDE.md` for AI-assisted development.
+This installs the UPM package and generates assistant docs: `CLAUDE.md` for Claude Code and `AGENTS.md` for ChatGPT/Codex.
 
 ## What It Does
 
@@ -103,15 +103,18 @@ All filter arrays are OR'd — a test runs if it matches any group **or** catego
 ### Diagnostics (no main thread needed)
 ```bash
 clibridge4unity DIAG                # Thread state, HWND, sync context
-clibridge4unity STATUS              # Compile state, play mode, version
+clibridge4unity STATUS              # Compile state, UI Toolkit errors, play mode, version
 clibridge4unity LOG errors          # Unity console errors
+clibridge4unity LOG ui errors       # Current USS/UXML/TSS import errors
 ```
+Commands that reference `.uss`, `.uxml`, or `.tss` assets also append matching UI Toolkit import errors to their normal response.
 
 ### AI Setup
 ```bash
-clibridge4unity SETUP    # Installs UPM package + generates CLAUDE.md for AI assistants
+clibridge4unity SETUP           # Installs UPM package + generates CLAUDE.md and AGENTS.md
+clibridge4unity SETUP chatgpt   # Refreshes AGENTS.md only
 ```
-The generated `CLAUDE.md` tells AI assistants which commands are available, when to use COMPILE vs CODE_EXEC, and how to handle busy/timeout errors. Run `SETUP` again after updates to regenerate.
+The generated docs tell AI assistants which commands are available, when to use COMPILE vs CODE_EXEC, and how to handle busy/timeout errors. Run `SETUP` again after updates to regenerate.
 
 ## All Commands
 

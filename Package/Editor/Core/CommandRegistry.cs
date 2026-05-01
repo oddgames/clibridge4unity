@@ -45,6 +45,7 @@ namespace clibridge4unity
         // Log capture hooks - set by LogCommands to avoid circular asmdef dependency
         public static Func<long> GetLastLogId;
         public static Func<long, int, string> GetLogsSinceFormatted;
+        public static Func<string, string, string, string> GetUiToolkitDiagnosticsForCommand;
 
         // Compile error hook - set by LogCommands to check for active compiler errors
         public static Func<string> GetCompileErrors;
@@ -569,6 +570,19 @@ namespace clibridge4unity
                     string recentLogs = GetLogsSinceFormatted(logIdBefore, 5);
                     if (recentLogs != null)
                         response = response + "\n" + recentLogs;
+                }
+                catch { }
+            }
+
+            // If this command named or touched USS/UXML/TSS assets, append matching
+            // importer diagnostics from Unity's current Console entries.
+            if (response != null && GetUiToolkitDiagnosticsForCommand != null)
+            {
+                try
+                {
+                    string uiDiagnostics = GetUiToolkitDiagnosticsForCommand(name, data, response);
+                    if (uiDiagnostics != null)
+                        response = response + "\n" + uiDiagnostics;
                 }
                 catch { }
             }

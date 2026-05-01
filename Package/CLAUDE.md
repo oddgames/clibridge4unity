@@ -19,7 +19,7 @@ Package/
 │       └── UI/                # UI_DISCOVER, SCREENSHOT
 ├── Runtime/                   # (Currently unused)
 ├── Tools/                     # Pre-built CLI executables (win/osx/linux)
-└── package.json               # UPM manifest (v1.1.2)
+└── package.json               # UPM manifest (v1.1.3)
 ```
 
 ## Key Architecture
@@ -67,6 +67,7 @@ The system uses a dedicated polling thread (10ms cycle) + `SynchronizationContex
 Unity auto-recompiles on file changes. Check Unity console for:
 - `[Bridge] Server started: UnityBridge_...`
 - Compilation errors
+- USS/UXML/TSS import errors surfaced by `STATUS` and `LOG ui errors`
 
 ## Common Patterns
 - `SynchronizationContext` captured during `[InitializeOnLoad]` for main thread work

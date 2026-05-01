@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEditor.Compilation;
 using UnityEngine;
@@ -76,6 +77,7 @@ namespace clibridge4unity
             CommandRegistry.GetLastLogId = GetLastLogId;
             CommandRegistry.GetLogsSinceFormatted = GetLogsSinceFormatted;
             CommandRegistry.GetCompileErrors = GetCompileErrorsSummary;
+            CommandRegistry.GetUiToolkitDiagnosticsForCommand = GetUiToolkitDiagnosticsForCommand;
             CommandRegistry.ShortenResponsePaths = StackTraceMinimizer.ShortenPaths;
 
             BridgeDiagnostics.Log("LogCommands", "subscribing events");
@@ -382,9 +384,231 @@ namespace clibridge4unity
             return sb.ToString().TrimEnd();
         }
 
+        public sealed class UiToolkitDiagnostic
+        {
+            public string Path;
+            public int Line;
+            public string Severity;
+            public string Message;
+
+            public bool IsError => string.Equals(Severity, "error", StringComparison.OrdinalIgnoreCase);
+
+            public override string ToString()
+            {
+                string line = Line > 0 ? $":{Line}" : "";
+                return $"{Path}{line}: {Severity}: {Message}";
+            }
+        }
+
+        private static readonly Regex UiToolkitDiagnosticRegex = new Regex(
+            @"(?<path>(?:Assets|Packages)/[^\r\n:]*?\.(?:uss|uxml|tss))\s*(?:\((?:line|Line)\s*(?<line>\d+)\))?\s*:\s*(?<severity>error|warning)\s*:\s*(?<message>[^\r\n]+)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        private static readonly Regex UiToolkitPseudoClassRegex = new Regex(
+            @"(?<path>(?:Assets|Packages)/[^\s\r\n]+?\.(?:uss|uxml|tss)).*?(?<message>Unknown pseudo class[^\r\n]+)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        /// <summary>
+        /// Reads current UI Toolkit USS/UXML/TSS diagnostics from Unity's Console.
+        /// These asset importer errors are not C# compile errors, so they need their
+        /// own classification instead of relying on CompilationPipeline callbacks.
+        /// </summary>
+        public static List<UiToolkitDiagnostic> GetUiToolkitDiagnosticsFromConsole(int maxCount = 50)
+        {
+            var diagnostics = new List<UiToolkitDiagnostic>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+
+            try
+            {
+                var logEntries = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntries");
+                var logEntryType = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntry");
+                if (logEntries == null || logEntryType == null) return diagnostics;
+
+                var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public;
+                var startGetting = logEntries.GetMethod("StartGettingEntries", flags);
+                var endGetting = logEntries.GetMethod("EndGettingEntries", flags);
+                var getEntry = logEntries.GetMethod("GetEntryInternal", flags);
+                var getCount = logEntries.GetMethod("GetCount", flags);
+                var messageField = logEntryType.GetField("message");
+                var modeField = logEntryType.GetField("mode");
+
+                if (startGetting == null || getCount == null || getEntry == null || messageField == null)
+                    return diagnostics;
+
+                startGetting.Invoke(null, null);
+                try
+                {
+                    int count = (int)getCount.Invoke(null, null);
+                    for (int i = count - 1; i >= 0 && diagnostics.Count < maxCount; i--)
+                    {
+                        var entry = Activator.CreateInstance(logEntryType);
+                        if (!(bool)getEntry.Invoke(null, new object[] { i, entry })) continue;
+
+                        string message = messageField.GetValue(entry)?.ToString();
+                        if (string.IsNullOrWhiteSpace(message)) continue;
+
+                        int mode = 0;
+                        if (modeField != null)
+                        {
+                            try { mode = Convert.ToInt32(modeField.GetValue(entry)); }
+                            catch { mode = 0; }
+                        }
+
+                        foreach (var diagnostic in ParseUiToolkitDiagnostics(message, mode))
+                        {
+                            string key = diagnostic.ToString();
+                            if (seen.Add(key))
+                                diagnostics.Add(diagnostic);
+                            if (diagnostics.Count >= maxCount) break;
+                        }
+                    }
+                }
+                finally
+                {
+                    endGetting?.Invoke(null, null);
+                }
+            }
+            catch { }
+
+            return diagnostics;
+        }
+
+        private static IEnumerable<UiToolkitDiagnostic> ParseUiToolkitDiagnostics(string message, int mode)
+        {
+            bool matchedExplicitDiagnostic = false;
+            foreach (Match match in UiToolkitDiagnosticRegex.Matches(message))
+            {
+                matchedExplicitDiagnostic = true;
+                string severity = match.Groups["severity"].Value.ToLowerInvariant();
+                yield return new UiToolkitDiagnostic
+                {
+                    Path = match.Groups["path"].Value,
+                    Line = int.TryParse(match.Groups["line"].Value, out var line) ? line : 0,
+                    Severity = severity,
+                    Message = match.Groups["message"].Value.Trim()
+                };
+            }
+
+            if (matchedExplicitDiagnostic) yield break;
+
+            // Some UI Toolkit importer messages, especially unsupported pseudo-classes,
+            // include the asset path and message but no explicit "warning:" token.
+            foreach (Match match in UiToolkitPseudoClassRegex.Matches(message))
+            {
+                yield return new UiToolkitDiagnostic
+                {
+                    Path = match.Groups["path"].Value,
+                    Line = 0,
+                    Severity = IsErrorMode(mode) ? "error" : "warning",
+                    Message = match.Groups["message"].Value.Trim()
+                };
+            }
+        }
+
+        private static bool IsErrorMode(int mode)
+        {
+            // Unity's LogEntry.mode is internal and may change between versions.
+            // Bit 0x400 is Error in current editors; keep this best-effort only.
+            return (mode & 0x400) != 0;
+        }
+
+        private static int CountUiToolkitErrors(IReadOnlyList<UiToolkitDiagnostic> diagnostics)
+        {
+            int count = 0;
+            foreach (var diagnostic in diagnostics)
+                if (diagnostic.IsError) count++;
+            return count;
+        }
+
+        private static string FormatUiToolkitDiagnostics(List<UiToolkitDiagnostic> diagnostics, bool errorsOnly)
+        {
+            var filtered = errorsOnly
+                ? diagnostics.Where(d => d.IsError).ToList()
+                : diagnostics;
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"uiToolkitDiagnostics: {filtered.Count}");
+            sb.AppendLine($"uiToolkitErrors: {CountUiToolkitErrors(filtered)}");
+            if (filtered.Count > 0)
+            {
+                sb.AppendLine("---");
+                foreach (var diagnostic in filtered)
+                    sb.AppendLine(StackTraceMinimizer.ShortenPaths(diagnostic.ToString()));
+            }
+            return sb.ToString().TrimEnd();
+        }
+
+        public static string GetUiToolkitDiagnosticsForCommand(string commandName, string data, string response)
+        {
+            if (string.IsNullOrEmpty(commandName)) return null;
+            if (commandName.Equals("LOG", StringComparison.OrdinalIgnoreCase)
+                || commandName.Equals("STATUS", StringComparison.OrdinalIgnoreCase)
+                || commandName.Equals("PING", StringComparison.OrdinalIgnoreCase)
+                || commandName.Equals("HELP", StringComparison.OrdinalIgnoreCase)
+                || commandName.Equals("PROBE", StringComparison.OrdinalIgnoreCase)
+                || commandName.Equals("DIAG", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            GetConsoleCounts(out var consoleErrors, out var consoleWarnings);
+            if (consoleErrors == 0 && consoleWarnings == 0) return null;
+
+            string command = commandName.ToUpperInvariant();
+            bool broad = command == "REFRESH"
+                || (command == "ASSET_RESERIALIZE" && string.IsNullOrWhiteSpace(data));
+
+            var mentionedPaths = ExtractUiToolkitPaths((data ?? "") + "\n" + (response ?? ""));
+            bool mentionsUxml = mentionedPaths.Any(p => p.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase));
+            if (!broad && mentionedPaths.Count == 0) return null;
+
+            var diagnostics = GetUiToolkitDiagnosticsFromConsole(50)
+                .Where(d => d.IsError)
+                .ToList();
+
+            if (!broad && !mentionsUxml)
+            {
+                diagnostics = diagnostics
+                    .Where(d => mentionedPaths.Contains(NormalizeAssetPath(d.Path)))
+                    .ToList();
+            }
+
+            if (diagnostics.Count == 0) return null;
+
+            if (diagnostics.Count > 10)
+                diagnostics = diagnostics.Take(10).ToList();
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"--- UI Toolkit Errors ({diagnostics.Count}) ---");
+            foreach (var diagnostic in diagnostics)
+                sb.AppendLine(diagnostic.ToString());
+            return sb.ToString().TrimEnd();
+        }
+
+        private static HashSet<string> ExtractUiToolkitPaths(string text)
+        {
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(text)) return paths;
+
+            foreach (Match match in Regex.Matches(text,
+                @"(?:Assets|Packages)/[^\s""'<>|]+?\.(?:uss|uxml|tss)",
+                RegexOptions.IgnoreCase))
+            {
+                paths.Add(NormalizeAssetPath(match.Value));
+            }
+
+            return paths;
+        }
+
+        private static string NormalizeAssetPath(string path)
+        {
+            return (path ?? "")
+                .Replace('\\', '/')
+                .Trim()
+                .TrimEnd('.', ',', ';', ':', ')', ']', '}');
+        }
+
         private const int DefaultLogCount = 20;
 
-        private static readonly string[] LogFlags = { "errors", "warnings", "verbose", "raw", "all", "clear" };
+        private static readonly string[] LogFlags = { "errors", "warnings", "verbose", "raw", "all", "clear", "ui", "assets" };
         private static readonly string[] LogOptions = { "last", "since", "filter", "grep" };
 
         [BridgeCommand("LOG", "Get Unity console logs",
@@ -393,6 +617,8 @@ namespace clibridge4unity
                     "  LOG                    - Last 20 entries (compact)\n" +
                     "  LOG errors             - Errors/exceptions (last 20)\n" +
                     "  LOG errors verbose     - Errors with full stack traces\n" +
+                    "  LOG ui                 - Current USS/UXML/TSS Console diagnostics\n" +
+                    "  LOG ui errors          - Current USS/UXML/TSS Console errors only\n" +
                     "  LOG raw                - Full traces, no path shortening\n" +
                     "  LOG last:N             - Exact N entries\n" +
                     "  LOG since:ID           - Since ID\n" +
@@ -412,6 +638,13 @@ namespace clibridge4unity
                 try { File.Delete(_logFilePath); }
                 catch { }
                 return Response.Success("Log buffer cleared");
+            }
+
+            if (args.Has("ui") || args.Has("assets"))
+            {
+                int maxCount = args.Has("all") ? 500 : DefaultLogCount;
+                var diagnostics = GetUiToolkitDiagnosticsFromConsole(maxCount);
+                return args.WarningPrefix() + FormatUiToolkitDiagnostics(diagnostics, args.Has("errors"));
             }
 
             var entries = ReadLogFile();
