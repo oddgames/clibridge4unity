@@ -49,7 +49,7 @@ if (-not $SkipBuild) {
         exit 1
     }
     $exeSize = (Get-Item $exe).Length / 1MB
-    Write-Host "  Built: clibridge4unity.exe ({0:N1} MB)" -f $exeSize -ForegroundColor Green
+    Write-Host ("  Built: clibridge4unity.exe ({0:N1} MB)" -f $exeSize) -ForegroundColor Green
 } else {
     Write-Host "[1/5] Skipping build" -ForegroundColor DarkGray
 }
@@ -61,7 +61,7 @@ $zipPath = Join-Path $env:TEMP "clibridge4unity-win-x64.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 Compress-Archive -Path $exe -DestinationPath $zipPath -Force
 $zipSize = (Get-Item $zipPath).Length / 1MB
-Write-Host "  Created: clibridge4unity-win-x64.zip ({0:N1} MB)" -f $zipSize -ForegroundColor Green
+Write-Host ("  Created: clibridge4unity-win-x64.zip ({0:N1} MB)" -f $zipSize) -ForegroundColor Green
 
 # 3. Copy to Package/Tools
 Write-Host "[3/5] Updating Package/Tools..." -ForegroundColor Yellow
