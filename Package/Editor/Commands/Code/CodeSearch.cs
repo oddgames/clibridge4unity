@@ -5,234 +5,11 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading;
 using UnityEditor;
 using UnityEngine;
-using Mono.Cecil;
-using Mono.Cecil.Cil;
 
 namespace clibridge4unity
 {
-    /// <summary>
-    /// Cached PDB method information for fast stack trace analysis.
-    /// Key: "TypeName.MethodName", Value: (filePath, startLine, endLine)
-    /// </summary>
-    [InitializeOnLoad]
-    public static class PdbCache
-    {
-        static PdbCache()
-        {
-            BridgeDiagnostics.Log("PdbCache", "static ctor");
-            EditorApplication.update += InitOnFirstTick;
-        }
-
-        private static void InitOnFirstTick()
-        {
-            EditorApplication.update -= InitOnFirstTick;
-            BridgeDiagnostics.Log("PdbCache", "InitOnFirstTick");
-            InitializeAsync();
-        }
-        private static Dictionary<string, (string file, int startLine, int endLine)> _methodCache;
-        private static bool _isInitialized;
-        private static readonly object _lock = new object();
-
-        /// <summary>
-        /// Returns true if the cache is initialized and ready for use.
-        /// </summary>
-        public static bool IsReady => _isInitialized && _methodCache != null;
-
-        /// <summary>
-        /// Initializes the PDB cache on a background thread to avoid blocking the editor.
-        /// Safe to call multiple times - only runs once.
-        /// </summary>
-        public static void InitializeAsync()
-        {
-            if (_isInitialized || _isInitializing) return;
-            _isInitializing = true;
-            BridgeDiagnostics.Log("PdbCache", "InitializeAsync scheduling background load");
-            System.Threading.Tasks.Task.Run(() => Initialize());
-        }
-
-        private static volatile bool _isInitializing;
-
-        /// <summary>
-        /// Initializes the PDB cache by loading all method debug info from project assemblies.
-        /// Runs synchronously - prefer InitializeAsync() to avoid blocking the editor.
-        /// </summary>
-        public static void Initialize()
-        {
-            lock (_lock)
-            {
-                if (_isInitialized) return;
-
-                BridgeDiagnostics.Log("PdbCache", "Initialize begin");
-                _methodCache = new Dictionary<string, (string, int, int)>(StringComparer.Ordinal);
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-                int methodCount = 0;
-
-                foreach (var asm in GetProjectAssemblies())
-                {
-                    try
-                    {
-                        var asmPath = asm.Location;
-                        if (string.IsNullOrEmpty(asmPath) || !File.Exists(asmPath)) continue;
-
-                        var pdbPath = Path.ChangeExtension(asmPath, ".pdb");
-                        if (!File.Exists(pdbPath)) continue;
-
-                        // Read assembly and PDB into memory to avoid locking
-                        byte[] asmBytes = ReadAllBytesShared(asmPath);
-                        if (asmBytes == null) continue;
-
-                        byte[] pdbBytes = ReadAllBytesShared(pdbPath);
-                        if (pdbBytes == null) continue;
-
-                        var readerParams = new ReaderParameters
-                        {
-                            ReadSymbols = true,
-                            SymbolStream = new MemoryStream(pdbBytes)
-                        };
-
-                        using (var asmStream = new MemoryStream(asmBytes))
-                        using (var module = ModuleDefinition.ReadModule(asmStream, readerParams))
-                        {
-                            foreach (var type in module.Types)
-                            {
-                                CacheTypeMethods(type, ref methodCount);
-                            }
-                        }
-                    }
-                    catch { }
-                }
-
-                sw.Stop();
-                _isInitialized = true;
-                UnityEngine.Debug.Log($"[Bridge] PDB cache initialized: {methodCount} methods in {sw.ElapsedMilliseconds}ms");
-                BridgeDiagnostics.Log("PdbCache", $"Initialize end, methods={methodCount}, ms={sw.ElapsedMilliseconds}");
-            }
-        }
-
-        private static void CacheTypeMethods(TypeDefinition type, ref int methodCount)
-        {
-            foreach (var method in type.Methods)
-            {
-                if (!method.HasBody || method.DebugInformation == null) continue;
-
-                var seqPoints = method.DebugInformation.SequencePoints;
-                if (seqPoints == null || seqPoints.Count == 0) continue;
-
-                var firstPoint = seqPoints.FirstOrDefault(sp => sp.StartLine != 0xFeeFee);
-                var lastPoint = seqPoints.LastOrDefault(sp => sp.StartLine != 0xFeeFee);
-
-                if (firstPoint != null && lastPoint != null)
-                {
-                    var docPath = firstPoint.Document?.Url ?? "";
-                    if (string.IsNullOrEmpty(docPath)) continue;
-
-                    // Cache with simple type name for faster lookup
-                    var key = $"{type.Name}.{method.Name}";
-                    var endLine = lastPoint.EndLine > 0 ? lastPoint.EndLine : lastPoint.StartLine;
-                    _methodCache[key] = (docPath, firstPoint.StartLine, endLine);
-                    methodCount++;
-
-                    // Also cache with full type name for namespace-qualified lookups
-                    if (!string.IsNullOrEmpty(type.Namespace))
-                    {
-                        var fullKey = $"{type.FullName}.{method.Name}";
-                        _methodCache[fullKey] = (docPath, firstPoint.StartLine, endLine);
-                    }
-                }
-            }
-
-            // Process nested types
-            foreach (var nested in type.NestedTypes)
-            {
-                CacheTypeMethods(nested, ref methodCount);
-            }
-        }
-
-        /// <summary>
-        /// Looks up method info from the cache. Returns null if not found.
-        /// </summary>
-        public static (string file, int startLine, int endLine)? GetMethodInfo(string typeName, string methodName)
-        {
-            if (!_isInitialized || _methodCache == null) return null;
-
-            // Try simple name first (most common)
-            var simpleKey = $"{typeName}.{methodName}";
-            if (_methodCache.TryGetValue(simpleKey, out var info))
-                return info;
-
-            // Try with full type name if provided with namespace
-            if (typeName.Contains('.'))
-            {
-                if (_methodCache.TryGetValue($"{typeName}.{methodName}", out info))
-                    return info;
-
-                // Try just the simple class name
-                var simpleTypeName = typeName.Substring(typeName.LastIndexOf('.') + 1);
-                simpleKey = $"{simpleTypeName}.{methodName}";
-                if (_methodCache.TryGetValue(simpleKey, out info))
-                    return info;
-            }
-
-            return null;
-        }
-
-        /// <summary>
-        /// Clears the cache. Call this before domain reload if needed.
-        /// </summary>
-        public static void Clear()
-        {
-            lock (_lock)
-            {
-                BridgeDiagnostics.Log("PdbCache", "Clear");
-                _methodCache?.Clear();
-                _methodCache = null;
-                _isInitialized = false;
-            }
-        }
-
-        private static IEnumerable<Assembly> GetProjectAssemblies()
-        {
-            return AppDomain.CurrentDomain.GetAssemblies()
-                .Where(a => !a.IsDynamic &&
-                           !string.IsNullOrEmpty(a.Location) &&
-                           !a.FullName.StartsWith("UnityEngine") &&
-                           !a.FullName.StartsWith("UnityEditor") &&
-                           !a.FullName.StartsWith("Unity.") &&
-                           !a.FullName.StartsWith("System") &&
-                           !a.FullName.StartsWith("mscorlib") &&
-                           !a.FullName.StartsWith("Mono") &&
-                           !a.FullName.StartsWith("netstandard") &&
-                           !a.FullName.StartsWith("Microsoft") &&
-                           !a.FullName.StartsWith("Newtonsoft") &&
-                           !a.FullName.StartsWith("nunit") &&
-                           !a.FullName.StartsWith("Bee.") &&
-                           !a.FullName.StartsWith("ExCSS"));
-        }
-
-        private static byte[] ReadAllBytesShared(string path)
-        {
-            try
-            {
-                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                {
-                    var bytes = new byte[fs.Length];
-                    int offset = 0;
-                    while (offset < bytes.Length)
-                    {
-                        int read = fs.Read(bytes, offset, bytes.Length - offset);
-                        if (read == 0) break;
-                        offset += read;
-                    }
-                    return bytes;
-                }
-            }
-            catch { return null; }
-        }
-    }
-
     /// <summary>
     /// Reflection + regex-based code search for Unity projects.
     /// Uses compiled assemblies for accurate type info, regex for source locations.
@@ -466,15 +243,14 @@ namespace clibridge4unity
             if (matches.Count == 0)
             {
                 // Try Unity-style traces: ClassName:MethodName() (at path:line)
-                framePattern = @"(?<type>[\w\.]+):(?<method>\w+)\s*\((?<params>[^)]*)\)\s*(?:\(at\s+(?<file>[^:]+):(?<line>\d+)\))?";
+                framePattern = @"(?<type>[\w\.]+):(?<method>\w+)\s*\((?<params>[^)]*)\)\s*(?:\(at\s+(?<file>(?:[A-Za-z]:)?[^:]+):(?<line>\d+)\))?";
                 matches = Regex.Matches(stackTrace, framePattern);
             }
 
             if (matches.Count == 0)
                 return "Error: Could not parse stack trace. Expected .NET or Unity format.";
 
-            // Process frames in parallel
-            var frameData = new List<(string frameLine, string typeName, string methodName, string file, int errorLine)>();
+            var sb = new StringBuilder();
             foreach (Match match in matches)
             {
                 var frameLine = match.Value.Trim();
@@ -485,212 +261,103 @@ namespace clibridge4unity
                 var file = fileGroup.Success ? fileGroup.Value : null;
                 var lineStr = lineGroup.Success ? lineGroup.Value : null;
                 int.TryParse(lineStr, out int errorLine);
-                frameData.Add((frameLine, typeName, methodName, file, errorLine));
-            }
 
-            // Process all frames in parallel
-            var results = new string[frameData.Count];
-            System.Threading.Tasks.Parallel.For(0, frameData.Count, i =>
-            {
-                var (frameLine, typeName, methodName, file, errorLine) = frameData[i];
-                var frameSb = new StringBuilder();
-                frameSb.AppendLine(frameLine);
+                sb.AppendLine(frameLine);
 
-                // Extract simple class name for cache lookup
+                if (!string.IsNullOrEmpty(file) && errorLine > 0 && AppendFileLineContext(sb, file, errorLine))
+                {
+                    sb.AppendLine();
+                    continue;
+                }
+
                 var simpleClassName = typeName.Contains('.') ? typeName.Substring(typeName.LastIndexOf('.') + 1) : typeName;
-
-                // Fast path: Use PDB cache (loaded at startup)
-                var cachedInfo = PdbCache.GetMethodInfo(simpleClassName, methodName);
-                if (cachedInfo.HasValue)
+                var methodInfo = FindMethodInSource(simpleClassName, methodName);
+                if (methodInfo != null && TryReadSourceLines(methodInfo.AbsolutePath, out var sourceLines, out _))
                 {
-                    var (pdbFile, pdbStart, pdbEnd) = cachedInfo.Value;
-                    var sourceLines = TryReadSourceLines(pdbFile);
-                    if (sourceLines != null)
+                    int start = Math.Max(1, methodInfo.StartLine);
+                    int end = Math.Min(sourceLines.Length, Math.Min(methodInfo.EndLine, start + 30));
+                    sb.AppendLine($"  {methodInfo.FilePath}:{methodInfo.StartLine}-{methodInfo.EndLine}");
+                    for (int i = start - 1; i < end; i++)
                     {
-                        var relativePath = ToRelativePath(pdbFile);
-                        frameSb.AppendLine($"  {relativePath}:{pdbStart}-{pdbEnd} (error at {errorLine})");
-                        frameSb.AppendLine();
-                        for (int j = pdbStart - 1; j < pdbEnd && j < sourceLines.Length; j++)
-                        {
-                            var lineNum = j + 1;
-                            var marker = (errorLine > 0 && lineNum == errorLine) ? ">" : " ";
-                            frameSb.AppendLine($"{marker}{lineNum,4} | {sourceLines[j].TrimEnd()}");
-                        }
-                        frameSb.AppendLine();
-                        results[i] = frameSb.ToString();
-                        return;
+                        int lineNum = i + 1;
+                        sb.AppendLine($" {lineNum,4} | {sourceLines[i].TrimEnd()}");
                     }
                 }
-
-                // Fallback: slow path for methods not in cache (triggers on-demand PDB loading)
-                var (fallbackFile, fallbackStart, fallbackEnd) = GetMethodLinesFromPdb(simpleClassName, methodName);
-                if (!string.IsNullOrEmpty(fallbackFile) && fallbackStart > 0)
+                else
                 {
-                    var sourceLines = TryReadSourceLines(fallbackFile);
-                    if (sourceLines != null)
-                    {
-                        var relativePath = ToRelativePath(fallbackFile);
-                        frameSb.AppendLine($"  {relativePath}:{fallbackStart}-{fallbackEnd} (error at {errorLine})");
-                        frameSb.AppendLine();
-                        for (int j = fallbackStart - 1; j < fallbackEnd && j < sourceLines.Length; j++)
-                        {
-                            var lineNum = j + 1;
-                            var marker = (errorLine > 0 && lineNum == errorLine) ? ">" : " ";
-                            frameSb.AppendLine($"{marker}{lineNum,4} | {sourceLines[j].TrimEnd()}");
-                        }
-                        frameSb.AppendLine();
-                        results[i] = frameSb.ToString();
-                        return;
-                    }
+                    sb.AppendLine("  (source not found)");
                 }
 
-                frameSb.AppendLine($"  (source not found)");
-                frameSb.AppendLine();
-                results[i] = frameSb.ToString();
-            });
-
-            return string.Concat(results).TrimEnd();
-        }
-
-        private static (string file, int startLine, int endLine) GetMethodLinesFromPdb(string typeName, string methodName)
-        {
-            // Search all project assemblies directly with Cecil for PDB symbols
-            foreach (var asm in GetProjectAssemblies())
-            {
-                try
-                {
-                    var asmPath = asm.Location;
-                    if (string.IsNullOrEmpty(asmPath) || !File.Exists(asmPath)) continue;
-
-                    var pdbPath = Path.ChangeExtension(asmPath, ".pdb");
-                    if (!File.Exists(pdbPath)) continue; // Skip assemblies without PDB
-
-                    // Read assembly and PDB bytes into memory with sharing to avoid locking
-                    byte[] asmBytes = ReadAllBytesShared(asmPath);
-                    if (asmBytes == null) continue;
-
-                    byte[] pdbBytes = ReadAllBytesShared(pdbPath);
-                    if (pdbBytes == null) continue;
-
-                    var readerParams = new ReaderParameters
-                    {
-                        ReadSymbols = true,
-                        SymbolStream = new MemoryStream(pdbBytes)
-                    };
-
-                    using (var asmStream = new MemoryStream(asmBytes))
-                    using (var module = ModuleDefinition.ReadModule(asmStream, readerParams))
-                    {
-                        // Find the type in Cecil by simple name
-                        TypeDefinition cecilType = null;
-                        foreach (var t in module.Types)
-                        {
-                            if (t.Name == typeName)
-                            {
-                                cecilType = t;
-                                break;
-                            }
-                            // Check nested types (for inner classes)
-                            foreach (var nested in t.NestedTypes)
-                            {
-                                if (nested.Name == typeName)
-                                {
-                                    cecilType = nested;
-                                    break;
-                                }
-                            }
-                            if (cecilType != null) break;
-                        }
-                        if (cecilType == null) continue;
-
-                        var cecilMethod = cecilType.Methods.FirstOrDefault(m => m.Name == methodName);
-                        if (cecilMethod == null) continue;
-
-                        // For async methods, the actual body is in a compiler-generated state machine
-                        // Check if this method has debug info, otherwise it might be the "stub"
-                        if (!cecilMethod.HasBody || cecilMethod.DebugInformation == null ||
-                            cecilMethod.DebugInformation.SequencePoints == null ||
-                            cecilMethod.DebugInformation.SequencePoints.Count == 0)
-                        {
-                            // Try to find the MoveNext method in the async state machine
-                            var stateMachineType = cecilType.NestedTypes
-                                .FirstOrDefault(n => n.Name.StartsWith("<" + methodName + ">"));
-                            if (stateMachineType != null)
-                            {
-                                var moveNext = stateMachineType.Methods.FirstOrDefault(m => m.Name == "MoveNext");
-                                if (moveNext != null && moveNext.HasBody && moveNext.DebugInformation != null)
-                                    cecilMethod = moveNext;
-                            }
-                        }
-
-                        if (!cecilMethod.HasBody || cecilMethod.DebugInformation == null) continue;
-
-                        // Get sequence points from debug info
-                        var seqPoints = cecilMethod.DebugInformation.SequencePoints;
-                        if (seqPoints == null || seqPoints.Count == 0) continue;
-
-                        var firstPoint = seqPoints.FirstOrDefault(sp => sp.StartLine != 0xFeeFee); // Skip hidden points
-                        var lastPoint = seqPoints.LastOrDefault(sp => sp.StartLine != 0xFeeFee);
-
-                        if (firstPoint != null && lastPoint != null)
-                        {
-                            var docPath = firstPoint.Document?.Url ?? "";
-                            return (docPath, firstPoint.StartLine, lastPoint.EndLine > 0 ? lastPoint.EndLine : lastPoint.StartLine);
-                        }
-                    }
-                }
-                catch { }
+                sb.AppendLine();
             }
-            return (null, 0, 0);
+
+            return sb.ToString().TrimEnd();
         }
 
+        private static bool AppendFileLineContext(StringBuilder sb, string file, int line)
+        {
+            if (!TryReadSourceLines(file, out var sourceLines, out var resolvedPath))
+                return false;
+
+            var relativePath = ToRelativePath(resolvedPath ?? file);
+            int start = Math.Max(1, line - 3);
+            int end = Math.Min(sourceLines.Length, line + 3);
+            sb.AppendLine($"  {relativePath}:{line}");
+            for (int i = start - 1; i < end; i++)
+            {
+                int lineNum = i + 1;
+                var marker = lineNum == line ? ">" : " ";
+                sb.AppendLine($"{marker}{lineNum,4} | {sourceLines[i].TrimEnd()}");
+            }
+
+            return true;
+        }
 
         private static string[] TryReadSourceLines(string path)
         {
+            return TryReadSourceLines(path, out var lines, out _) ? lines : null;
+        }
+
+        private static bool TryReadSourceLines(string path, out string[] lines, out string resolvedPath)
+        {
+            lines = null;
+            resolvedPath = TryResolveSourcePath(path);
+            if (resolvedPath == null) return false;
+
+            try
+            {
+                lines = File.ReadAllLines(resolvedPath);
+                return true;
+            }
+            catch
+            {
+                lines = null;
+                return false;
+            }
+        }
+
+        private static string TryResolveSourcePath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+
             // Try absolute path first
-            if (File.Exists(path))
-                return File.ReadAllLines(path);
+            if (Path.IsPathRooted(path) && File.Exists(path))
+                return path;
 
             // Try relative to project
             var projectRoot = Path.GetDirectoryName(Application.dataPath);
             var fullPath = Path.Combine(projectRoot, path);
             if (File.Exists(fullPath))
-                return File.ReadAllLines(fullPath);
+                return fullPath;
 
             // Search in source folders
             foreach (var folder in GetSourceFolders())
             {
                 var searchPath = Path.Combine(folder, Path.GetFileName(path));
                 if (File.Exists(searchPath))
-                    return File.ReadAllLines(searchPath);
+                    return searchPath;
             }
 
-            return null;
-        }
-
-        private static Tuple<string, int> FindMethodSourceFile(string className, string methodName)
-        {
-            // Extract simple class name from full type name
-            var simpleClassName = className.Contains(".") ? className.Substring(className.LastIndexOf('.') + 1) : className;
-            var classPattern = $@"class\s+{Regex.Escape(simpleClassName)}\b";
-            var methodPattern = $@"(?:public|private|protected|internal|static|async|\s)+\s+[\w<>,\[\]\s]+\s+{Regex.Escape(methodName)}\s*\(";
-
-            foreach (var file in GetAllSourceFiles())
-            {
-                try
-                {
-                    var content = File.ReadAllText(file);
-                    if (!Regex.IsMatch(content, classPattern)) continue;
-
-                    var lines = content.Split('\n');
-                    for (int i = 0; i < lines.Length; i++)
-                    {
-                        if (Regex.IsMatch(lines[i], methodPattern))
-                            return Tuple.Create(file, i + 1);
-                    }
-                }
-                catch { }
-            }
             return null;
         }
 
@@ -1693,30 +1360,6 @@ namespace clibridge4unity
                 catch { }
             }
             return results.Distinct().ToList();
-        }
-
-        /// <summary>
-        /// Reads all bytes from a file using shared access to avoid locking issues.
-        /// This allows reading DLL/PDB files while Unity has them open.
-        /// </summary>
-        private static byte[] ReadAllBytesShared(string path)
-        {
-            try
-            {
-                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                {
-                    var bytes = new byte[fs.Length];
-                    int offset = 0;
-                    while (offset < bytes.Length)
-                    {
-                        int read = fs.Read(bytes, offset, bytes.Length - offset);
-                        if (read == 0) break;
-                        offset += read;
-                    }
-                    return bytes;
-                }
-            }
-            catch { return null; }
         }
 
         #endregion

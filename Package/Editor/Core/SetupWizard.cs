@@ -12,7 +12,6 @@ namespace clibridge4unity
     /// <summary>
     /// Setup wizard that checks if CLI is installed and guides user through installation.
     /// </summary>
-    [InitializeOnLoad]
     public class SetupWizard : EditorWindow
     {
         private static readonly string CLI_NAME = "clibridge4unity";
@@ -24,19 +23,6 @@ namespace clibridge4unity
         private Vector2 scrollPosition;
 
         private static readonly string PREF_MISMATCH_DISMISSED = "CliBridge_MismatchDismissed";
-
-        static SetupWizard()
-        {
-            BridgeDiagnostics.Log("SetupWizard", "static ctor");
-            EditorApplication.update += InitOnFirstTick;
-        }
-
-        static void InitOnFirstTick()
-        {
-            BridgeDiagnostics.Log("SetupWizard", "InitOnFirstTick");
-            EditorApplication.update -= InitOnFirstTick;
-            CheckSetup();
-        }
 
         static void CheckSetup()
         {

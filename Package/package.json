@@ -1,6 +1,6 @@
 {
     "name": "au.com.oddgames.clibridge4unity",
-    "version": "1.1.6",
+    "version": "1.1.7",
     "displayName": "CLI Bridge for Unity",
     "description": "Named pipe communication bridge between CLI applications and Unity Editor for AI-assisted development",
     "unity": "2021.3",
@@ -19,8 +19,7 @@
         "url": "https://oddgames.com.au"
     },
     "dependencies": {
-        "com.unity.nuget.newtonsoft-json": "3.0.0",
-        "com.unity.nuget.mono-cecil": "1.10.1"
+        "com.unity.nuget.newtonsoft-json": "3.0.0"
     },
     "samples": []
 }

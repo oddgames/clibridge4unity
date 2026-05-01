@@ -64,8 +64,8 @@ clibridge4unity LOG since:42
 - **Non-Blocking**: Main thread marshaling via SynchronizationContext + polling thread
 - **Attribute-Based**: Commands use `[BridgeCommand]` for automatic registration
 - **Modular**: Separate assembly definitions minimize recompilation
-- **PDB Cache**: Background-loaded debug info for fast code analysis
+- **Code Analysis**: Reflection, source search, and stack-trace file/line context
 
 ## Version
 
-Current: 1.1.6
+Current: 1.1.7

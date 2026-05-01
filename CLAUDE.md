@@ -31,9 +31,9 @@ A suite of tools for communicating with Unity Editor via Named Pipes using moder
 ### CRITICAL: Editor Performance Mandate
 **NEVER add code that slows down the Unity Editor.** This is non-negotiable.
 
-- All heavy operations (PDB loading, file scanning, etc.) MUST run on background threads
-- Use `InitializeAsync()` patterns - start work in background, don't block editor startup
-- Cache expensive data at startup in the background (e.g., `PdbCache.InitializeAsync()`)
+- All heavy operations (file scanning, reflection sweeps, etc.) MUST be command-triggered, not editor-startup work
+- Keep `[InitializeOnLoad]` paths limited to essential bridge liveness hooks
+- Do not cache expensive data at startup; initialize it lazily when the command actually needs it
 - Dictionary lookups (O(1)) are acceptable; iterating all assemblies per-request is NOT
 - No synchronous file I/O on the main thread during normal operations
 
@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.6)
+│   └── package.json           # UPM manifest (v1.1.7)
 └── UnityTestProject/          # Test Unity project
 ```
 
