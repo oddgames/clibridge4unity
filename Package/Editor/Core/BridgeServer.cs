@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.5";
+        public const string Version = "1.1.6";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -307,7 +307,13 @@ namespace clibridge4unity
                     BridgeDiagnostics.Log("BridgeServer", $"listener {listenerId} waiting for connection");
                     await pipe.WaitForConnectionAsync(ct);
                     BridgeDiagnostics.Log("BridgeServer", $"listener {listenerId} connected");
-                    await HandleClient(pipe, ct);
+
+                    // Keep listener capacity available while queued commands wait for
+                    // the serialized command slot. The connected pipe stays tracked in
+                    // activePipeServers and is removed by HandleClientAndDispose.
+                    var connectedPipe = pipe;
+                    pipe = null;
+                    _ = Task.Run(() => HandleClientAndDispose(connectedPipe, ct), ct);
                 }
                 catch (OperationCanceledException)
                 {
@@ -338,6 +344,19 @@ namespace clibridge4unity
                 }
             }
             BridgeDiagnostics.Log("BridgeServer", $"listener {listenerId} loop exit");
+        }
+
+        private static async Task HandleClientAndDispose(NamedPipeServerStream pipe, CancellationToken ct)
+        {
+            try
+            {
+                await HandleClient(pipe, ct);
+            }
+            finally
+            {
+                lock (serverLock) activePipeServers.Remove(pipe);
+                try { pipe.Dispose(); } catch { }
+            }
         }
 
         private static async Task HandleClient(NamedPipeServerStream pipe, CancellationToken ct)

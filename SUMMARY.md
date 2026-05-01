@@ -68,4 +68,4 @@ clibridge4unity LOG since:42
 
 ## Version
 
-Current: 1.1.5
+Current: 1.1.6
