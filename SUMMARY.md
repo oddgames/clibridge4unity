@@ -2,7 +2,7 @@
 
 ## What We Built
 
-A Unity Editor automation framework with **46 commands** for controlling Unity via Named Pipes, designed for AI-powered development (Claude integration), CI/CD pipelines, and scripted workflows.
+A Unity Editor automation framework with **45 Unity bridge commands** plus CLI-side tools such as `CODE_ANALYZE`, designed for AI-powered development (Claude integration), CI/CD pipelines, and scripted workflows.
 
 ## Project Structure
 
@@ -19,7 +19,7 @@ tool_claude_unity_bridge/
 │   │       ├── Scene/             # Scene/hierarchy/play mode commands
 │   │       ├── Prefab/            # Prefab creation/instantiation/save
 │   │       ├── Component/         # Component inspection & modification
-│   │       ├── Code/              # CODE_ANALYZE, CODE_EXEC, TEST
+│   │       ├── Code/              # CODE_EXEC, CODE_EXEC_RETURN, TEST
 │   │       ├── Asset/             # Asset search
 │   │       └── UI/                # UI_DISCOVER, SCREENSHOT
 │   └── Tools/                     # Pre-built CLI executables (win/osx/linux)
@@ -34,9 +34,10 @@ tool_claude_unity_bridge/
 - Manual project path override (`-d`)
 - Reconnection after assembly reload
 
-### Commands (46)
+### Commands
 - **Core**: PING, HELP, PROBE, DIAG, STATUS, COMPILE, REFRESH, LOG, STACK_MINIMIZE
-- **Code**: CODE_ANALYZE, CODE_EXEC, CODE_EXEC_RETURN, TEST
+- **CLI-side Code**: CODE_ANALYZE
+- **Unity Code**: CODE_EXEC, CODE_EXEC_RETURN, TEST
 - **Scene**: CREATE, FIND, DELETE, SAVE, LOAD, SCENE, SCENEVIEW, WINDOWS, PLAY, STOP, PAUSE, STEP, PLAYMODE, GAMEVIEW
 - **Prefab**: PREFAB_CREATE, PREFAB_INSTANTIATE, PREFAB_HIERARCHY, PREFAB_SAVE
 - **Component**: COMPONENT_SET, COMPONENT_ADD, COMPONENT_REMOVE, INSPECTOR
@@ -64,8 +65,8 @@ clibridge4unity LOG since:42
 - **Non-Blocking**: Main thread marshaling via SynchronizationContext + polling thread
 - **Attribute-Based**: Commands use `[BridgeCommand]` for automatic registration
 - **Modular**: Separate assembly definitions minimize recompilation
-- **Code Analysis**: Reflection, source search, and stack-trace file/line context
+- **Code Analysis**: CLI-side Roslyn/source analysis, no Unity pipe required
 
 ## Version
 
-Current: 1.1.7
+Current: 1.1.8

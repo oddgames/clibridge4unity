@@ -121,13 +121,13 @@ The generated docs tell AI assistants which commands are available, when to use 
 | Category | Commands |
 |----------|----------|
 | **Core** | `PING` `PROBE` `DIAG` `STATUS` `HELP` `COMPILE` `REFRESH` `LOG` `STACK_MINIMIZE` `MENU` `PROFILE` |
-| **Code** | `CODE_ANALYZE` `CODE_EXEC` `CODE_EXEC_RETURN` `TEST` |
+| **Code** | `CODE_EXEC` `CODE_EXEC_RETURN` `TEST` |
 | **Scene** | `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `PLAYMODE` `SCENEVIEW` `GAMEVIEW` `WINDOWS` |
 | **Prefab** | `PREFAB_CREATE` `PREFAB_INSTANTIATE` `PREFAB_SAVE` |
 | **Component** | `INSPECTOR` `COMPONENT_SET` `COMPONENT_ADD` `COMPONENT_REMOVE` |
 | **Asset** | `ASSET_SEARCH` `ASSET_DISCOVER` `ASSET_MOVE` `ASSET_COPY` `ASSET_DELETE` `ASSET_MKDIR` `ASSET_LABEL` `ASSET_RESERIALIZE` |
 | **UI** | `SCREENSHOT` |
-| **CLI-side** | `SETUP` `UPDATE` `SCREENSHOT` `WAKEUP` `DISMISS` |
+| **CLI-side** | `CODE_ANALYZE` `SETUP` `UPDATE` `SCREENSHOT` `WAKEUP` `DISMISS` |
 
 Run `clibridge4unity HELP` for full usage details.
 

@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.7)
+│   └── package.json           # UPM manifest (v1.1.8)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -211,8 +211,10 @@ The Package is split into 8 asmdefs to minimize recompilation:
 - **clibridge4unity.Commands.Prefab** - Prefab operations
 - **clibridge4unity.Commands.Component** - Component inspection & modification
 - **clibridge4unity.Commands.Asset** - Asset search
-- **clibridge4unity.Commands.Code** - Code analysis (CODE_ANALYZE, CODE_EXEC, TEST)
+- **clibridge4unity.Commands.Code** - Runtime code execution and tests (CODE_EXEC, CODE_EXEC_RETURN, TEST)
 - **clibridge4unity.Commands.UI** - UI discovery, rendering
+
+`CODE_ANALYZE` is CLI-side only; it must not be registered as a Unity `[BridgeCommand]`.
 
 ## Commands Available
 

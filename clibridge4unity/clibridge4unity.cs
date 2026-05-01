@@ -1210,6 +1210,7 @@ class Program
         Console.Error.WriteLine("  SETUP                      Install UPM package + generate CLAUDE.md and AGENTS.md");
         Console.Error.WriteLine("  UPDATE                     Self-update CLI + UPM package");
         Console.Error.WriteLine("  SERVE [--port N] [--ttl M] Start local file server (port 8420)");
+        Console.Error.WriteLine("  CODE_ANALYZE <query>       Offline Roslyn/source analysis");
         Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");
         Console.Error.WriteLine("  WAKEUP refresh             Bring to foreground + force recompile (Ctrl+R)");
         Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");

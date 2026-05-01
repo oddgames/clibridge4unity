@@ -14,12 +14,12 @@ Package/
 │       ├── Scene/             # Scene/hierarchy/screenshot commands
 │       ├── Prefab/            # Prefab creation/instantiation
 │       ├── Component/         # Component field/property/event manipulation
-│       ├── Code/              # CODE_ANALYZE, CodeSearch
+│       ├── Code/              # CODE_EXEC, CODE_EXEC_RETURN, TEST
 │       ├── Asset/             # Asset search
 │       └── UI/                # UI_DISCOVER, SCREENSHOT
 ├── Runtime/                   # (Currently unused)
 ├── Tools/                     # Pre-built CLI executables (win/osx/linux)
-└── package.json               # UPM manifest (v1.1.7)
+└── package.json               # UPM manifest (v1.1.8)
 ```
 
 ## Key Architecture
@@ -55,9 +55,8 @@ Use `CommandRegistry.RunOnMainThreadAsync<T>()` or set `RequiresMainThread = tru
 The system uses a dedicated polling thread (10ms cycle) + `SynchronizationContext.Post()`.
 
 ### Code Analysis
-- `CodeSearch.cs` uses reflection for type info + regex for source locations
-- Stack-trace analysis uses file/line data from Unity traces plus source search fallback
-- Query syntax: `class:Name`, `inherits:Type`, `method:Name`, `field:Name`, `attribute:Name`
+- `CODE_ANALYZE` is implemented in the CLI, not the Unity package
+- Unity-side code commands are limited to `CODE_EXEC`, `CODE_EXEC_RETURN`, and `TEST`
 
 ## Dependencies
 - `com.unity.nuget.newtonsoft-json` - JSON serialization (for component commands)
