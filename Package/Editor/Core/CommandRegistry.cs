@@ -927,15 +927,6 @@ namespace clibridge4unity
 
         private static async Task<T> InvokeOnMainThread<T>(Func<T> action, string description = null)
         {
-            // Instant fail if main thread is clearly stuck (>3s stale)
-            // Brief stalls (1-2s) are normal during play mode transitions, rendering, etc.
-            if (_timerTickCount > 0)
-            {
-                var staleness = (DateTime.Now - _lastTimerTick).TotalSeconds;
-                if (staleness > 3.0)
-                    throw new TimeoutException(BuildBusyReport(staleness, description));
-            }
-
             var work = new MainThreadWork
             {
                 Action = () => action(),
@@ -947,23 +938,14 @@ namespace clibridge4unity
             _mainThreadQueue.Enqueue(work);
             BridgeDiagnostics.Log("CommandRegistry", $"main-thread work queued: {work.Description}");
 
-            // Poll: check completion every 500ms
-            // If work is queued and heartbeat stale >3s → bail (Unity is stuck before our work)
-            // If work is executing → wait patiently (heartbeat is stale because WE are blocking main thread)
+            // Poll until the command-level timeout wins. The pipe-level heartbeat keeps
+            // clients alive while Unity is legitimately busy during play-mode transitions,
+            // reloads, imports, or long editor callbacks.
             for (int elapsed = 0; elapsed < 30000; elapsed += 500)
             {
                 var done = await Task.WhenAny(work.CompletionSource.Task, Task.Delay(500));
                 if (done == work.CompletionSource.Task)
                     return (T)(await work.CompletionSource.Task);
-
-                // Only bail on stale heartbeat if work hasn't started executing yet
-                if (!work.IsExecuting && _timerTickCount > 0 && (DateTime.Now - _lastTimerTick).TotalSeconds > 3.0)
-                {
-                    work.CompletionSource.TrySetCanceled();
-                    BridgeDiagnostics.Log("CommandRegistry", $"main-thread work canceled before start: {work.Description}");
-                    throw new TimeoutException(BuildBusyReport(
-                        (DateTime.Now - _lastTimerTick).TotalSeconds, work.Description));
-                }
             }
 
             // 30s hard limit — something is genuinely stuck

@@ -102,6 +102,7 @@ class Program
     const int EXIT_PLAY_MODE = 12;        // Play mode conflict (need STOP first)
     const int EXIT_SAFE_MODE = 13;        // Unity in Safe Mode (scripts can't run)
     const int EXIT_TIMEOUT = 14;          // Command response timed out
+    const int PIPE_CONNECT_TIMEOUT_MS = 10000;
 
     // Track if last response indicated main thread timeout
     private static bool _lastResponseContainedMainThreadTimeout;
@@ -847,7 +848,7 @@ class Program
                     // Try a quick DIAG via pipe to check heartbeat
                     try
                     {
-                        string diagResult = SendCommandGetResponse(pipeName, "DIAG", "");
+                        string diagResult = SendCommandGetResponse(pipeName, "DIAG", "", projectPath: projectPath);
                         if (diagResult != null && diagResult.Contains("mainThreadResponsive: no"))
                         {
                             Console.WriteLine("WARNING: Main thread is unresponsive (no dialog to dismiss).");
@@ -1145,7 +1146,7 @@ class Program
             _preCompileLogId = 0;
             try
             {
-                string logSnapshot = SendCommandGetResponse(pipeName, "LOG", "last:1");
+                string logSnapshot = SendCommandGetResponse(pipeName, "LOG", "last:1", projectPath: projectPath);
                 if (logSnapshot != null)
                 {
                     foreach (var line in logSnapshot.Split('\n'))
@@ -1525,6 +1526,58 @@ class Program
         return sb.Length > 32 ? sb.ToString().Substring(0, 32) : (sb.Length > 0 ? sb.ToString() : "unknown");
     }
 
+    static NamedPipeClientStream ConnectPipeWithRetry(string pipeName, string projectPath, string command, int timeoutMs)
+    {
+        var sw = Stopwatch.StartNew();
+        Exception lastError = null;
+        int attempts = 0;
+
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            attempts++;
+            var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
+            try
+            {
+                int remainingMs = Math.Max(1, timeoutMs - (int)sw.ElapsedMilliseconds);
+                pipe.Connect(Math.Min(1000, remainingMs));
+                if (attempts > 1)
+                    CliTrace("ConnectPipe", $"connected command={command}, attempts={attempts}, elapsedMs={sw.ElapsedMilliseconds}");
+                return pipe;
+            }
+            catch (TimeoutException ex)
+            {
+                lastError = ex;
+                pipe.Dispose();
+                if (!string.IsNullOrEmpty(projectPath))
+                    WakeUnityEditor(projectPath);
+            }
+            catch (IOException ex) when (IsTransientPipeConnectError(ex) && sw.ElapsedMilliseconds < timeoutMs)
+            {
+                lastError = ex;
+                pipe.Dispose();
+                if (!string.IsNullOrEmpty(projectPath))
+                    WakeUnityEditor(projectPath);
+                Thread.Sleep(50);
+            }
+            catch
+            {
+                pipe.Dispose();
+                throw;
+            }
+        }
+
+        CliTrace("ConnectPipe", $"timeout command={command}, attempts={attempts}, elapsedMs={sw.ElapsedMilliseconds}");
+        throw new TimeoutException($"Timed out connecting to pipe after {timeoutMs}ms", lastError);
+    }
+
+    static bool IsTransientPipeConnectError(IOException ex)
+    {
+        string message = ex.Message ?? "";
+        return message.Contains("busy", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("cannot find", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("not found", StringComparison.OrdinalIgnoreCase);
+    }
+
     static int SendCommand(string pipeName, string projectPath, string command, string data)
     {
         CliTrace("SendCommand", $"begin command={command}, dataChars={data?.Length ?? 0}, pipe={pipeName}, project={projectPath}");
@@ -1611,9 +1664,8 @@ class Program
                 return EXIT_TIMEOUT;
             }
 
-            using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
             CliTrace("SendCommand", $"connecting pipe command={command}");
-            pipe.Connect(1000);
+            using var pipe = ConnectPipeWithRetry(pipeName, projectPath, command, PIPE_CONNECT_TIMEOUT_MS);
             CliTrace("SendCommand", $"connected pipe command={command}");
 
             // Send command
@@ -1629,7 +1681,7 @@ class Program
             // Two timers:
             //   cts        — total command budget (driven by server's __timeout hint)
             //   stallCts   — short idle threshold (STALL_IDLE_MS). Server emits "__hb:N\n"
-            //                every 1.5s while a command runs, so 8s of silence = 4+ missed
+            //                every second while a command runs, so 8s of silence = several missed
             //                heartbeats → assume Unity is hung and bail.
             int readTimeoutMs = 10000; // initial timeout — gets bumped to server's hint
             const int STALL_IDLE_MS = 8000;
@@ -1782,7 +1834,7 @@ class Program
         long logSinceId = 0;
         try
         {
-            string logSnapshot = SendCommandGetResponse(pipeName, "LOG", "last:0");
+            string logSnapshot = SendCommandGetResponse(pipeName, "LOG", "last:0", projectPath: projectPath);
             if (logSnapshot != null)
             {
                 foreach (var line in logSnapshot.Split('\n'))
@@ -1812,7 +1864,7 @@ class Program
             Thread.Sleep(500);
 
             string logQuery = logSinceId > 0 ? $"since:{logSinceId}" : "all";
-            string logResponse = SendCommandGetResponse(pipeName, "LOG", logQuery);
+            string logResponse = SendCommandGetResponse(pipeName, "LOG", logQuery, projectPath: projectPath);
 
             if (logResponse != null)
             {
@@ -1844,11 +1896,10 @@ class Program
         return result;
     }
 
-    static string SendCommandGetResponse(string pipeName, string command, string data, int timeoutMs = 15000)
+    static string SendCommandGetResponse(string pipeName, string command, string data, int timeoutMs = 15000, string projectPath = null)
     {
         CliTrace("SendCommandGetResponse", $"begin command={command}, dataChars={data?.Length ?? 0}, timeoutMs={timeoutMs}");
-        using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
-        pipe.Connect(1000);
+        using var pipe = ConnectPipeWithRetry(pipeName, projectPath, command, Math.Min(timeoutMs, PIPE_CONNECT_TIMEOUT_MS));
         CliTrace("SendCommandGetResponse", $"connected command={command}");
 
         string message = string.IsNullOrEmpty(data) ? command : $"{command}|{data}";
@@ -2025,7 +2076,7 @@ class Program
                     Console.Error.WriteLine();
 
                     // Fetch and show the actual errors
-                    string errors = SendCommandGetResponse(pipeName, "LOG", "errors");
+                    string errors = SendCommandGetResponse(pipeName, "LOG", "errors", projectPath: projectPath);
                     if (errors != null)
                         Console.Error.WriteLine(errors);
                     else
@@ -2056,7 +2107,7 @@ class Program
                     // Wait a moment for post-compilation logs to appear, then fetch errors/warnings
                     Thread.Sleep(500);
                     string logQuery = _preCompileLogId > 0 ? $"since:{_preCompileLogId}" : "errors";
-                    string logs = SendCommandGetResponse(pipeName, "LOG", logQuery);
+                    string logs = SendCommandGetResponse(pipeName, "LOG", logQuery, projectPath: projectPath);
                     if (logs != null)
                     {
                         // Filter to only error/warning/exception entries
@@ -2095,7 +2146,7 @@ class Program
                             CliTrace("WaitForCompilationAndReconnect", "idle stale - retrigger compile");
                             hasRetriggered = true;
                             requestedAt = DateTime.Now;
-                            SendCommandGetResponse(pipeName, "COMPILE", "");
+                            SendCommandGetResponse(pipeName, "COMPILE", "", projectPath: projectPath);
                         }
                         else if (hasRetriggered && idleStaleSeconds >= 30)
                         {

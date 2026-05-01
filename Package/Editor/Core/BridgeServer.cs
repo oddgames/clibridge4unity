@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.3";
+        public const string Version = "1.1.4";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -32,6 +32,7 @@ namespace clibridge4unity
         // Serializes all command execution: one command at a time, brief idle between each.
         private static readonly SemaphoreSlim _commandSlot = new SemaphoreSlim(1, 1);
         private const int CommandIdleMs = 100;
+        private const int ListenerCount = 8;
 
         // Main thread context for Unity API calls
         private static SynchronizationContext mainThreadContext;
@@ -196,14 +197,16 @@ namespace clibridge4unity
                 serverCts = new CancellationTokenSource();
             }
 
-            // Run multiple concurrent server loops to handle simultaneous connections
-            for (int i = 0; i < 3; i++)
+            // Run multiple concurrent server loops to handle simultaneous connections.
+            // Commands still execute serially via _commandSlot; extra listeners prevent
+            // short client-side connect timeouts during bursts of queued commands.
+            for (int i = 0; i < ListenerCount; i++)
             {
                 int listenerId = i + 1;
                 Task.Run(() => ServerLoop(listenerId, serverCts.Token));
             }
-            Debug.Log($"[Bridge] Server started: {pipeName} (3 listeners)");
-            BridgeDiagnostics.Log("BridgeServer", "server started with 3 listeners");
+            Debug.Log($"[Bridge] Server started: {pipeName} ({ListenerCount} listeners)");
+            BridgeDiagnostics.Log("BridgeServer", $"server started with {ListenerCount} listeners");
         }
 
         private static void StopServerImmediately()
@@ -417,7 +420,7 @@ namespace clibridge4unity
                 }
                 finally { pipeWriteLock.Release(); }
 
-                // Heartbeat task: emits "__hb:<staleness>\n" every 1.5s while the command runs.
+                // Heartbeat task: emits "__hb:<staleness>\n" every second while the command runs.
                 // CLI uses this to detect stalls — if no bytes (heartbeat or response) arrive
                 // within its idle threshold, it bails instead of waiting for the full timeout.
                 var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -427,7 +430,7 @@ namespace clibridge4unity
                     {
                         while (!heartbeatCts.IsCancellationRequested)
                         {
-                            await Task.Delay(1500, heartbeatCts.Token);
+                            await Task.Delay(1000, heartbeatCts.Token);
                             if (heartbeatCts.IsCancellationRequested) break;
                             double staleness = CommandRegistry.GetHeartbeatStaleness();
                             byte[] hb = Encoding.UTF8.GetBytes($"__hb:{staleness:F1}\n");
