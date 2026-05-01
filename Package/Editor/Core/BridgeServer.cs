@@ -21,7 +21,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.8";
+        public const string Version = "1.1.9";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -470,16 +470,20 @@ namespace clibridge4unity
                 }, heartbeatCts.Token);
 
                 string response;
-                BridgeDiagnostics.Log("BridgeServer", $"slot wait: {command}");
-                await _commandSlot.WaitAsync(ct);
-                BridgeDiagnostics.Log("BridgeServer", $"slot acquired: {command}");
+                var commandToken = timeoutCts.Token;
+                bool slotAcquired = false;
                 try
                 {
+                    BridgeDiagnostics.Log("BridgeServer", $"slot wait: {command}");
+                    await _commandSlot.WaitAsync(commandToken);
+                    slotAcquired = true;
+                    BridgeDiagnostics.Log("BridgeServer", $"slot acquired: {command}");
+
                     BridgeDiagnostics.Log("BridgeServer", $"execute begin: {command}, timeoutSec={timeoutSec}");
-                    response = await CommandRegistry.ExecuteCommand(command, data, pipe, timeoutCts.Token);
+                    response = await CommandRegistry.ExecuteCommand(command, data, pipe, commandToken);
                     BridgeDiagnostics.Log("BridgeServer", $"execute end: {command}, responseChars={response?.Length ?? 0}");
                 }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
                 {
                     BridgeDiagnostics.Log("BridgeServer", $"execute timeout: {command}");
                     response = Response.Error($"Command '{command}' timed out after {timeoutSec}s");
@@ -492,8 +496,11 @@ namespace clibridge4unity
                     // Skip idle when shutting down so domain reload isn't delayed.
                     if (!ct.IsCancellationRequested)
                         try { await Task.Delay(CommandIdleMs, ct); } catch { }
-                    _commandSlot.Release();
-                    BridgeDiagnostics.Log("BridgeServer", $"slot released: {command}");
+                    if (slotAcquired)
+                    {
+                        _commandSlot.Release();
+                        BridgeDiagnostics.Log("BridgeServer", $"slot released: {command}");
+                    }
                 }
 
                 // Send final response (may be empty for streaming commands)

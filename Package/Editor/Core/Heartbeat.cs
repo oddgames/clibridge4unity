@@ -8,27 +8,26 @@ using UnityEngine;
 namespace clibridge4unity
 {
     /// <summary>
-    /// Writes Unity state to a temp file every second so the CLI can check
+    /// Writes Unity state to a temp file periodically so the CLI can check
     /// Unity's status without a pipe connection (useful during domain reload).
     /// File: %TEMP%/clibridge4unity_{ProjectHash}.status
-    /// 
-    /// The per-frame callback only checks time and refreshes the file timestamp.
-    /// JSON is rewritten only when the visible state changes.
     /// </summary>
     [InitializeOnLoad]
     public static class Heartbeat
     {
+        private const int HeartbeatIntervalMs = 2000;
+
         private static string _statusFile;
         private static string _projectName;
         private static string _statusJsonStaticFields;
         private static int _pid;
-        private static double _lastTouch;
         private static string _currentState;
         private static long _stateEnteredAtUnix;
         private static readonly object DiskWriteLock = new object();
         private static string _pendingStatusJson;
         private static bool _pendingTouch;
         private static bool _diskWriteQueued;
+        private static volatile bool _isRunning;
 
         static Heartbeat()
         {
@@ -63,32 +62,52 @@ namespace clibridge4unity
             BridgeDiagnostics.Log("Heartbeat", $"status file: {_statusFile}");
 
             AssemblyReloadEvents.beforeAssemblyReload += WriteReloadingNow;
-            EditorApplication.update += Tick;
-            EditorApplication.playModeStateChanged += _ => WriteStatusNow(GetState(), forceStateEnteredAt: true);
+            CompilationPipeline.compilationStarted += OnCompilationStarted;
+            CompilationPipeline.compilationFinished += OnCompilationFinished;
+            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
             EditorApplication.quitting += Cleanup;
 
             WriteStatusNow(GetState(), forceStateEnteredAt: true, synchronous: true);
+            StartHeartbeatThread();
             BridgeDiagnostics.Log("Heartbeat", "Initialize exit");
         }
 
-        static void Tick()
+        static void StartHeartbeatThread()
         {
-            double now = EditorApplication.timeSinceStartup;
-            if (now - _lastTouch < 1.0) return;
-            _lastTouch = now;
+            _isRunning = true;
+            var thread = new Thread(HeartbeatLoop)
+            {
+                Name = "Bridge Heartbeat",
+                IsBackground = true
+            };
+            thread.Start();
+        }
 
-            try
+        static void HeartbeatLoop()
+        {
+            while (_isRunning)
             {
-                string state = GetState();
-                if (state != _currentState)
-                    WriteStatusNow(state, forceStateEnteredAt: false);
-                else
-                    QueueTouchStatusFile();
+                Thread.Sleep(HeartbeatIntervalMs);
+                if (!_isRunning)
+                    continue;
+
+                QueueTouchStatusFile();
             }
-            catch (Exception ex)
-            {
-                BridgeDiagnostics.LogException("Heartbeat Tick", ex);
-            }
+        }
+
+        static void OnCompilationStarted(object _)
+        {
+            WriteStatusNow("compiling", forceStateEnteredAt: true);
+        }
+
+        static void OnCompilationFinished(object _)
+        {
+            WriteStatusNow(GetState(), forceStateEnteredAt: true);
+        }
+
+        static void OnPlayModeStateChanged(PlayModeStateChange _)
+        {
+            WriteStatusNow(GetState(), forceStateEnteredAt: true);
         }
 
         static void QueueTouchStatusFile()
@@ -202,6 +221,7 @@ namespace clibridge4unity
             BridgeDiagnostics.Log("Heartbeat", "before assembly reload - writing reloading state");
             try
             {
+                _isRunning = false;
                 WriteStatusNow("reloading", forceStateEnteredAt: true, synchronous: true);
                 BridgeDiagnostics.Log("Heartbeat", $"reloading state written: {_statusFile}");
             }
@@ -223,7 +243,11 @@ namespace clibridge4unity
         static void Cleanup()
         {
             BridgeDiagnostics.Log("Heartbeat", "cleanup enter");
-            EditorApplication.update -= Tick;
+            _isRunning = false;
+            AssemblyReloadEvents.beforeAssemblyReload -= WriteReloadingNow;
+            CompilationPipeline.compilationStarted -= OnCompilationStarted;
+            CompilationPipeline.compilationFinished -= OnCompilationFinished;
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
             try
             {
                 if (File.Exists(_statusFile))

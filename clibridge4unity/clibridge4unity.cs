@@ -106,6 +106,7 @@ class Program
 
     // Track if last response indicated main thread timeout
     private static bool _lastResponseContainedMainThreadTimeout;
+    private static string _lastCommandResponse = "";
     private static long _preCompileLogId;
     private static string _intent;       // set via --intent flag; purely descriptive
     private static bool _killIfWedged;    // set via --kill-if-wedged; auto-terminate Unity when stuck
@@ -1719,9 +1720,10 @@ class Program
                     int bytesRead = readTask.Result;
                     if (bytesRead == 0) break;
 
-                    // Any byte (including a heartbeat) resets the stall + total timers.
+                    // Any byte (including a heartbeat) resets the short idle-stall timer.
+                    // Do not reset the total command timer here: hidden heartbeat lines can
+                    // otherwise keep a genuinely stuck command alive forever.
                     stallCts.CancelAfter(STALL_IDLE_MS);
-                    cts.CancelAfter(readTimeoutMs);
 
                     lineBuf.Append(Encoding.UTF8.GetString(buffer, 0, bytesRead));
                     while (true)
@@ -1768,8 +1770,10 @@ class Program
                 return EXIT_TIMEOUT;
             }
 
-            // Check if response indicates we need to wait for reconnection
             string response = responseBuilder.ToString();
+            _lastCommandResponse = response;
+
+            // Check if response indicates we need to wait for reconnection
             if (ShouldWaitForReconnection(response, out int timeoutSeconds))
             {
                 CliTrace("SendCommand", $"reconnect requested command={command}, timeoutSec={timeoutSeconds}");
@@ -1854,7 +1858,14 @@ class Program
         }
 
         // Step 2: Send the actual command (e.g., COMPILE)
+        _lastCommandResponse = "";
         int result = SendCommand(pipeName, projectPath, command, data);
+
+        // A skipped compile is a successful no-op. Do not turn unrelated runtime
+        // Console errors into a compile failure after Unity already reported that
+        // no script compilation was needed.
+        if (result == EXIT_SUCCESS && ResponseContainsFlag(_lastCommandResponse, "skipped", true))
+            return result;
 
         // Step 3: If the command triggered reconnection, WaitForCompilationAndReconnect already handled it.
         // Now fetch logs since our snapshot.
@@ -1897,6 +1908,26 @@ class Program
         return result;
     }
 
+    static bool ResponseContainsFlag(string response, string key, bool expected)
+    {
+        if (string.IsNullOrEmpty(response))
+            return false;
+
+        string prefix = key + ":";
+        foreach (var line in response.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (!trimmed.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            string value = trimmed.Substring(prefix.Length).Trim();
+            if (bool.TryParse(value, out bool parsed))
+                return parsed == expected;
+        }
+
+        return false;
+    }
+
     static string SendCommandGetResponse(string pipeName, string command, string data, int timeoutMs = 15000, string projectPath = null)
     {
         CliTrace("SendCommandGetResponse", $"begin command={command}, dataChars={data?.Length ?? 0}, timeoutMs={timeoutMs}");
@@ -1925,8 +1956,25 @@ class Program
         catch (OperationCanceledException) { }
         catch (AggregateException ex) when (ex.InnerException is OperationCanceledException) { }
 
-        CliTrace("SendCommandGetResponse", $"end command={command}, responseChars={responseBuilder.Length}");
-        return responseBuilder.ToString();
+        string response = StripBridgeControlLines(responseBuilder.ToString());
+        CliTrace("SendCommandGetResponse", $"end command={command}, responseChars={response.Length}");
+        return response;
+    }
+
+    static string StripBridgeControlLines(string response)
+    {
+        if (string.IsNullOrEmpty(response))
+            return response;
+
+        var filtered = new StringBuilder(response.Length);
+        foreach (var line in response.Replace("\r\n", "\n").Split('\n'))
+        {
+            if (line.StartsWith("__hb:", StringComparison.Ordinal) ||
+                line.StartsWith("__timeout:", StringComparison.Ordinal))
+                continue;
+            filtered.Append(line).Append('\n');
+        }
+        return filtered.ToString();
     }
 
     static void PrintFilteredLogs(string logResponse, bool onlyErrors)
@@ -2066,7 +2114,7 @@ class Program
                     responseBuilder.Append(Encoding.UTF8.GetString(buffer, 0, bytesRead));
                 }
 
-                string statusResponse = responseBuilder.ToString();
+                string statusResponse = StripBridgeControlLines(responseBuilder.ToString());
 
                 // Check for compile errors (terminal state — don't keep waiting)
                 if (HasCompileErrors(statusResponse, out int errorCount))

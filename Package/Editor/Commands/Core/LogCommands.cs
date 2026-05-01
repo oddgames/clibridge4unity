@@ -21,6 +21,7 @@ namespace clibridge4unity
         private static readonly ConcurrentQueue<LogEntry> _pendingWrites = new ConcurrentQueue<LogEntry>();
         private static string _logFilePath;
         private static long _nextId;
+        private static bool _flushSubscribed;
 
         // Compile errors persist across log clears — tracked separately
         private static readonly List<CompilerMessage> _compileErrors = new List<CompilerMessage>();
@@ -89,7 +90,6 @@ namespace clibridge4unity
             };
 
             Application.logMessageReceived += OnLogMessage;
-            UnityEditor.EditorApplication.update += FlushPendingWrites;
             BridgeDiagnostics.Log("LogCommands", "events subscribed");
 
             try
@@ -107,7 +107,11 @@ namespace clibridge4unity
         private static void ShutdownForReload()
         {
             BridgeDiagnostics.Log("LogCommands", "ShutdownForReload enter");
-            UnityEditor.EditorApplication.update -= FlushPendingWrites;
+            if (_flushSubscribed)
+            {
+                UnityEditor.EditorApplication.update -= FlushPendingWrites;
+                _flushSubscribed = false;
+            }
             Application.logMessageReceived -= OnLogMessage;
             CompilationPipeline.assemblyCompilationFinished -= OnAssemblyCompilationFinished;
             UnityEditor.SessionState.SetInt(SessionKeys.LogNextId, (int)_nextId);
@@ -286,11 +290,27 @@ namespace clibridge4unity
             };
 
             _pendingWrites.Enqueue(entry);
+            EnsureFlushSubscribed();
+        }
+
+        private static void EnsureFlushSubscribed()
+        {
+            if (_flushSubscribed) return;
+            UnityEditor.EditorApplication.update += FlushPendingWrites;
+            _flushSubscribed = true;
         }
 
         private static void FlushPendingWrites()
         {
-            if (_pendingWrites.IsEmpty) return;
+            if (_pendingWrites.IsEmpty)
+            {
+                if (_flushSubscribed)
+                {
+                    UnityEditor.EditorApplication.update -= FlushPendingWrites;
+                    _flushSubscribed = false;
+                }
+                return;
+            }
 
             var sb = new StringBuilder();
             int count = 0;
@@ -309,6 +329,12 @@ namespace clibridge4unity
                 try { File.AppendAllText(_logFilePath, sb.ToString()); }
                 catch (Exception ex) { BridgeDiagnostics.LogException("LogCommands FlushPendingWrites", ex); }
                 BridgeDiagnostics.Log("LogCommands", $"flushed pending writes: {count}");
+            }
+
+            if (_pendingWrites.IsEmpty && _flushSubscribed)
+            {
+                UnityEditor.EditorApplication.update -= FlushPendingWrites;
+                _flushSubscribed = false;
             }
         }
 

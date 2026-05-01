@@ -16,6 +16,11 @@ namespace clibridge4unity
     /// </summary>
     public static class CoreCommands
     {
+        private static double _lastScriptModifiedCheckTime = -10;
+        private static bool _lastScriptsModified;
+        private static double _lastWindowListTime = -10;
+        private static string[] _cachedWindowList = new string[0];
+
         /// <summary>
         /// Check if any .cs files under Assets/ or Packages/ have been modified since last compile.
         /// Uses Directory.EnumerateFiles for lazy evaluation — stops early if possible.
@@ -34,6 +39,37 @@ namespace clibridge4unity
                     .Any(f => File.GetLastWriteTime(f) > lastCompile);
             }
             catch { return true; } // If scan fails, assume modified
+        }
+
+        private static bool ScriptsModifiedSinceCompileCached(double maxAgeSeconds = 1.0)
+        {
+            double now = EditorApplication.timeSinceStartup;
+            if (now - _lastScriptModifiedCheckTime < maxAgeSeconds)
+                return _lastScriptsModified;
+
+            _lastScriptsModified = ScriptsModifiedSinceCompile();
+            _lastScriptModifiedCheckTime = now;
+            return _lastScriptsModified;
+        }
+
+        private static string[] GetOpenEditorWindowsCached(double maxAgeSeconds = 2.0)
+        {
+            double now = EditorApplication.timeSinceStartup;
+            if (now - _lastWindowListTime < maxAgeSeconds)
+                return _cachedWindowList;
+
+            var editorWindows = Resources.FindObjectsOfTypeAll<EditorWindow>();
+            var windowList = new List<string>(editorWindows.Length);
+            foreach (var win in editorWindows)
+            {
+                string title = win.titleContent?.text ?? win.GetType().Name;
+                string typeName = win.GetType().Name;
+                windowList.Add(title != typeName ? $"{title} ({typeName})" : typeName);
+            }
+
+            _cachedWindowList = windowList.ToArray();
+            _lastWindowListTime = now;
+            return _cachedWindowList;
         }
 
         [BridgeCommand("PING", "Test connection (includes main thread health)",
@@ -103,18 +139,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "DIAG", "LOG", "PROBE" })]
         public static string GetStatus()
         {
-            // Get all open editor windows
-            var editorWindows = Resources.FindObjectsOfTypeAll<EditorWindow>();
-            var windowList = new List<string>();
-            foreach (var win in editorWindows)
-            {
-                string title = win.titleContent?.text ?? win.GetType().Name;
-                string typeName = win.GetType().Name;
-                if (title != typeName)
-                    windowList.Add($"{title} ({typeName})");
-                else
-                    windowList.Add(typeName);
-            }
+            var windowList = GetOpenEditorWindowsCached();
 
             // Get last compile time from SessionState (survives domain reloads)
             string lastCompileStr = "never";
@@ -200,14 +225,14 @@ namespace clibridge4unity
                 playModeDuration,
                 currentScene,
                 currentScenePath,
-                scriptsModified = ScriptsModifiedSinceCompile(),
+                scriptsModified = ScriptsModifiedSinceCompileCached(),
                 lastCompileRequest = lastCompileRequestStr,
                 lastCompileFinished = lastCompileStr,
                 compileTimeAvg,
                 compileTimeLast,
                 projectPath = Application.dataPath,
                 unityVersion = Application.unityVersion,
-                openWindows = windowList.ToArray()
+                openWindows = windowList
             });
         }
 

@@ -63,6 +63,7 @@ namespace clibridge4unity
         // Lock-free main thread work queue
         private static readonly ConcurrentQueue<MainThreadWork> _mainThreadQueue = new ConcurrentQueue<MainThreadWork>();
         private static volatile bool _isRunning = true;
+        private static bool _editorUpdateSubscribed;
 
         // Win32 APIs for waking Unity's message pump when in background
         [DllImport("user32.dll")]
@@ -93,6 +94,7 @@ namespace clibridge4unity
 
         private static long _timerTickCount; // increments on each editor update for diagnostics
         private static DateTime _lastTimerTick;
+        private static double _lastTimerTickTime;
 
         private class MainThreadWork
         {
@@ -136,9 +138,6 @@ namespace clibridge4unity
             _lastTimerTick = DateTime.Now;
             BridgeDiagnostics.Log("CommandRegistry", $"sync context: {_mainThreadContext?.GetType().Name ?? "null"}");
 
-            EditorApplication.update += OnEditorUpdate;
-            BridgeDiagnostics.Log("CommandRegistry", "EditorUpdate subscribed");
-
             var wakeThread = new Thread(WakeLoop)
             {
                 Name = "Bridge Wake Thread",
@@ -155,7 +154,11 @@ namespace clibridge4unity
         {
             BridgeDiagnostics.Log("CommandRegistry", "ShutdownForReload enter");
             _isRunning = false;
-            EditorApplication.update -= OnEditorUpdate;
+            if (_editorUpdateSubscribed)
+            {
+                EditorApplication.update -= OnEditorUpdate;
+                _editorUpdateSubscribed = false;
+            }
 
             if (_unityWindowHandle != IntPtr.Zero)
             {
@@ -167,19 +170,47 @@ namespace clibridge4unity
 
         private static void OnEditorUpdate()
         {
+            if (_mainThreadQueue.IsEmpty)
+            {
+                EditorApplication.update -= OnEditorUpdate;
+                _editorUpdateSubscribed = false;
+                return;
+            }
+
             _timerTickCount++;
-            _lastTimerTick = DateTime.Now;
+            double now = EditorApplication.timeSinceStartup;
+            if (now - _lastTimerTickTime > 0.25)
+            {
+                _lastTimerTickTime = now;
+                _lastTimerTick = DateTime.Now;
+            }
 
             if (_unityWindowHandle == IntPtr.Zero &&
                 !EditorApplication.isCompiling &&
                 !EditorApplication.isUpdating &&
-                EditorApplication.timeSinceStartup - _lastHwndRefreshTime > 1.0)
+                now - _lastHwndRefreshTime > 1.0)
             {
-                _lastHwndRefreshTime = EditorApplication.timeSinceStartup;
+                _lastHwndRefreshTime = now;
                 TryRefreshUnityHwnd();
             }
 
-            ProcessAllPendingWork();
+            if (!_mainThreadQueue.IsEmpty)
+                ProcessAllPendingWork();
+
+            if (_mainThreadQueue.IsEmpty)
+            {
+                EditorApplication.update -= OnEditorUpdate;
+                _editorUpdateSubscribed = false;
+            }
+        }
+
+        private static void EnsureEditorUpdateSubscribed()
+        {
+            if (_editorUpdateSubscribed)
+                return;
+
+            EditorApplication.update += OnEditorUpdate;
+            _editorUpdateSubscribed = true;
         }
 
         /// <summary>
@@ -232,7 +263,11 @@ namespace clibridge4unity
                         cycle++;
 
                         // Post via SynchronizationContext (processed during Unity's sync context pump)
-                        _mainThreadContext?.Post(_ => ProcessAllPendingWork(), null);
+                        _mainThreadContext?.Post(_ =>
+                        {
+                            EnsureEditorUpdateSubscribed();
+                            ProcessAllPendingWork();
+                        }, null);
 
                         var hwnd = _unityWindowHandle;
                         if (hwnd != IntPtr.Zero)
@@ -941,6 +976,11 @@ namespace clibridge4unity
 
             _mainThreadQueue.Enqueue(work);
             BridgeDiagnostics.Log("CommandRegistry", $"main-thread work queued: {work.Description}");
+            _mainThreadContext?.Post(_ =>
+            {
+                EnsureEditorUpdateSubscribed();
+                ProcessAllPendingWork();
+            }, null);
 
             // Poll until the command-level timeout wins. The pipe-level heartbeat keeps
             // clients alive while Unity is legitimately busy during play-mode transitions,
