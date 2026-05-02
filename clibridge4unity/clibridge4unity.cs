@@ -1528,6 +1528,111 @@ class Program
         return sb.Length > 32 ? sb.ToString().Substring(0, 32) : (sb.Length > 0 ? sb.ToString() : "unknown");
     }
 
+    static string NormalizeProjectPath(string projectPath)
+    {
+        return Path.GetFullPath(projectPath).ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
+    }
+
+    static string UnescapeJsonString(string value)
+    {
+        return value?.Replace("\\\"", "\"").Replace("\\\\", "\\");
+    }
+
+    static bool TryDiscoverPipeNameFromHeartbeat(string projectPath, string expectedPipeName, out string discoveredPipeName)
+    {
+        discoveredPipeName = null;
+        if (string.IsNullOrWhiteSpace(projectPath))
+            return false;
+
+        try
+        {
+            string expectedProjectPath = NormalizeProjectPath(projectPath);
+            string projectName = GetProjectName(projectPath);
+            string tempPath = Path.GetTempPath();
+            var candidates = Directory.GetFiles(tempPath, $"clibridge4unity_*_{projectName}.status")
+                .Select(file =>
+                {
+                    try
+                    {
+                        var info = new FileInfo(file);
+                        string json = File.ReadAllText(file);
+                        string projectPathFromStatus = UnescapeJsonString(ExtractJsonString(json, "projectPath"));
+                        string pipeNameFromStatus = UnescapeJsonString(ExtractJsonString(json, "pipeName"));
+                        string hashFromName = null;
+                        var match = System.Text.RegularExpressions.Regex.Match(
+                            Path.GetFileName(file),
+                            @"^clibridge4unity_([0-9A-Fa-f]{8})_.*\.status$");
+                        if (match.Success)
+                            hashFromName = match.Groups[1].Value.ToUpperInvariant();
+                        return new
+                        {
+                            File = file,
+                            Age = DateTime.UtcNow - info.LastWriteTimeUtc,
+                            ProjectPath = projectPathFromStatus,
+                            PipeName = pipeNameFromStatus,
+                            Hash = hashFromName
+                        };
+                    }
+                    catch
+                    {
+                        return null;
+                    }
+                })
+                .Where(c => c != null && c.Age.TotalSeconds <= 60)
+                .ToList();
+
+            if (candidates.Count == 0)
+                return false;
+
+            var exact = candidates
+                .Where(c => !string.IsNullOrWhiteSpace(c.ProjectPath) &&
+                            NormalizeProjectPath(c.ProjectPath) == expectedProjectPath)
+                .OrderBy(c => c.Age)
+                .FirstOrDefault();
+
+            var selected = exact;
+            if (selected == null && candidates.Count == 1)
+                selected = candidates[0];
+
+            if (selected == null)
+            {
+                CliTrace("DiscoverPipe", $"ambiguous projectName={projectName}, candidates={candidates.Count}");
+                return false;
+            }
+
+            string pipe = !string.IsNullOrWhiteSpace(selected.PipeName)
+                ? selected.PipeName
+                : (!string.IsNullOrWhiteSpace(selected.Hash) ? $"UnityBridge_{Environment.UserName}_{selected.Hash}" : null);
+
+            if (string.IsNullOrWhiteSpace(pipe) || pipe == expectedPipeName)
+                return false;
+
+            discoveredPipeName = pipe;
+            CliTrace("DiscoverPipe", $"project={projectPath}, expected={expectedPipeName}, discovered={discoveredPipeName}, status={selected.File}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            CliTrace("DiscoverPipe", $"exception: {ex.Message}");
+            return false;
+        }
+    }
+
+    static NamedPipeClientStream ConnectPipeWithProjectFallback(string pipeName, string projectPath, string command, int timeoutMs, out string effectivePipeName)
+    {
+        effectivePipeName = pipeName;
+        try
+        {
+            return ConnectPipeWithRetry(pipeName, projectPath, command, timeoutMs);
+        }
+        catch (TimeoutException) when (TryDiscoverPipeNameFromHeartbeat(projectPath, pipeName, out var discoveredPipeName))
+        {
+            Console.Error.WriteLine($"[CLI] Pipe '{pipeName}' timed out; retrying discovered pipe '{discoveredPipeName}' from heartbeat.");
+            effectivePipeName = discoveredPipeName;
+            return ConnectPipeWithRetry(discoveredPipeName, projectPath, command, timeoutMs);
+        }
+    }
+
     static NamedPipeClientStream ConnectPipeWithRetry(string pipeName, string projectPath, string command, int timeoutMs)
     {
         var sw = Stopwatch.StartNew();
@@ -1667,7 +1772,8 @@ class Program
             }
 
             CliTrace("SendCommand", $"connecting pipe command={command}");
-            using var pipe = ConnectPipeWithRetry(pipeName, projectPath, command, PIPE_CONNECT_TIMEOUT_MS);
+            using var pipe = ConnectPipeWithProjectFallback(pipeName, projectPath, command, PIPE_CONNECT_TIMEOUT_MS, out var effectivePipeName);
+            pipeName = effectivePipeName;
             CliTrace("SendCommand", $"connected pipe command={command}");
 
             // Send command
@@ -1931,7 +2037,8 @@ class Program
     static string SendCommandGetResponse(string pipeName, string command, string data, int timeoutMs = 15000, string projectPath = null)
     {
         CliTrace("SendCommandGetResponse", $"begin command={command}, dataChars={data?.Length ?? 0}, timeoutMs={timeoutMs}");
-        using var pipe = ConnectPipeWithRetry(pipeName, projectPath, command, Math.Min(timeoutMs, PIPE_CONNECT_TIMEOUT_MS));
+        using var pipe = ConnectPipeWithProjectFallback(pipeName, projectPath, command, Math.Min(timeoutMs, PIPE_CONNECT_TIMEOUT_MS), out var effectivePipeName);
+        pipeName = effectivePipeName;
         CliTrace("SendCommandGetResponse", $"connected command={command}");
 
         string message = string.IsNullOrEmpty(data) ? command : $"{command}|{data}";
@@ -2065,6 +2172,9 @@ class Program
 
     static int WaitForCompilationAndReconnect(string pipeName, string projectPath, int timeoutSeconds, DateTime requestedAt)
     {
+        if (TryDiscoverPipeNameFromHeartbeat(projectPath, pipeName, out var discoveredPipeName))
+            pipeName = discoveredPipeName;
+
         CliTrace("WaitForCompilationAndReconnect", $"begin timeoutSec={timeoutSeconds}, requestedAt={requestedAt:O}");
         Console.WriteLine($"\n[CLI] Waiting for Unity to complete compilation (up to {timeoutSeconds} seconds)...");
         Console.WriteLine($"[CLI] Pipe name: {pipeName}");
@@ -4583,9 +4693,139 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         Console.WriteLine();
         InstallHooks(projectPath);
 
-        // Step 4: Generate assistant docs
+        // Step 4: Configure local sandbox pipe access for Codex-style assistants
+        Console.WriteLine();
+        ConfigureSandboxPipeAccess(projectPath);
+
+        // Step 5: Generate assistant docs
         Console.WriteLine();
         return HandleInstallForSetup(pipeName, projectPath, data);
+    }
+
+    static void ConfigureSandboxPipeAccess(string projectPath)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        try
+        {
+            string settingsDir = Path.Combine(projectPath, "ProjectSettings");
+            Directory.CreateDirectory(settingsDir);
+            string configPath = Path.Combine(settingsDir, "clibridge4unity.json");
+
+            var users = new List<string>();
+            if (File.Exists(configPath))
+            {
+                string existing = File.ReadAllText(configPath);
+                foreach (var user in ExtractJsonStringArray(existing, "pipeUsers"))
+                    if (!ContainsUser(users, user)) users.Add(user);
+            }
+
+            const string codexSandboxUser = "CodexSandboxOffline";
+            var sids = new List<string>();
+            if (File.Exists(configPath))
+            {
+                string existing = File.ReadAllText(configPath);
+                foreach (var sid in ExtractJsonStringArray(existing, "pipeUserSids"))
+                    if (!ContainsUser(sids, sid)) sids.Add(sid);
+            }
+
+            string codexSandboxSid = ResolveWindowsAccountSid(codexSandboxUser);
+            if (codexSandboxSid != null && !ContainsUser(users, codexSandboxUser))
+                users.Add(codexSandboxUser);
+            if (codexSandboxSid != null && !ContainsUser(sids, codexSandboxSid))
+                sids.Add(codexSandboxSid);
+
+            if (users.Count == 0 && sids.Count == 0)
+            {
+                Console.WriteLine("[OK] Sandbox pipe access: no known local sandbox user found");
+                return;
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine("{");
+            sb.AppendLine("  \"pipeUsers\": [");
+            for (int i = 0; i < users.Count; i++)
+            {
+                string comma = i + 1 < users.Count ? "," : "";
+                sb.AppendLine($"    \"{EscapeJson(users[i])}\"{comma}");
+            }
+            sb.AppendLine("  ],");
+            sb.AppendLine("  \"pipeUserSids\": [");
+            for (int i = 0; i < sids.Count; i++)
+            {
+                string comma = i + 1 < sids.Count ? "," : "";
+                sb.AppendLine($"    \"{EscapeJson(sids[i])}\"{comma}");
+            }
+            sb.AppendLine("  ]");
+            sb.AppendLine("}");
+            File.WriteAllText(configPath, sb.ToString());
+
+            Console.WriteLine($"[OK] Sandbox pipe access configured: {string.Join(", ", users)}");
+            Console.WriteLine("     Unity will apply this after the package recompiles/reloads.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[!!] Sandbox pipe access setup skipped: {ex.Message}");
+        }
+    }
+
+    static List<string> ExtractJsonStringArray(string json, string key)
+    {
+        var values = new List<string>();
+        if (string.IsNullOrWhiteSpace(json))
+            return values;
+
+        var match = System.Text.RegularExpressions.Regex.Match(
+            json,
+            $"\"{System.Text.RegularExpressions.Regex.Escape(key)}\"\\s*:\\s*\\[(.*?)\\]",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+        if (!match.Success)
+            return values;
+
+        foreach (System.Text.RegularExpressions.Match item in
+            System.Text.RegularExpressions.Regex.Matches(match.Groups[1].Value, "\"((?:\\\\.|[^\"])*)\""))
+        {
+            string value = item.Groups[1].Value
+                .Replace("\\\"", "\"")
+                .Replace("\\\\", "\\")
+                .Trim();
+            if (!string.IsNullOrEmpty(value))
+                values.Add(value);
+        }
+        return values;
+    }
+
+    static string EscapeJson(string value)
+    {
+        return (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"");
+    }
+
+    static bool WindowsAccountExists(string user)
+    {
+        return ResolveWindowsAccountSid(user) != null;
+    }
+
+    static string ResolveWindowsAccountSid(string user)
+    {
+        try
+        {
+            var account = new System.Security.Principal.NTAccount(user);
+            return account.Translate(typeof(System.Security.Principal.SecurityIdentifier)).Value;
+        }
+        catch { }
+
+        try
+        {
+            var account = new System.Security.Principal.NTAccount(Environment.MachineName, user);
+            return account.Translate(typeof(System.Security.Principal.SecurityIdentifier)).Value;
+        }
+        catch { return null; }
+    }
+
+    static bool ContainsUser(List<string> users, string user)
+    {
+        return users.Any(u => u.Equals(user, StringComparison.OrdinalIgnoreCase));
     }
 
     static int HandleHook()

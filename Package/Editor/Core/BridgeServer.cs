@@ -4,6 +4,12 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
 using System.Linq;
+#if UNITY_EDITOR_WIN
+using Microsoft.Win32.SafeHandles;
+using System.Security.AccessControl;
+using System.Security.Principal;
+#endif
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,7 +27,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.9";
+        public const string Version = "1.1.10";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -291,8 +297,7 @@ namespace clibridge4unity
                 NamedPipeServerStream pipe = null;
                 try
                 {
-                    pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut,
-                        NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                    pipe = CreatePipeServer(pipeName);
 
                     lock (serverLock)
                     {
@@ -345,6 +350,276 @@ namespace clibridge4unity
             }
             BridgeDiagnostics.Log("BridgeServer", $"listener {listenerId} loop exit");
         }
+
+        private static NamedPipeServerStream CreatePipeServer(string name)
+        {
+#if UNITY_EDITOR_WIN
+            var allowedSids = LoadConfiguredPipeSids();
+            if (allowedSids.Count > 0)
+            {
+                var securedPipe = TryCreateSecuredPipeServer(name, allowedSids);
+                if (securedPipe != null)
+                    return securedPipe;
+            }
+#endif
+            var pipe = new NamedPipeServerStream(name, PipeDirection.InOut,
+                NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+            return pipe;
+        }
+
+#if UNITY_EDITOR_WIN
+        private const int GenericAll = unchecked((int)0x10000000);
+        private const int GenericReadWrite = unchecked((int)0xC0000000);
+        private const uint TokenQuery = 0x0008;
+        private const uint PipeAccessDuplex = 0x00000003;
+        private const uint FileFlagOverlapped = 0x40000000;
+        private const uint PipeTypeByte = 0x00000000;
+        private const uint PipeReadModeByte = 0x00000000;
+        private const uint PipeWait = 0x00000000;
+        private const uint PipeUnlimitedInstances = 255;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SECURITY_ATTRIBUTES
+        {
+            public int nLength;
+            public IntPtr lpSecurityDescriptor;
+            public bool bInheritHandle;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafePipeHandle CreateNamedPipe(
+            string lpName,
+            uint dwOpenMode,
+            uint dwPipeMode,
+            uint nMaxInstances,
+            uint nOutBufferSize,
+            uint nInBufferSize,
+            uint nDefaultTimeOut,
+            ref SECURITY_ATTRIBUTES lpSecurityAttributes);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr LocalFree(IntPtr hMem);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(
+            IntPtr processHandle,
+            uint desiredAccess,
+            out IntPtr tokenHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool GetTokenInformation(
+            IntPtr tokenHandle,
+            int tokenInformationClass,
+            IntPtr tokenInformation,
+            int tokenInformationLength,
+            out int returnLength);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
+            string stringSecurityDescriptor,
+            uint stringSdRevision,
+            out IntPtr securityDescriptor,
+            out uint securityDescriptorSize);
+
+        private static NamedPipeServerStream TryCreateSecuredPipeServer(string name, List<SecurityIdentifier> allowedSids)
+        {
+            try
+            {
+                string sddl = BuildPipeSecuritySddl(allowedSids);
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, 1, out var securityDescriptor, out _))
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    BridgeDiagnostics.Log("BridgeServer", $"ConvertStringSecurityDescriptor failed: {error}");
+                    return null;
+                }
+
+                try
+                {
+                    var attributes = new SECURITY_ATTRIBUTES
+                    {
+                        nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES)),
+                        lpSecurityDescriptor = securityDescriptor,
+                        bInheritHandle = false
+                    };
+
+                    var handle = CreateNamedPipe(
+                        @"\\.\pipe\" + name,
+                        PipeAccessDuplex | FileFlagOverlapped,
+                        PipeTypeByte | PipeReadModeByte | PipeWait,
+                        PipeUnlimitedInstances,
+                        0,
+                        0,
+                        0,
+                        ref attributes);
+
+                    if (handle == null || handle.IsInvalid)
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        BridgeDiagnostics.Log("BridgeServer", $"CreateNamedPipe secured failed: {error}");
+                        handle?.Dispose();
+                        return null;
+                    }
+
+                    BridgeDiagnostics.Log("BridgeServer", "secured pipe created");
+                    return new NamedPipeServerStream(PipeDirection.InOut, true, false, handle);
+                }
+                finally
+                {
+                    LocalFree(securityDescriptor);
+                }
+            }
+            catch (Exception ex)
+            {
+                BridgeDiagnostics.LogException("BridgeServer secured pipe", ex);
+                return null;
+            }
+        }
+
+        private static string BuildPipeSecuritySddl(List<SecurityIdentifier> allowedSids)
+        {
+            if (!TryGetCurrentProcessSid(out var owner))
+                throw new InvalidOperationException("Could not resolve Unity process SID");
+
+            var sb = new StringBuilder();
+            sb.Append("D:");
+            sb.Append("(A;;GA;;;");
+            sb.Append(owner.Value);
+            sb.Append(")");
+
+            foreach (var sid in allowedSids)
+            {
+                sb.Append("(A;;GA;;;");
+                sb.Append(sid.Value);
+                sb.Append(")");
+                BridgeDiagnostics.Log("BridgeServer", $"pipe ACL SID allowed: {sid.Value}");
+            }
+
+            return sb.ToString();
+        }
+
+        private static List<SecurityIdentifier> LoadConfiguredPipeSids()
+        {
+            var sids = new List<SecurityIdentifier>();
+            try
+            {
+                string projectRoot = Application.dataPath.Replace("/Assets", "");
+                string configPath = Path.Combine(projectRoot, "ProjectSettings", "clibridge4unity.json");
+                if (!File.Exists(configPath))
+                    return sids;
+
+                string json = File.ReadAllText(configPath);
+                foreach (var sidValue in ReadJsonStringArray(json, "pipeUserSids"))
+                {
+                    try
+                    {
+                        var sid = new SecurityIdentifier(sidValue);
+                        if (!sids.Any(existing => existing.Value == sid.Value))
+                            sids.Add(sid);
+                    }
+                    catch (Exception ex)
+                    {
+                        BridgeDiagnostics.LogException($"BridgeServer pipe SID {sidValue}", ex);
+                    }
+                }
+
+                foreach (var user in ReadJsonStringArray(json, "pipeUsers"))
+                {
+                    if (TryResolveUserSid(user, out var sid) && !sids.Any(existing => existing.Value == sid.Value))
+                        sids.Add(sid);
+                }
+            }
+            catch (Exception ex)
+            {
+                BridgeDiagnostics.LogException("BridgeServer load pipe config", ex);
+            }
+            return sids;
+        }
+
+        private static List<string> ReadJsonStringArray(string json, string key)
+        {
+            var values = new List<string>();
+            try
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(
+                    json,
+                    "\"" + key + "\"\\s*:\\s*\\[(.*?)\\]",
+                    System.Text.RegularExpressions.RegexOptions.Singleline);
+                if (!match.Success)
+                    return values;
+
+                foreach (System.Text.RegularExpressions.Match item in
+                    System.Text.RegularExpressions.Regex.Matches(match.Groups[1].Value, "\"((?:\\\\.|[^\"])*)\""))
+                {
+                    string user = item.Groups[1].Value
+                        .Replace("\\\"", "\"")
+                        .Replace("\\\\", "\\")
+                        .Trim();
+                    if (!string.IsNullOrEmpty(user) && !values.Contains(user, StringComparer.OrdinalIgnoreCase))
+                        values.Add(user);
+                }
+            }
+            catch { }
+            return values;
+        }
+
+        private static bool TryResolveUserSid(string user, out SecurityIdentifier sid)
+        {
+            sid = null;
+            try
+            {
+                sid = (SecurityIdentifier)new NTAccount(user).Translate(typeof(SecurityIdentifier));
+                return true;
+            }
+            catch { }
+
+            try
+            {
+                sid = (SecurityIdentifier)new NTAccount(Environment.MachineName, user).Translate(typeof(SecurityIdentifier));
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static bool TryGetCurrentProcessSid(out SecurityIdentifier sid)
+        {
+            sid = null;
+            IntPtr token = IntPtr.Zero;
+            IntPtr buffer = IntPtr.Zero;
+            try
+            {
+                if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out token))
+                    return false;
+
+                GetTokenInformation(token, 1, IntPtr.Zero, 0, out int length);
+                if (length <= 0)
+                    return false;
+
+                buffer = Marshal.AllocHGlobal(length);
+                if (!GetTokenInformation(token, 1, buffer, length, out length))
+                    return false;
+
+                IntPtr sidPtr = Marshal.ReadIntPtr(buffer);
+                sid = new SecurityIdentifier(sidPtr);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                BridgeDiagnostics.LogException("BridgeServer process SID", ex);
+                return false;
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+                if (token != IntPtr.Zero) CloseHandle(token);
+            }
+        }
+#endif
 
         private static async Task HandleClientAndDispose(NamedPipeServerStream pipe, CancellationToken ct)
         {

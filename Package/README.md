@@ -25,7 +25,7 @@ Download `clibridge4unity` from [Releases](https://github.com/oddgames/clibridge
 The Unity package is installed automatically by `clibridge4unity SETUP`. To install manually via Unity Package Manager, use this git URL:
 
 ```
-https://github.com/oddgames/clibridge4unity.git?path=Package#v1.0.54
+https://github.com/oddgames/clibridge4unity.git?path=Package#v1.1.10
 ```
 
 **Important:** The `?path=Package` suffix is required — the `package.json` lives in the `Package/` subdirectory, not the repo root. Without it, Unity will report "Repository does not contain a package manifest."

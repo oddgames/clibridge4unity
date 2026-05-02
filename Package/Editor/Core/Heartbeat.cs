@@ -19,6 +19,8 @@ namespace clibridge4unity
 
         private static string _statusFile;
         private static string _projectName;
+        private static string _projectRoot;
+        private static string _pipeName;
         private static string _statusJsonStaticFields;
         private static int _pid;
         private static string _currentState;
@@ -45,10 +47,11 @@ namespace clibridge4unity
         private static void Initialize()
         {
             BridgeDiagnostics.Log("Heartbeat", "Initialize enter");
-            string projectRoot = Application.dataPath.Replace("/Assets", "");
-            string normalizedPath = projectRoot.ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
+            _projectRoot = Application.dataPath.Replace("/Assets", "");
+            string normalizedPath = _projectRoot.ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
             string hash = BridgeServer.GetDeterministicHashCode(normalizedPath).ToString("X8");
-            _projectName = Path.GetFileName(projectRoot.TrimEnd('/', '\\'));
+            _pipeName = $"UnityBridge_{Environment.UserName}_{hash}";
+            _projectName = Path.GetFileName(_projectRoot.TrimEnd('/', '\\'));
             string safeProjectName = SanitizeName(_projectName);
             _statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash}_{safeProjectName}.status");
             _pid = System.Diagnostics.Process.GetCurrentProcess().Id;
@@ -56,6 +59,8 @@ namespace clibridge4unity
                 $"  \"pid\": {_pid},\n" +
                 $"  \"version\": \"{EscapeJson(BridgeServer.Version)}\",\n" +
                 $"  \"project\": \"{EscapeJson(_projectName)}\",\n" +
+                $"  \"projectPath\": \"{EscapeJson(Path.GetFullPath(_projectRoot))}\",\n" +
+                $"  \"pipeName\": \"{EscapeJson(_pipeName)}\",\n" +
                 "  \"compileErrors\": false,\n" +
                 "  \"compileErrorCount\": 0,\n" +
                 "  \"compileTimeAvg\": 0,\n";
