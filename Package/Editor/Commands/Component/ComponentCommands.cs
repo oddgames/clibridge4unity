@@ -313,6 +313,8 @@ namespace clibridge4unity
                 if (opts.TargetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
                  || opts.TargetPath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
                 {
+                    if (!EditorApplication.isCompiling && !EditorApplication.isUpdating)
+                        AssetSyncHelper.EnsureSynced(opts.TargetPath);
                     return InspectAsset(opts);
                 }
 

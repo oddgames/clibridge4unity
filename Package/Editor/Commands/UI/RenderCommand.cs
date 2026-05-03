@@ -217,28 +217,17 @@ namespace clibridge4unity
         /// </summary>
         static async Task<string> RenderUxmlAsync(string uxmlPath, int width, int height, string elSelector = null)
         {
-            // Force-reimport the UXML and its USS dependencies so on-disk edits show up
+            // Force-reimport the UXML and its USS/TSS dependencies so on-disk edits show up
             // immediately — without this, AssetDatabase serves the previously imported version.
-            // Skip when Unity is mid-compile/import: ForceSynchronousImport on top of an
-            // in-progress operation can trigger cascading domain reloads.
+            // Skip when Unity is mid-compile/import: import on top of an in-progress operation
+            // can trigger cascading domain reloads.
             var uxml = await CommandRegistry.RunOnMainThreadAsync(() =>
             {
                 if (File.Exists(uxmlPath)
                     && !EditorApplication.isCompiling
                     && !EditorApplication.isUpdating)
                 {
-                    // ForceUpdate without ForceSynchronousImport: queues import without forcing
-                    // a refresh batch. Editor still imports on main thread before returning.
-                    const ImportAssetOptions opts = ImportAssetOptions.ForceUpdate;
-                    AssetDatabase.ImportAsset(uxmlPath, opts);
-                    foreach (var dep in AssetDatabase.GetDependencies(uxmlPath, recursive: true))
-                    {
-                        if (dep == uxmlPath) continue;
-                        if (dep.EndsWith(".uss", StringComparison.OrdinalIgnoreCase)
-                            || dep.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase)
-                            || dep.EndsWith(".tss", StringComparison.OrdinalIgnoreCase))
-                            AssetDatabase.ImportAsset(dep, opts);
-                    }
+                    AssetSyncHelper.EnsureUITreeSynced(uxmlPath);
                 }
                 return AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(uxmlPath);
             });
@@ -663,6 +652,11 @@ namespace clibridge4unity
 
         static string RenderPrefab(string prefabPath, int width, int height)
         {
+            // Ensure on-disk edits to the prefab (or any pending tracked change) are reflected
+            // in AssetDatabase before rendering. No-op if daemon isn't running.
+            if (!EditorApplication.isCompiling && !EditorApplication.isUpdating)
+                AssetSyncHelper.EnsureSynced(prefabPath);
+
             var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
             if (prefab == null)
                 return Response.Error($"Prefab not found: {prefabPath}{FuzzyAssetSearch(prefabPath)}");

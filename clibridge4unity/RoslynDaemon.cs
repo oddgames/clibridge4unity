@@ -254,6 +254,72 @@ static class RoslynDaemon
         int totalFilesToIndex = 0;
         var indexReady = new ManualResetEventSlim(false);
 
+        // Asset change tracking (latest event per path; older events superseded).
+        // Keyed by path; value = (kind, utcTicks, oldPath). Persisted to changes.log for Unity side.
+        var changeLog = new ConcurrentDictionary<string, (string Kind, long UtcTicks, string OldPath)>();
+        string changeLogPath = Path.Combine(daemonDir, "changes.log");
+        string lastCompiledPath = Path.Combine(daemonDir, "last-compiled.ticks");
+        var changeLogLock = new object();
+        var changeLogFlushPending = 0;
+        // Unity-style filter — only track paths that AssetDatabase considers (mirrors focus-refresh scope).
+        bool IsTrackedPath(string fullPath)
+        {
+            if (string.IsNullOrEmpty(fullPath)) return false;
+            string norm = fullPath.Replace('\\', '/');
+            // Skip transient or build dirs
+            if (norm.Contains("/Library/") || norm.Contains("/Temp/") ||
+                norm.Contains("/obj/") || norm.Contains("/Logs/") ||
+                norm.Contains("/.git/") || norm.Contains("/UserSettings/")) return false;
+            return true;
+        }
+        void RecordChange(string kind, string fullPath, string oldFullPath = null)
+        {
+            if (!IsTrackedPath(fullPath)) return;
+            long ticks = DateTime.UtcNow.Ticks;
+            changeLog[fullPath] = (kind, ticks, oldFullPath ?? "");
+            // Debounce disk flush — coalesce burst events into one write.
+            if (Interlocked.CompareExchange(ref changeLogFlushPending, 1, 0) == 0)
+            {
+                Task.Run(async () =>
+                {
+                    await Task.Delay(200);
+                    Interlocked.Exchange(ref changeLogFlushPending, 0);
+                    FlushChangeLog();
+                });
+            }
+        }
+        void FlushChangeLog()
+        {
+            try
+            {
+                lock (changeLogLock)
+                {
+                    long pruneBefore = 0;
+                    if (File.Exists(lastCompiledPath))
+                        long.TryParse(File.ReadAllText(lastCompiledPath).Trim(), out pruneBefore);
+
+                    var sb = new StringBuilder();
+                    foreach (var kvp in changeLog)
+                    {
+                        if (kvp.Value.UtcTicks <= pruneBefore)
+                        {
+                            changeLog.TryRemove(kvp.Key, out _);
+                            continue;
+                        }
+                        // Format: ticks\tkind\tpath\toldPath\n
+                        sb.Append(kvp.Value.UtcTicks).Append('\t')
+                          .Append(kvp.Value.Kind).Append('\t')
+                          .Append(kvp.Key).Append('\t')
+                          .Append(kvp.Value.OldPath).Append('\n');
+                    }
+                    string tmp = changeLogPath + ".tmp";
+                    File.WriteAllText(tmp, sb.ToString());
+                    File.Move(tmp, changeLogPath, overwrite: true);
+                }
+            }
+            catch { }
+        }
+
         // Phase 1 (background): Parse all source files. Pipe server starts in parallel
         // so queries can be answered (or queued with "still indexing" status) immediately.
         Task indexTask = Task.Run(() =>
@@ -295,25 +361,55 @@ static class RoslynDaemon
             catch { }
         }
 
+        bool IsCsFile(string p) => p != null && p.EndsWith(".cs", StringComparison.OrdinalIgnoreCase);
+
         FileSystemWatcher MakeWatcher(string root)
         {
-            var w = new FileSystemWatcher(root, "*.cs")
+            // Watch all files, all extensions — needed for asset change tracking
+            // (.meta, manifest.json, .asmdef, .asmref, .uxml, .uss, etc.).
+            // .cs handler still fires for Roslyn reparse; everything else only updates change log.
+            var w = new FileSystemWatcher(root)
             {
                 IncludeSubdirectories = true,
-                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName,
+                InternalBufferSize = 65536 // 64KB — handles bulk ops (git checkout, package install)
             };
-            w.Changed += (_, e) => Task.Run(() => OnFileChanged(e.FullPath));
-            w.Created += (_, e) => Task.Run(() => OnFileChanged(e.FullPath));
+            w.Changed += (_, e) =>
+            {
+                if (!IsTrackedPath(e.FullPath)) return;
+                RecordChange("M", e.FullPath);
+                if (IsCsFile(e.FullPath)) Task.Run(() => OnFileChanged(e.FullPath));
+            };
+            w.Created += (_, e) =>
+            {
+                if (!IsTrackedPath(e.FullPath)) return;
+                RecordChange("C", e.FullPath);
+                if (IsCsFile(e.FullPath)) Task.Run(() => OnFileChanged(e.FullPath));
+            };
             w.Renamed += (_, e) =>
             {
-                trees.TryRemove(e.OldFullPath, out SyntaxTree _);
-                fileTexts.TryRemove(e.OldFullPath, out string _);
-                Task.Run(() => OnFileChanged(e.FullPath));
+                if (!IsTrackedPath(e.FullPath) && !IsTrackedPath(e.OldFullPath)) return;
+                RecordChange("R", e.FullPath, e.OldFullPath);
+                if (IsCsFile(e.OldFullPath))
+                {
+                    trees.TryRemove(e.OldFullPath, out SyntaxTree _);
+                    fileTexts.TryRemove(e.OldFullPath, out string _);
+                }
+                if (IsCsFile(e.FullPath)) Task.Run(() => OnFileChanged(e.FullPath));
             };
             w.Deleted += (_, e) =>
             {
-                trees.TryRemove(e.FullPath, out SyntaxTree _2);
-                fileTexts.TryRemove(e.FullPath, out string _3);
+                if (!IsTrackedPath(e.FullPath)) return;
+                RecordChange("D", e.FullPath);
+                if (IsCsFile(e.FullPath))
+                {
+                    trees.TryRemove(e.FullPath, out SyntaxTree _2);
+                    fileTexts.TryRemove(e.FullPath, out string _3);
+                }
+            };
+            w.Error += (_, e) =>
+            {
+                Console.Error.WriteLine($"[daemon] watcher error: {e.GetException()?.Message}");
             };
             w.EnableRaisingEvents = true;
             return w;
@@ -377,12 +473,51 @@ static class RoslynDaemon
                         }
                         response = HandleAnalyze(trees, fileTexts, projectPath, query);
                         break;
+                    case "compile-changes":
+                    {
+                        // Query: ticks (UTC). Returns events with UtcTicks > sinceTicks, one per line.
+                        long.TryParse(query.Trim(), out long sinceTicks);
+                        var sb = new StringBuilder();
+                        foreach (var kvp in changeLog)
+                        {
+                            if (kvp.Value.UtcTicks <= sinceTicks) continue;
+                            sb.Append(kvp.Value.UtcTicks).Append('\t')
+                              .Append(kvp.Value.Kind).Append('\t')
+                              .Append(kvp.Key).Append('\t')
+                              .Append(kvp.Value.OldPath).Append('\n');
+                        }
+                        response = sb.Length > 0 ? sb.ToString().TrimEnd('\n') : "(none)";
+                        break;
+                    }
+                    case "compile-mark":
+                    {
+                        // Mark all events up to ticks as compiled — daemon prunes them.
+                        if (long.TryParse(query.Trim(), out long compiledTicks))
+                        {
+                            try { File.WriteAllText(lastCompiledPath, compiledTicks.ToString()); } catch { }
+                            int pruned = 0;
+                            foreach (var kvp in changeLog)
+                            {
+                                if (kvp.Value.UtcTicks <= compiledTicks)
+                                {
+                                    if (changeLog.TryRemove(kvp.Key, out _)) pruned++;
+                                }
+                            }
+                            FlushChangeLog();
+                            response = $"pruned: {pruned}\nremaining: {changeLog.Count}";
+                        }
+                        else
+                        {
+                            response = "Error: ticks required";
+                        }
+                        break;
+                    }
                     case "shutdown":
                         response = "shutting down";
                         shutdownCts.Cancel();
                         break;
                     default:
-                        response = "endpoints: health, status, analyze, search, shutdown";
+                        response = "endpoints: health, status, analyze, search, compile-changes, compile-mark, shutdown";
                         break;
                 }
 

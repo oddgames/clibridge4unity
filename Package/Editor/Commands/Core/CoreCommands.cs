@@ -21,18 +21,107 @@ namespace clibridge4unity
         private static double _lastWindowListTime = -10;
         private static string[] _cachedWindowList = new string[0];
 
-        /// <summary>
-        /// Check if any compile-relevant files under Assets/ or Packages/ have been modified since last compile.
-        /// Scans .cs, .asmdef, .asmref. Uses Directory.EnumerateFiles for lazy evaluation — stops early if possible.
-        /// </summary>
-        private static bool ScriptsModifiedSinceCompile()
+        public struct ChangedScript
         {
-            if (!long.TryParse(SessionState.GetString(SessionKeys.LastCompileTime, "0"), out var ticks) || ticks <= 0)
-                return true; // No compile recorded, assume modified
+            public string path;
+            public string mtime; // ISO 8601 local time
+            public string kind;  // M=modified, C=created, D=deleted, R=renamed, S=scan-detected
 
-            var lastCompile = new System.DateTime(ticks);
+            public override string ToString() => $"{mtime}  {kind}  {path}";
+        }
+
+        public struct ScriptScanResult
+        {
+            public bool hasLastCompile;
+            public System.DateTime lastCompile; // local time
+            public List<ChangedScript> changed;
+            public List<ChangedScript> deleted; // separate for clarity in response
+            public int changedCount;
+            public int deletedCount;
+            public bool scanFailed;
+            public bool daemonAvailable;
+        }
+
+        /// <summary>
+        /// Scan compile-relevant files under Assets/ or Packages/ and return any modified since last compile.
+        /// Scans .cs, .asmdef, .asmref. Caps detail list at maxList entries; full count tracked separately.
+        /// </summary>
+        private static ScriptScanResult ScanModifiedScripts(int maxList = 20)
+        {
+            var result = new ScriptScanResult
+            {
+                changed = new List<ChangedScript>(),
+                deleted = new List<ChangedScript>()
+            };
+
+            if (!long.TryParse(SessionState.GetString(SessionKeys.LastCompileTime, "0"), out var ticks) || ticks <= 0)
+            {
+                result.hasLastCompile = false;
+                return result; // No compile recorded — caller treats as modified
+            }
+
+            result.hasLastCompile = true;
+            result.lastCompile = new System.DateTime(ticks);
+            long lastCompileUtcTicks = result.lastCompile.ToUniversalTime().Ticks;
             var projectRoot = Directory.GetParent(Application.dataPath).FullName;
-            var roots = new[] { Path.Combine(projectRoot, "Assets"), Path.Combine(projectRoot, "Packages") };
+
+            // Step 1: Merge daemon's FileSystemWatcher change log (deletion-aware, real-time).
+            // Daemon tracks ALL file events under Assets/ and Packages/ — covers deletions,
+            // renames, and changes Unity hasn't been told about yet.
+            var seenPaths = new HashSet<string>();
+            try
+            {
+                string changeLogPath = Path.Combine(projectRoot, ".clibridge4unity", "changes.log");
+                if (File.Exists(changeLogPath))
+                {
+                    result.daemonAvailable = true;
+                    foreach (var line in File.ReadAllLines(changeLogPath))
+                    {
+                        if (string.IsNullOrEmpty(line)) continue;
+                        var parts = line.Split('\t');
+                        if (parts.Length < 3) continue;
+                        if (!long.TryParse(parts[0], out long evtTicks)) continue;
+                        if (evtTicks <= lastCompileUtcTicks) continue;
+                        string kind = parts[1];
+                        string fullPath = parts[2];
+                        string oldPath = parts.Length > 3 ? parts[3] : "";
+                        var local = new System.DateTime(evtTicks, System.DateTimeKind.Utc).ToLocalTime();
+
+                        // Restrict to compile-relevant extensions for the result list (still covers
+                        // .meta and assets via daemon, but COMPILE-skip logic only cares about scripts).
+                        bool compileRelevant = IsCompileRelevantExt(fullPath) || IsCompileRelevantExt(oldPath);
+                        if (!compileRelevant) continue;
+
+                        var entry = new ChangedScript
+                        {
+                            path = MakeRelativePath(projectRoot, fullPath),
+                            mtime = local.ToString("yyyy-MM-dd HH:mm:ss"),
+                            kind = kind
+                        };
+                        if (kind == "D")
+                        {
+                            result.deletedCount++;
+                            if (result.deleted.Count < maxList) result.deleted.Add(entry);
+                        }
+                        else
+                        {
+                            result.changedCount++;
+                            seenPaths.Add(fullPath);
+                            if (result.changed.Count < maxList) result.changed.Add(entry);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Daemon log unreadable — fall through to mtime scan
+            }
+
+            // Step 2: mtime scan — covers cases the daemon missed (started after a change,
+            // or external file modifications that bypassed the FSW).
+            var roots = new List<string> { Path.Combine(projectRoot, "Assets"), Path.Combine(projectRoot, "Packages") };
+            // UPM `file:` deps (e.g. `file:../../MyPackage`) resolve outside Packages/ — scan their actual locations too.
+            roots.AddRange(GetLocalFilePackageRoots(projectRoot));
             var patterns = new[] { "*.cs", "*.asmdef", "*.asmref" };
 
             try
@@ -42,14 +131,85 @@ namespace clibridge4unity
                     if (!Directory.Exists(root)) continue;
                     foreach (var pattern in patterns)
                     {
-                        if (Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories)
-                            .Any(f => File.GetLastWriteTime(f) > lastCompile))
-                            return true;
+                        foreach (var f in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories))
+                        {
+                            if (seenPaths.Contains(f)) continue;
+                            var mtime = File.GetLastWriteTime(f);
+                            if (mtime <= result.lastCompile) continue;
+
+                            result.changedCount++;
+                            if (result.changed.Count < maxList)
+                            {
+                                result.changed.Add(new ChangedScript
+                                {
+                                    path = MakeRelativePath(projectRoot, f),
+                                    mtime = mtime.ToString("yyyy-MM-dd HH:mm:ss"),
+                                    kind = "S" // scan-detected
+                                });
+                            }
+                        }
                     }
                 }
-                return false;
             }
-            catch { return true; } // If scan fails, assume modified
+            catch
+            {
+                result.scanFailed = true;
+            }
+
+            // Sort displayed list by most recent first for readability
+            result.changed.Sort((a, b) => string.CompareOrdinal(b.mtime, a.mtime));
+            result.deleted.Sort((a, b) => string.CompareOrdinal(b.mtime, a.mtime));
+            return result;
+        }
+
+        private static bool IsCompileRelevantExt(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            return path.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".asmdef", System.StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".asmref", System.StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static IEnumerable<string> GetLocalFilePackageRoots(string projectRoot)
+        {
+            var result = new List<string>();
+            string manifestPath = Path.Combine(projectRoot, "Packages", "manifest.json");
+            if (!File.Exists(manifestPath)) return result;
+
+            string manifestDir = Path.GetDirectoryName(manifestPath);
+            try
+            {
+                string text = File.ReadAllText(manifestPath);
+                // Match every `"file:..."` value in the JSON. Sufficient for manifest.json's flat schema.
+                var matches = System.Text.RegularExpressions.Regex.Matches(
+                    text, "\"file:([^\"]+)\"");
+                foreach (System.Text.RegularExpressions.Match m in matches)
+                {
+                    string rel = m.Groups[1].Value.Trim();
+                    if (string.IsNullOrEmpty(rel)) continue;
+                    string full = Path.GetFullPath(Path.Combine(manifestDir, rel));
+                    if (Directory.Exists(full)) result.Add(full);
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        private static string MakeRelativePath(string root, string full)
+        {
+            if (string.IsNullOrEmpty(full)) return full;
+            string normalizedRoot = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (full.StartsWith(normalizedRoot, System.StringComparison.OrdinalIgnoreCase))
+                return full.Substring(normalizedRoot.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    .Replace('\\', '/');
+            return full.Replace('\\', '/');
+        }
+
+        private static bool ScriptsModifiedSinceCompile()
+        {
+            var scan = ScanModifiedScripts(maxList: 0);
+            if (!scan.hasLastCompile || scan.scanFailed) return true;
+            return scan.changedCount > 0;
         }
 
         private static bool ScriptsModifiedSinceCompileCached(double maxAgeSeconds = 1.0)
@@ -247,9 +407,9 @@ namespace clibridge4unity
             });
         }
 
-        [BridgeCommand("COMPILE", "Force script recompilation",
+        [BridgeCommand("COMPILE", "Force script recompilation. Pass 'force' to bypass the no-change skip check.",
             Category = "Core",
-            Usage = "COMPILE",
+            Usage = "COMPILE [force]",
             Streaming = false,
             RequiresMainThread = true,
             TimeoutSeconds = 300,
@@ -258,6 +418,9 @@ namespace clibridge4unity
         {
             if (EditorApplication.isPlaying)
                 return Response.Error("Cannot compile during play mode. Use STOP first.");
+
+            bool force = !string.IsNullOrWhiteSpace(data) &&
+                         data.Trim().Equals("force", System.StringComparison.OrdinalIgnoreCase);
 
             // Already compiling/updating? Don't stack — return immediately, caller waits.
             if (EditorApplication.isCompiling || EditorApplication.isUpdating)
@@ -271,30 +434,123 @@ namespace clibridge4unity
                 });
             }
 
-            // No script changes since last compile? Skip — avoids needless domain reload.
-            if (!ScriptsModifiedSinceCompile())
+            var scan = ScanModifiedScripts();
+            string lastCompileStr = scan.hasLastCompile ? scan.lastCompile.ToString("yyyy-MM-dd HH:mm:ss") : "never";
+
+            // No script changes since last compile? Skip — avoids needless domain reload (unless force).
+            if (!force && scan.hasLastCompile && !scan.scanFailed
+                && scan.changedCount == 0 && scan.deletedCount == 0)
             {
                 // Scripts are clean — any stale compile errors in state are false positives, clear them.
                 LogCommands.ClearCompileErrors();
+                string skipNote = scan.daemonAvailable
+                    ? "Detection backed by clibridge4unity daemon FileSystemWatcher (deletion-aware)."
+                    : "Daemon not running — falling back to mtime scan; deletions/renames preserving mtime are NOT detected. Pass 'COMPILE force' to override.";
                 return Response.SuccessWithData(new
                 {
-                    message = "No script changes since last compile. Skipped.",
+                    message = "No script changes detected since last compile. Skipped.",
                     skipped = true,
-                    reconnect = false
+                    reconnect = false,
+                    lastCompileTime = lastCompileStr,
+                    daemonAvailable = scan.daemonAvailable,
+                    changedFileCount = 0,
+                    deletedFileCount = 0,
+                    changedFiles = new ChangedScript[0],
+                    deletedFiles = new ChangedScript[0],
+                    note = skipNote
                 });
             }
 
-            // Targeted: recompile scripts only, no asset reimport.
-            // AssetDatabase.Refresh would reimport all dirty assets and risk cascading reloads
-            // from package hooks (Addressables, GooglePlayServicesResolver, etc.).
+            // Pre-compile sync: ensure Unity's AssetDatabase sees the same changes our mtime scan saw.
+            // Without this, RequestScriptCompilation may use stale assembly state if Unity hasn't
+            // refreshed since focus was lost (common when bridge writes files programmatically).
+            int reimportedCount = 0;
+            int deletedCount = 0;
+            string syncStrategy;
+            if (force)
+            {
+                // Force path: full sweep — catches deletions/renames our scan misses, deletion-aware.
+                AssetDatabase.Refresh(ImportAssetOptions.Default);
+                syncStrategy = "AssetDatabase.Refresh (full sweep, deletion-aware)";
+            }
+            else if (scan.changedCount > 0 || scan.deletedCount > 0)
+            {
+                // Surgical: import detected changes + delete detected deletions. Avoids full sweep.
+                foreach (var f in scan.changed)
+                {
+                    string p = f.path;
+                    if (string.IsNullOrEmpty(p)) continue;
+                    // ImportAsset only accepts asset-relative paths (Assets/... or Packages/...).
+                    if (!p.StartsWith("Assets/", System.StringComparison.OrdinalIgnoreCase) &&
+                        !p.StartsWith("Packages/", System.StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    try
+                    {
+                        AssetDatabase.ImportAsset(p, ImportAssetOptions.ForceUpdate);
+                        reimportedCount++;
+                    }
+                    catch { }
+                }
+                foreach (var f in scan.deleted)
+                {
+                    string p = f.path;
+                    if (string.IsNullOrEmpty(p)) continue;
+                    if (!p.StartsWith("Assets/", System.StringComparison.OrdinalIgnoreCase) &&
+                        !p.StartsWith("Packages/", System.StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    // DeleteAsset is no-op if Unity already removed it; safe to call defensively.
+                    try
+                    {
+                        if (AssetDatabase.DeleteAsset(p)) deletedCount++;
+                    }
+                    catch { }
+                }
+                syncStrategy = $"surgical (ImportAsset x{reimportedCount}, DeleteAsset x{deletedCount})";
+            }
+            else
+            {
+                syncStrategy = "none (no changes detected)";
+            }
+
+            // Mark daemon's change log as compiled so it prunes events up to now.
+            try
+            {
+                string daemonDir = Path.Combine(Directory.GetParent(Application.dataPath).FullName, ".clibridge4unity");
+                if (Directory.Exists(daemonDir))
+                {
+                    File.WriteAllText(Path.Combine(daemonDir, "last-compiled.ticks"),
+                        System.DateTime.UtcNow.Ticks.ToString());
+                }
+            }
+            catch { }
+
             CompilationPipeline.RequestScriptCompilation();
             EditorApplication.QueuePlayerLoopUpdate();
+
+            string trigger = force
+                ? (scan.changedCount > 0
+                    ? $"Forced. {scan.changedCount} changed file(s) also detected since last compile."
+                    : "Forced. No mtime changes detected since last compile (deletions/renames suspected).")
+                : (scan.hasLastCompile
+                    ? $"{scan.changedCount} changed file(s) detected since last compile."
+                    : "No prior compile recorded — running fresh.");
 
             return Response.SuccessWithData(new
             {
                 message = "Compilation requested. Unity will reload assemblies - connection will be lost during reload.",
                 timeoutSeconds = 300,
-                reconnect = true
+                reconnect = true,
+                forced = force,
+                daemonAvailable = scan.daemonAvailable,
+                lastCompileTime = lastCompileStr,
+                trigger,
+                preCompileSync = syncStrategy,
+                reimportedCount,
+                deletedAssetCount = deletedCount,
+                changedFileCount = scan.changedCount,
+                deletedFileCount = scan.deletedCount,
+                changedFiles = scan.changed,
+                deletedFiles = scan.deleted
             });
         }
 

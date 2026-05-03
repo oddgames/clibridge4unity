@@ -12,6 +12,7 @@ using System.IO.Compression;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Linq;
+using System.Security.Principal;
 using System.Text;
 using System.Net.Http;
 using System.Threading;
@@ -1620,17 +1621,106 @@ class Program
 
     static NamedPipeClientStream ConnectPipeWithProjectFallback(string pipeName, string projectPath, string command, int timeoutMs, out string effectivePipeName)
     {
-        effectivePipeName = pipeName;
+        // If heartbeat reports a pipe owned by a different user (sandbox/service account scenario),
+        // prefer that name immediately to avoid wasting the full timeout on a guaranteed miss.
+        string preferredPipeName = pipeName;
+        if (TryDiscoverPipeNameFromHeartbeat(projectPath, pipeName, out var earlyDiscovered)
+            && !string.IsNullOrWhiteSpace(earlyDiscovered)
+            && !string.Equals(earlyDiscovered, pipeName, StringComparison.Ordinal))
+        {
+            CliTrace("ConnectPipe", $"heartbeat overrides pipe name: {pipeName} -> {earlyDiscovered}");
+            preferredPipeName = earlyDiscovered;
+        }
+
+        effectivePipeName = preferredPipeName;
         try
         {
-            return ConnectPipeWithRetry(pipeName, projectPath, command, timeoutMs);
+            return ConnectPipeWithRetry(preferredPipeName, projectPath, command, timeoutMs);
         }
-        catch (TimeoutException) when (TryDiscoverPipeNameFromHeartbeat(projectPath, pipeName, out var discoveredPipeName))
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new PipeAccessDeniedException(preferredPipeName, projectPath, ex);
+        }
+        catch (TimeoutException) when (preferredPipeName == pipeName
+            && TryDiscoverPipeNameFromHeartbeat(projectPath, pipeName, out var discoveredPipeName))
         {
             Console.Error.WriteLine($"[CLI] Pipe '{pipeName}' timed out; retrying discovered pipe '{discoveredPipeName}' from heartbeat.");
             effectivePipeName = discoveredPipeName;
-            return ConnectPipeWithRetry(discoveredPipeName, projectPath, command, timeoutMs);
+            try
+            {
+                return ConnectPipeWithRetry(discoveredPipeName, projectPath, command, timeoutMs);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                throw new PipeAccessDeniedException(discoveredPipeName, projectPath, ex);
+            }
         }
+    }
+
+    sealed class PipeAccessDeniedException : Exception
+    {
+        public string PipeName { get; }
+        public string ProjectPath { get; }
+        public PipeAccessDeniedException(string pipeName, string projectPath, Exception inner)
+            : base($"Access denied to Unity bridge pipe '{pipeName}'.", inner)
+        {
+            PipeName = pipeName;
+            ProjectPath = projectPath;
+        }
+    }
+
+    static string ParsePipeOwnerUser(string pipeName)
+    {
+        // Format: UnityBridge_{User}_{Hash}
+        if (string.IsNullOrEmpty(pipeName)) return null;
+        var match = System.Text.RegularExpressions.Regex.Match(pipeName, @"^UnityBridge_(.+)_[0-9A-Fa-f]{8}$");
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    static string TryGetCurrentUserSid()
+    {
+        try
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            return identity?.User?.Value;
+        }
+        catch { return null; }
+    }
+
+    static void EmitPipeAccessDeniedHelp(string pipeName, string projectPath)
+    {
+        string callerUser = Environment.UserName;
+        string callerSid = TryGetCurrentUserSid();
+        string ownerUser = ParsePipeOwnerUser(pipeName);
+        string configPath = !string.IsNullOrEmpty(projectPath)
+            ? Path.Combine(Path.GetFullPath(projectPath), "ProjectSettings", "clibridge4unity.json")
+            : @"<project>\ProjectSettings\clibridge4unity.json";
+
+        Console.Error.WriteLine($"Error: Access denied to Unity bridge pipe '{pipeName}'.");
+        if (!string.IsNullOrEmpty(ownerUser) && !string.Equals(ownerUser, callerUser, StringComparison.OrdinalIgnoreCase))
+            Console.Error.WriteLine($"       Pipe owner='{ownerUser}', current user='{callerUser}' — Unity ACL does not grant access.");
+        else
+            Console.Error.WriteLine($"       Current user='{callerUser}' is not on Unity's pipe ACL.");
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("Fix: whitelist this user on Unity's pipe ACL.");
+        Console.Error.WriteLine($"  1) Edit (or create) {configPath}");
+        Console.Error.WriteLine("  2) Add an entry under \"pipeUsers\" or \"pipeUserSids\":");
+        if (!string.IsNullOrEmpty(callerSid))
+        {
+            Console.Error.WriteLine("       {");
+            Console.Error.WriteLine($"         \"pipeUserSids\": [\"{callerSid}\"],");
+            Console.Error.WriteLine($"         \"pipeUsers\":    [\"{callerUser}\"]");
+            Console.Error.WriteLine("       }");
+        }
+        else
+        {
+            Console.Error.WriteLine("       {");
+            Console.Error.WriteLine($"         \"pipeUsers\": [\"{callerUser}\"]");
+            Console.Error.WriteLine("       }");
+        }
+        Console.Error.WriteLine("  3) Restart Unity Editor (or run COMPILE) so server rebuilds the pipe with the new ACL.");
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("Note: ACL applies only to NEW pipe instances; existing connections keep old DACL until restart.");
     }
 
     static NamedPipeClientStream ConnectPipeWithRetry(string pipeName, string projectPath, string command, int timeoutMs)
@@ -1907,6 +1997,13 @@ class Program
 
             CliTrace("SendCommand", $"success command={command}, responseChars={response.Length}");
             return EXIT_SUCCESS;
+        }
+        catch (PipeAccessDeniedException ex)
+        {
+            CliTrace("SendCommand", $"access denied command={command}, pipe={ex.PipeName}");
+            EmitPipeAccessDeniedHelp(ex.PipeName, ex.ProjectPath);
+            Console.Error.Write(BuildDiagnosticReport(projectPath));
+            return EXIT_CONNECTION;
         }
         catch (TimeoutException)
         {

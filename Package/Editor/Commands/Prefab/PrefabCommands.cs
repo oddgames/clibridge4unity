@@ -241,6 +241,9 @@ namespace clibridge4unity
                     }
                 }
 
+                if (!EditorApplication.isCompiling && !EditorApplication.isUpdating)
+                    AssetSyncHelper.EnsureSynced(prefabPath);
+
                 var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
                 if (prefab == null)
                     return Response.ErrorAssetNotFound(prefabPath, "Prefab");
