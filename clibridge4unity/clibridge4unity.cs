@@ -378,6 +378,281 @@ class Program
     /// `SESSIONS` command — list other CLI agents currently active on this project.
     /// Pure presence; no Unity pipe, no locking.
     /// </summary>
+    static int HandleReadyCommand(string projectPath, string data)
+    {
+        // Parse args: optional --timeout <seconds>, optional state filter (default: ready).
+        int timeoutSeconds = 60;
+        string targetState = "ready";
+        string args = data ?? "";
+        var tokens = args.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            if (tokens[i].Equals("--timeout", StringComparison.OrdinalIgnoreCase) && i + 1 < tokens.Length)
+            {
+                int.TryParse(tokens[++i], out timeoutSeconds);
+            }
+            else if (tokens[i].StartsWith("--", StringComparison.Ordinal))
+            {
+                continue; // unknown flag — ignore
+            }
+            else
+            {
+                targetState = tokens[i].ToLowerInvariant();
+            }
+        }
+        if (timeoutSeconds <= 0) timeoutSeconds = 60;
+
+        var sw = Stopwatch.StartNew();
+        string lastState = null;
+        long lastTimestamp = 0;
+        while (sw.Elapsed.TotalSeconds < timeoutSeconds)
+        {
+            (string state, long timestamp, bool found) = ReadHeartbeatState(projectPath);
+            if (found)
+            {
+                lastState = state;
+                lastTimestamp = timestamp;
+                bool match = string.Equals(state, targetState, StringComparison.OrdinalIgnoreCase);
+                // For 'ready' target, also accept 'paused' as valid — Editor not blocked.
+                if (!match && targetState == "ready" && state == "paused") match = true;
+
+                if (match)
+                {
+                    long staleSec = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - timestamp;
+                    Console.WriteLine($"state: {state}");
+                    Console.WriteLine($"elapsedMs: {sw.ElapsedMilliseconds}");
+                    Console.WriteLine($"heartbeatAgeSeconds: {staleSec}");
+                    return EXIT_SUCCESS;
+                }
+            }
+            Thread.Sleep(200);
+        }
+
+        Console.Error.WriteLine($"Error: timeout after {timeoutSeconds}s waiting for state='{targetState}'.");
+        Console.Error.WriteLine($"       lastObservedState: {lastState ?? "(no heartbeat)"}");
+        if (lastTimestamp > 0)
+            Console.Error.WriteLine($"       lastHeartbeatAgeSec: {DateTimeOffset.UtcNow.ToUnixTimeSeconds() - lastTimestamp}");
+        return EXIT_TIMEOUT;
+    }
+
+    static (string state, long timestamp, bool found) ReadHeartbeatState(string projectPath)
+    {
+        try
+        {
+            string projectName = GetProjectName(projectPath);
+            string expectedProjectPath = NormalizeProjectPath(projectPath);
+            string tempPath = Path.GetTempPath();
+            foreach (var file in Directory.GetFiles(tempPath, $"clibridge4unity_*_{projectName}.status"))
+            {
+                try
+                {
+                    string json = File.ReadAllText(file);
+                    string projPathFromStatus = UnescapeJsonString(ExtractJsonString(json, "projectPath"));
+                    if (!string.IsNullOrEmpty(projPathFromStatus) &&
+                        NormalizeProjectPath(projPathFromStatus) != expectedProjectPath)
+                        continue;
+                    string state = UnescapeJsonString(ExtractJsonString(json, "state"));
+                    long timestamp = 0;
+                    var tsMatch = System.Text.RegularExpressions.Regex.Match(json, "\"timestamp\"\\s*:\\s*(\\d+)");
+                    if (tsMatch.Success) long.TryParse(tsMatch.Groups[1].Value, out timestamp);
+                    if (!string.IsNullOrEmpty(state)) return (state, timestamp, true);
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return (null, 0, false);
+    }
+
+    static int HandleReferencesCommand(string projectPath, string data)
+    {
+        if (string.IsNullOrWhiteSpace(data))
+        {
+            Console.Error.WriteLine("Usage: REFERENCES <asset-path-or-symbol>");
+            Console.Error.WriteLine("  REFERENCES Assets/Prefabs/Foo.prefab   (find scenes/prefabs/SOs that reference this asset)");
+            Console.Error.WriteLine("  REFERENCES MyClass                     (delegated to CODE_ANALYZE)");
+            Console.Error.WriteLine("  REFERENCES MyClass.MyMethod            (delegated to CODE_ANALYZE)");
+            return EXIT_USAGE_ERROR;
+        }
+
+        string target = data.Trim();
+        bool isAssetPath = target.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
+                        || target.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase)
+                        || target.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)
+                        || target.EndsWith(".asset", StringComparison.OrdinalIgnoreCase)
+                        || target.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)
+                        || target.EndsWith(".mat", StringComparison.OrdinalIgnoreCase)
+                        || target.EndsWith(".controller", StringComparison.OrdinalIgnoreCase);
+
+        if (isAssetPath)
+            return HandleReferencesAsset(projectPath, target);
+
+        // Code symbol — delegate to Roslyn daemon's analyze endpoint (CODE_ANALYZE already
+        // returns usages for class/method/field queries).
+        string daemonPipe = RoslynDaemon.GetRunningPipe(projectPath) ?? RoslynDaemon.StartBackground(projectPath);
+        if (daemonPipe == null)
+        {
+            Console.Error.WriteLine("Error: Roslyn daemon unavailable for code symbol references.");
+            return EXIT_COMMAND_ERROR;
+        }
+        string result = QueryDaemonWithIndexingHeartbeat(daemonPipe, "analyze", target);
+        if (result == null)
+        {
+            Console.Error.WriteLine("Error: daemon did not respond.");
+            return EXIT_COMMAND_ERROR;
+        }
+        Console.WriteLine(result);
+        return result.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+    }
+
+    static int HandleReferencesAsset(string projectPath, string assetPath)
+    {
+        // Read GUID from the asset's .meta file.
+        string fullAssetPath = Path.IsPathRooted(assetPath) ? assetPath : Path.Combine(projectPath, assetPath);
+        string metaPath = fullAssetPath + ".meta";
+        if (!File.Exists(metaPath))
+        {
+            Console.Error.WriteLine($"Error: meta file not found: {metaPath}");
+            return EXIT_USAGE_ERROR;
+        }
+
+        string guid = null;
+        try
+        {
+            foreach (var line in File.ReadAllLines(metaPath))
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(line, @"^guid:\s*([0-9a-fA-F]{32})");
+                if (m.Success) { guid = m.Groups[1].Value; break; }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error reading meta: {ex.Message}");
+            return EXIT_COMMAND_ERROR;
+        }
+
+        if (string.IsNullOrEmpty(guid))
+        {
+            Console.Error.WriteLine($"Error: could not extract GUID from {metaPath}");
+            return EXIT_COMMAND_ERROR;
+        }
+
+        Console.Error.WriteLine($"[refs] target: {assetPath}");
+        Console.Error.WriteLine($"[refs] guid: {guid}");
+
+        // Search for the GUID across all asset files (.prefab, .unity, .asset, .mat, .controller, .anim, etc.)
+        // YAML serialization stores asset references as `guid: <hex>`.
+        var roots = new List<string> { Path.Combine(projectPath, "Assets"), Path.Combine(projectPath, "Packages") };
+        var hits = new List<(string Path, int LineNumber, string Line)>();
+        var assetExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".prefab", ".unity", ".asset", ".mat", ".controller", ".anim", ".overrideController",
+            ".playable", ".mixer", ".shadergraph", ".shadersubgraph", ".vfx", ".lighting", ".uxml", ".uss"
+        };
+
+        var sw = Stopwatch.StartNew();
+        int filesScanned = 0;
+        foreach (var root in roots)
+        {
+            if (!Directory.Exists(root)) continue;
+            foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            {
+                if (file.Equals(fullAssetPath, StringComparison.OrdinalIgnoreCase)) continue;
+                if (file.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)) continue;
+                string ext = Path.GetExtension(file);
+                if (!assetExts.Contains(ext)) continue;
+
+                try
+                {
+                    filesScanned++;
+                    string[] lines = File.ReadAllLines(file);
+                    for (int i = 0; i < lines.Length; i++)
+                    {
+                        if (lines[i].IndexOf(guid, StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            hits.Add((file, i + 1, lines[i].Trim()));
+                            // First hit per file is enough for the summary; keep scanning for richer line context if needed.
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+        sw.Stop();
+
+        // Group by file to deduplicate
+        var byFile = hits
+            .GroupBy(h => h.Path)
+            .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        Console.WriteLine($"references: {byFile.Count}");
+        Console.WriteLine($"filesScanned: {filesScanned}");
+        Console.WriteLine($"elapsedMs: {sw.ElapsedMilliseconds}");
+        if (byFile.Count == 0)
+        {
+            Console.WriteLine("(no references found — asset is unused)");
+            return EXIT_SUCCESS;
+        }
+        Console.WriteLine();
+        foreach (var grp in byFile)
+        {
+            string rel = MakeRelativeProjectPath(projectPath, grp.Key);
+            Console.WriteLine($"{rel}");
+            foreach (var hit in grp.Take(3))
+                Console.WriteLine($"  L{hit.LineNumber}: {Truncate(hit.Line, 120)}");
+            if (grp.Count() > 3)
+                Console.WriteLine($"  ... +{grp.Count() - 3} more reference(s)");
+        }
+        return EXIT_SUCCESS;
+    }
+
+    static string MakeRelativeProjectPath(string projectPath, string fullPath)
+    {
+        try
+        {
+            string norm = Path.GetFullPath(projectPath).TrimEnd('/', '\\');
+            string full = Path.GetFullPath(fullPath);
+            if (full.StartsWith(norm, StringComparison.OrdinalIgnoreCase))
+                return full.Substring(norm.Length).TrimStart('\\', '/').Replace('\\', '/');
+            return fullPath.Replace('\\', '/');
+        }
+        catch { return fullPath; }
+    }
+
+    static string Truncate(string s, int max)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        return s.Length <= max ? s : s.Substring(0, max - 3) + "...";
+    }
+
+    static bool IsDaemonAutostartSkippedFor(string cmdUpper)
+    {
+        // Skip for commands that don't benefit from daemon, or manage daemon lifecycle themselves.
+        switch (cmdUpper)
+        {
+            case "DAEMON":
+            case "HOOK":
+            case "UPDATE":
+            case "SERVE":
+            case "SETUP":
+            case "INSTALL":
+            case "PREFLIGHT":
+            case "SESSIONS":
+            case "PING":
+            case "PROBE":
+            case "DIAG":
+            case "WAKEUP":
+            case "DISMISS":
+            case "OPEN":
+            case "CLOSE":
+            case "VERSION":
+                return true;
+            default:
+                return false;
+        }
+    }
+
     static int HandleSessionsCommand(string projectPath)
     {
         string selfId = $"cli-{Process.GetCurrentProcess().Id:X}";
@@ -801,6 +1076,19 @@ class Program
         }
         catch { }
 
+        // Daemon autostart — fire and forget. Daemon provides FileSystemWatcher-based change tracking
+        // for COMPILE/SCREENSHOT/INSPECTOR. Skipped for commands that don't need it or that manage
+        // the daemon themselves.
+        if (!IsDaemonAutostartSkippedFor(cmdUpper))
+        {
+            try
+            {
+                if (RoslynDaemon.GetRunningPipe(projectPath) == null)
+                    Task.Run(() => { try { RoslynDaemon.StartBackground(projectPath); } catch { } });
+            }
+            catch { }
+        }
+
         // Quick manifest check: warn if UPM package not installed (skip setup/install paths)
         if (!command.Equals("SETUP", StringComparison.OrdinalIgnoreCase) &&
             !command.Equals("INSTALL", StringComparison.OrdinalIgnoreCase) &&
@@ -825,6 +1113,19 @@ class Program
             command.Equals("INSTALL", StringComparison.OrdinalIgnoreCase))
         {
             return HandleSetup(pipeName, projectPath, data);
+        }
+
+        // READY: poll heartbeat status file until Unity is idle (no compile/import/reload in progress).
+        // CLI-side — works without a pipe connection. Useful before scripted command sequences.
+        if (cmdUpper == "READY")
+        {
+            return HandleReadyCommand(projectPath, data);
+        }
+
+        // REFERENCES: find what references an asset (GUID grep) or a code symbol (Roslyn daemon).
+        if (cmdUpper == "REFERENCES" || cmdUpper == "REFS")
+        {
+            return HandleReferencesCommand(projectPath, data);
         }
 
         // DISMISS: close dialogs or click specific buttons — works on ANY Unity process, no pipe needed

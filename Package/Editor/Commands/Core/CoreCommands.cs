@@ -209,7 +209,52 @@ namespace clibridge4unity
         {
             var scan = ScanModifiedScripts(maxList: 0);
             if (!scan.hasLastCompile || scan.scanFailed) return true;
-            return scan.changedCount > 0;
+            return scan.changedCount > 0 || scan.deletedCount > 0;
+        }
+
+        /// <summary>
+        /// Thread-safe (no SessionState/Application access) compile recommendation derived
+        /// from the daemon's change log. Used by DIAG which runs off the main thread.
+        /// Returns (recommended, pendingChanges, pendingDeletions, reason).
+        /// </summary>
+        public static (bool recommended, int changes, int deletions, string reason) GetCompileRecommendationFromLog(string projectRoot)
+        {
+            try
+            {
+                string changeLogPath = Path.Combine(projectRoot, ".clibridge4unity", "changes.log");
+                string lastCompiledPath = Path.Combine(projectRoot, ".clibridge4unity", "last-compiled.ticks");
+                if (!File.Exists(changeLogPath))
+                    return (false, 0, 0, "daemon not running — cannot determine pending changes");
+
+                long lastCompiledTicks = 0;
+                if (File.Exists(lastCompiledPath))
+                    long.TryParse(File.ReadAllText(lastCompiledPath).Trim(), out lastCompiledTicks);
+
+                int changes = 0, deletions = 0;
+                foreach (var line in File.ReadAllLines(changeLogPath))
+                {
+                    if (string.IsNullOrEmpty(line)) continue;
+                    var parts = line.Split('\t');
+                    if (parts.Length < 3) continue;
+                    if (!long.TryParse(parts[0], out long ticks)) continue;
+                    if (ticks <= lastCompiledTicks) continue;
+                    string kind = parts[1];
+                    string path = parts[2];
+                    if (!IsCompileRelevantExt(path) && (parts.Length < 4 || !IsCompileRelevantExt(parts[3])))
+                        continue;
+                    if (kind == "D") deletions++;
+                    else changes++;
+                }
+
+                int total = changes + deletions;
+                if (total == 0) return (false, 0, 0, "no script changes since last compile");
+                return (true, changes, deletions,
+                    $"{changes} changed + {deletions} deleted script file(s) since last compile — run COMPILE");
+            }
+            catch (System.Exception ex)
+            {
+                return (false, 0, 0, $"check failed: {ex.GetType().Name}");
+            }
         }
 
         private static bool ScriptsModifiedSinceCompileCached(double maxAgeSeconds = 1.0)
@@ -294,8 +339,15 @@ namespace clibridge4unity
             sb.AppendLine($"pid: {pid}");
             sb.AppendLine($"processName: {System.Diagnostics.Process.GetCurrentProcess().ProcessName}");
             sb.AppendLine($"dataPath: {UnityEngine.Application.dataPath}");
-            string projName = System.IO.Path.GetFileName(UnityEngine.Application.dataPath.Replace("/Assets", ""));
+            string projRoot = UnityEngine.Application.dataPath.Replace("/Assets", "");
+            string projName = System.IO.Path.GetFileName(projRoot);
             sb.AppendLine($"projectName: {projName}");
+            sb.AppendLine("--- compile recommendation ---");
+            var rec = GetCompileRecommendationFromLog(projRoot);
+            sb.AppendLine($"compileRecommended: {rec.recommended}");
+            sb.AppendLine($"pendingChanges: {rec.changes}");
+            sb.AppendLine($"pendingDeletions: {rec.deletions}");
+            sb.AppendLine($"reason: {rec.reason}");
             sb.AppendLine("--- windows for this PID ---");
             CommandRegistry.EnumProcessWindows(pid, sb);
             sb.AppendLine("--- all Unity-titled windows ---");
@@ -397,6 +449,10 @@ namespace clibridge4unity
                 currentScene,
                 currentScenePath,
                 scriptsModified = ScriptsModifiedSinceCompileCached(),
+                compileRecommended = ScriptsModifiedSinceCompileCached() && !EditorApplication.isCompiling,
+                compileRecommendation = ScriptsModifiedSinceCompileCached() && !EditorApplication.isCompiling
+                    ? "Run COMPILE — script changes detected since last compile."
+                    : (EditorApplication.isCompiling ? "Compilation in progress." : "Up to date."),
                 lastCompileRequest = lastCompileRequestStr,
                 lastCompileFinished = lastCompileStr,
                 compileTimeAvg,
