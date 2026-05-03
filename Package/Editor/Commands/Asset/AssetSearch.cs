@@ -58,26 +58,41 @@ namespace clibridge4unity
                 if (results.Count == 0)
                     return $"No results for: {query}";
 
-                var sb = new StringBuilder();
-                sb.AppendLine($"Found {results.Count} results for: {query}");
-                sb.AppendLine();
-
-                foreach (var item in results.Take(maxResults))
+                // Dedupe by asset path — Unity Search can return the same asset from multiple
+                // providers (asset, scene, animation, etc.) which spam the result list.
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var rows = new List<(string path, string extra)>();
+                int dupesSkipped = 0;
+                foreach (var item in results)
                 {
                     var path = GetItemPath(item);
                     var desc = item.GetDescription(item.context);
 
-                    if (!string.IsNullOrEmpty(path))
-                    {
-                        sb.AppendLine($"  {path}");
-                        if (!string.IsNullOrEmpty(desc) && desc != path)
-                            sb.AppendLine($"    {desc}");
-                    }
+                    string key = !string.IsNullOrEmpty(path) ? path : (item.label ?? item.id);
+                    if (string.IsNullOrEmpty(key)) continue;
+                    if (!seen.Add(key)) { dupesSkipped++; continue; }
+
+                    // Pick the most informative single line. desc usually = "path (size)".
+                    // If desc contains path, use desc as-is. Else fall back to path or label.
+                    string display;
+                    if (!string.IsNullOrEmpty(desc) && !string.IsNullOrEmpty(path)
+                        && desc.IndexOf(path, StringComparison.Ordinal) >= 0)
+                        display = desc;
+                    else if (!string.IsNullOrEmpty(path))
+                        display = path;
                     else
-                    {
-                        sb.AppendLine($"  {item.label ?? item.id}");
-                    }
+                        display = item.label ?? item.id;
+
+                    rows.Add((key, display));
+                    if (rows.Count >= maxResults) break;
                 }
+
+                var sb = new StringBuilder();
+                string countSuffix = dupesSkipped > 0 ? $" ({dupesSkipped} duplicate(s) merged)" : "";
+                sb.AppendLine($"Found {rows.Count} results for: {query}{countSuffix}");
+                sb.AppendLine();
+                foreach (var row in rows)
+                    sb.AppendLine($"  {row.extra}");
 
                 return sb.ToString().TrimEnd();
             }

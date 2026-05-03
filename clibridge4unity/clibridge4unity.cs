@@ -851,18 +851,30 @@ class Program
             if (!manifest.Contains($"\"{UPM_PACKAGE_NAME}\"")) return;
 
             string targetTag = $"#v{targetVersion}";
-            if (manifest.Contains(targetTag))
+
+            // Scope replacement to ONLY the clibridge4unity entry. The previous implementation
+            // used a project-wide regex that clobbered version tags on every au.com.oddgames.*
+            // (or any) package in the manifest, breaking unrelated dependencies.
+            // Match the package's value string and rewrite the #vX.Y.Z inside it.
+            string escapedName = System.Text.RegularExpressions.Regex.Escape(UPM_PACKAGE_NAME);
+            var entryPattern = new System.Text.RegularExpressions.Regex(
+                "(\"" + escapedName + "\"\\s*:\\s*\"[^\"]*?)#v\\d+\\.\\d+\\.\\d+([^\"]*?\")");
+
+            var match = entryPattern.Match(manifest);
+            if (!match.Success)
+                return; // No version tag on our entry — leave it alone.
+
+            // Already at target?
+            if (match.Value.Contains(targetTag))
             {
                 Console.WriteLine($"  UPM package already at v{targetVersion}");
                 return;
             }
 
-            // Find and replace any existing version tag (#vX.Y.Z)
-            var tagPattern = new System.Text.RegularExpressions.Regex(@"#v\d+\.\d+\.\d+");
-            if (tagPattern.IsMatch(manifest))
+            string updated = entryPattern.Replace(manifest, m => m.Groups[1].Value + targetTag + m.Groups[2].Value, 1);
+            if (updated != manifest)
             {
-                manifest = tagPattern.Replace(manifest, targetTag);
-                File.WriteAllText(manifestPath, manifest);
+                File.WriteAllText(manifestPath, updated);
                 Console.WriteLine($"  Updated UPM package tag in manifest.json → v{targetVersion}");
             }
         }

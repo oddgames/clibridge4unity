@@ -1,7 +1,7 @@
 # clibridge4unity installer for Windows
 # Usage: irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex
 #   or:  .\install.ps1                      # install latest
-#   or:  .\install.ps1 -Version 1.1.13      # install specific version
+#   or:  .\install.ps1 -Version 1.1.14      # install specific version
 
 param(
     [string]$Version = "",
