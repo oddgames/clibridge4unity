@@ -22,8 +22,8 @@ namespace clibridge4unity
         private static string[] _cachedWindowList = new string[0];
 
         /// <summary>
-        /// Check if any .cs files under Assets/ or Packages/ have been modified since last compile.
-        /// Uses Directory.EnumerateFiles for lazy evaluation — stops early if possible.
+        /// Check if any compile-relevant files under Assets/ or Packages/ have been modified since last compile.
+        /// Scans .cs, .asmdef, .asmref. Uses Directory.EnumerateFiles for lazy evaluation — stops early if possible.
         /// </summary>
         private static bool ScriptsModifiedSinceCompile()
         {
@@ -31,12 +31,23 @@ namespace clibridge4unity
                 return true; // No compile recorded, assume modified
 
             var lastCompile = new System.DateTime(ticks);
-            var assetsPath = Application.dataPath; // .../Assets
+            var projectRoot = Directory.GetParent(Application.dataPath).FullName;
+            var roots = new[] { Path.Combine(projectRoot, "Assets"), Path.Combine(projectRoot, "Packages") };
+            var patterns = new[] { "*.cs", "*.asmdef", "*.asmref" };
 
             try
             {
-                return Directory.EnumerateFiles(assetsPath, "*.cs", SearchOption.AllDirectories)
-                    .Any(f => File.GetLastWriteTime(f) > lastCompile);
+                foreach (var root in roots)
+                {
+                    if (!Directory.Exists(root)) continue;
+                    foreach (var pattern in patterns)
+                    {
+                        if (Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories)
+                            .Any(f => File.GetLastWriteTime(f) > lastCompile))
+                            return true;
+                    }
+                }
+                return false;
             }
             catch { return true; } // If scan fails, assume modified
         }
