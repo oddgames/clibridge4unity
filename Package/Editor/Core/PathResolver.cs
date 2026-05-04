@@ -66,39 +66,57 @@ namespace clibridge4unity
             return scored.OrderByDescending(x => x.score).Take(max).Select(x => x.path).ToList();
         }
 
-        /// <summary>Top `max` asset paths whose filename resembles the failed `path`'s filename.</summary>
+        /// <summary>Top `max` asset paths whose filename resembles the failed `path`'s filename.
+        /// Two-pass: AssetDatabase.FindAssets fast path, then full enumeration with fuzzy
+        /// scoring (handles typos / acronyms that Unity Search tokenizer misses).</summary>
         public static List<string> SuggestAsset(string path, int max = 5)
         {
             if (string.IsNullOrWhiteSpace(path)) return new List<string>();
             string stem = Path.GetFileNameWithoutExtension(path);
             if (string.IsNullOrEmpty(stem)) return new List<string>();
+            string needle = stem.ToLowerInvariant();
 
-            // AssetDatabase.FindAssets does fuzzy filename matching.
-            var guids = AssetDatabase.FindAssets(stem);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var results = new List<string>();
-            foreach (var g in guids)
+
+            // Pass 1: Unity's tokenizer-based search (cheap, hits exact/prefix names).
+            foreach (var g in AssetDatabase.FindAssets(stem))
             {
                 string p = AssetDatabase.GUIDToAssetPath(g);
                 if (string.IsNullOrEmpty(p) || p.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!seen.Add(p)) continue;
                 results.Add(p);
-                if (results.Count >= max) break;
+                if (results.Count >= max) return results;
             }
+
+            // Pass 2: enumerate all asset paths and fuzzy-rank by filename. Catches
+            // typos / partial / acronym queries Unity Search drops. Capped for big projects.
+            const int enumerationCap = 30000;
+            var scored = new List<(int score, string path)>();
+            var allPaths = AssetDatabase.GetAllAssetPaths();
+            int budget = Math.Min(allPaths.Length, enumerationCap);
+            for (int i = 0; i < budget; i++)
+            {
+                string p = allPaths[i];
+                if (string.IsNullOrEmpty(p)) continue;
+                if (!p.StartsWith("Assets/", StringComparison.Ordinal)
+                 && !p.StartsWith("Packages/", StringComparison.Ordinal)) continue;
+                if (p.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)) continue;
+                if (seen.Contains(p)) continue;
+
+                string fileStem = Path.GetFileNameWithoutExtension(p);
+                int s = NameSimilarity(fileStem, needle);
+                if (s >= 30) scored.Add((s, p));
+            }
+            foreach (var (_, p) in scored.OrderByDescending(x => x.score).Take(max - results.Count))
+                results.Add(p);
             return results;
         }
 
-        static int NameSimilarity(string candidate, string needleLower)
-        {
-            string c = candidate.ToLowerInvariant();
-            if (c == needleLower) return 100;
-            if (c.StartsWith(needleLower, StringComparison.Ordinal)) return 80;
-            if (c.Contains(needleLower)) return 60;
-
-            // Partial token overlap (split on separators — handles "Main_Camera" vs "MainCamera").
-            int score = 0;
-            foreach (var tok in needleLower.Split(new[] { ' ', '/', '_', '-', '.' }, StringSplitOptions.RemoveEmptyEntries))
-                if (tok.Length >= 3 && c.Contains(tok)) score += 10;
-            return score;
-        }
+        /// <summary>Fuzzy similarity score 0..100. Wraps shared <see cref="FuzzyMatch.Score"/>.
+        /// `needleLower` MUST be lowercased by caller.</summary>
+        public static int NameSimilarity(string candidate, string needleLower)
+            => FuzzyMatch.Score(candidate, needleLower);
 
         static string LastSegment(string path)
         {

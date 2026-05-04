@@ -684,6 +684,62 @@ internal static class CodeAnalysisCore
         return results;
     }
 
+    /// <summary>Fuzzy-rank declared type names across `allTrees` against `needle`.
+    /// Used to add "Did you mean" suggestions to a not-found CODE_ANALYZE response.</summary>
+    public static List<string> SuggestTypeNames(IReadOnlyDictionary<string, SyntaxTree> allTrees, string needle, int max = 5)
+    {
+        if (string.IsNullOrWhiteSpace(needle) || allTrees == null || allTrees.Count == 0)
+            return new List<string>();
+
+        // Strip dotted prefix + generics so suggestion matches the actual identifier.
+        string ident = needle.Trim();
+        int lastDot = ident.LastIndexOf('.');
+        if (lastDot > 0) ident = ident.Substring(lastDot + 1);
+        ident = StripGenericsAndArrays(ident);
+        if (ident.Length == 0) return new List<string>();
+        string needleLower = ident.ToLowerInvariant();
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var scored = new List<(int score, string name)>();
+        foreach (var kvp in allTrees)
+        {
+            SyntaxNode root;
+            try { root = kvp.Value.GetRoot(); } catch { continue; }
+            foreach (var td in root.DescendantNodes().OfType<BaseTypeDeclarationSyntax>())
+            {
+                string name = td.Identifier.Text;
+                if (string.IsNullOrEmpty(name) || !seen.Add(name)) continue;
+                int s = FuzzyMatch.Score(name, needleLower);
+                if (s >= 30) scored.Add((s, name));
+            }
+            foreach (var dd in root.DescendantNodes().OfType<DelegateDeclarationSyntax>())
+            {
+                string name = dd.Identifier.Text;
+                if (string.IsNullOrEmpty(name) || !seen.Add(name)) continue;
+                int s = FuzzyMatch.Score(name, needleLower);
+                if (s >= 30) scored.Add((s, name));
+            }
+        }
+        return scored.OrderByDescending(x => x.score).Take(max).Select(x => x.name).ToList();
+    }
+
+    /// <summary>Append "Did you mean:" lines to a not-found Analyze response. No-op if response
+    /// isn't a not-found error or no suggestions found.</summary>
+    public static string AppendSuggestionsIfMissing(string analyzeResponse, IReadOnlyDictionary<string, SyntaxTree> allTrees, string query)
+    {
+        if (string.IsNullOrEmpty(analyzeResponse) || !analyzeResponse.StartsWith("Error: '", StringComparison.Ordinal))
+            return analyzeResponse;
+        if (analyzeResponse.IndexOf("' not found", StringComparison.Ordinal) < 0)
+            return analyzeResponse;
+        var suggestions = SuggestTypeNames(allTrees, query);
+        if (suggestions.Count == 0) return analyzeResponse;
+        var sb = new StringBuilder(analyzeResponse);
+        sb.AppendLine();
+        sb.AppendLine("Did you mean:");
+        foreach (var s in suggestions) sb.AppendLine($"  {s}");
+        return sb.ToString().TrimEnd();
+    }
+
     static string StripGenericsAndArrays(string s)
     {
         if (string.IsNullOrEmpty(s)) return s;

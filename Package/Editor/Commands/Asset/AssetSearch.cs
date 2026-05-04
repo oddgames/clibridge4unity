@@ -56,7 +56,16 @@ namespace clibridge4unity
                 }
 
                 if (results.Count == 0)
-                    return $"No results for: {query}";
+                {
+                    var sbMiss = new StringBuilder();
+                    sbMiss.Append($"No results for: {query}");
+                    // Strip Unity Search modifiers (t:, l:, ref:, shader:, area:, etc.) so
+                    // PathResolver fuzzy-matches against the bare name token the user typed.
+                    string needle = ExtractSearchNeedle(query);
+                    if (!string.IsNullOrEmpty(needle))
+                        PathResolver.Append(sbMiss, needle, PathResolver.SuggestKind.Asset);
+                    return sbMiss.ToString();
+                }
 
                 // Dedupe by asset path — Unity Search can return the same asset from multiple
                 // providers (asset, scene, animation, etc.) which spam the result list.
@@ -324,6 +333,21 @@ namespace clibridge4unity
         }
 
         #region Helpers
+
+        /// <summary>Strip Unity Search modifiers (`t:`, `l:`, `ref:`, etc.) and return the
+        /// largest bare token — used as the needle for "did you mean" suggestions.</summary>
+        private static string ExtractSearchNeedle(string query)
+        {
+            if (string.IsNullOrWhiteSpace(query)) return null;
+            string best = null;
+            foreach (var tok in query.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (tok.Contains(':')) continue;
+                if (tok.StartsWith("*") || tok.StartsWith("-")) continue;
+                if (best == null || tok.Length > best.Length) best = tok;
+            }
+            return best ?? query.Trim();
+        }
 
         private static string GetItemPath(SearchItem item)
         {

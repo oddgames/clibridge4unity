@@ -5576,7 +5576,41 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             });
 
             sw.Stop();
-            return CodeAnalysisCore.Analyze(trees, texts, projectPath, query, sw.ElapsedMilliseconds, allFiles.Length);
+            var resp = CodeAnalysisCore.Analyze(trees, texts, projectPath, query, sw.ElapsedMilliseconds, allFiles.Length);
+            // Not-found suggestions: re-parse skipped (too costly for single-pass) — fuzzy-rank
+            // against file stems instead, which by Unity convention match type names.
+            if (resp.StartsWith("Error: '", StringComparison.Ordinal) && resp.Contains("' not found"))
+            {
+                string ident = query.Trim();
+                int lastDot = ident.LastIndexOf('.');
+                if (lastDot > 0) ident = ident.Substring(lastDot + 1);
+                int lt = ident.IndexOf('<');
+                if (lt > 0) ident = ident.Substring(0, lt);
+                while (ident.EndsWith("[]")) ident = ident.Substring(0, ident.Length - 2);
+                if (ident.Length > 0)
+                {
+                    string needleLower = ident.ToLowerInvariant();
+                    var scored = new List<(int score, string name)>();
+                    var seen = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var f in allFiles)
+                    {
+                        string stem = Path.GetFileNameWithoutExtension(f);
+                        if (string.IsNullOrEmpty(stem) || !seen.Add(stem)) continue;
+                        int s = FuzzyMatch.Score(stem, needleLower);
+                        if (s >= 30) scored.Add((s, stem));
+                    }
+                    var top = scored.OrderByDescending(x => x.score).Take(5).Select(x => x.name).ToList();
+                    if (top.Count > 0)
+                    {
+                        var sb = new StringBuilder(resp);
+                        sb.AppendLine();
+                        sb.AppendLine("Did you mean:");
+                        foreach (var s in top) sb.AppendLine($"  {s}");
+                        resp = sb.ToString().TrimEnd();
+                    }
+                }
+            }
+            return resp;
         }
     }
 

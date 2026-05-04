@@ -446,9 +446,12 @@ namespace clibridge4unity
                 return Response.ErrorAssetNotFound(assetPath, "Prefab");
 
             var matches = new List<(string path, GameObject go)>();
+            // Collect every node so we can fuzzy-suggest if zero substring hits.
+            var allNodes = new List<(string path, string name)>();
             void Walk(Transform t, string path)
             {
                 string full = string.IsNullOrEmpty(path) ? t.name : path + "/" + t.name;
+                allNodes.Add((full, t.name));
                 foreach (var n in names)
                     if (t.name.IndexOf(n, StringComparison.OrdinalIgnoreCase) >= 0)
                     {
@@ -460,7 +463,30 @@ namespace clibridge4unity
             Walk(prefab.transform, "");
 
             if (matches.Count == 0)
-                return Response.Error($"No GameObjects in {assetPath} matching [{string.Join(",", names)}]");
+            {
+                // Fuzzy "did you mean" suggestions across all prefab children.
+                var suggestions = new List<(int score, string path)>();
+                foreach (var n in names)
+                {
+                    string needleLower = n.ToLowerInvariant();
+                    foreach (var node in allNodes)
+                    {
+                        int s = PathResolver.NameSimilarity(node.name, needleLower);
+                        if (s >= 30) suggestions.Add((s, node.path));
+                    }
+                }
+                var top = suggestions.OrderByDescending(x => x.score)
+                    .Select(x => x.path).Distinct().Take(5).ToArray();
+                var sb = new StringBuilder();
+                sb.Append($"Error: No GameObjects in {assetPath} matching [{string.Join(",", names)}]");
+                if (top.Length > 0)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("Did you mean:");
+                    foreach (var p in top) sb.AppendLine($"  {p}");
+                }
+                return sb.ToString();
+            }
 
             return Response.SuccessWithData(new
             {

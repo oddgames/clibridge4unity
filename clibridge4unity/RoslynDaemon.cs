@@ -645,6 +645,8 @@ static class RoslynDaemon
         }
 
         sw.Stop();
-        return CodeAnalysisCore.Analyze(matchingTrees, matchingTexts, projectPath, query, sw.ElapsedMilliseconds, trees.Count);
+        var resp = CodeAnalysisCore.Analyze(matchingTrees, matchingTexts, projectPath, query, sw.ElapsedMilliseconds, trees.Count);
+        // Full trees needed for "did you mean" — pre-filter eliminates candidates on miss.
+        return CodeAnalysisCore.AppendSuggestionsIfMissing(resp, trees, query);
     }
 }
