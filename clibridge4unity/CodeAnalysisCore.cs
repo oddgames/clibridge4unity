@@ -756,6 +756,6 @@ internal static class CodeAnalysisCore
         if (items.Count > cap) sb.AppendLine($"  ... +{items.Count - cap} more");
     }
 
-    static string ToRelativePath(string file, string projectPath)
+    internal static string ToRelativePath(string file, string projectPath)
         => file.Replace(projectPath + "\\", "").Replace(projectPath + "/", "");
 }

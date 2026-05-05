@@ -238,6 +238,7 @@ static class RoslynDaemon
     {
         string assetsDir = Path.Combine(projectPath, "Assets");
         string packagesDir = Path.Combine(projectPath, "Packages");
+        string packageCacheDir = Path.Combine(projectPath, "Library", "PackageCache");
         if (!Directory.Exists(assetsDir))
         {
             Console.Error.WriteLine("Error: Assets/ directory not found.");
@@ -253,6 +254,10 @@ static class RoslynDaemon
         var fileTexts = new ConcurrentDictionary<string, string>();
         int totalFilesToIndex = 0;
         var indexReady = new ManualResetEventSlim(false);
+
+        // DLL index — built in background after .cs parse completes. Used as fallback
+        // when CODE_ANALYZE can't find a type in source (precompiled plugins, package DLLs).
+        var dllIndex = new DllIndex(projectPath);
 
         // Asset change tracking (latest event per path; older events superseded).
         // Keyed by path; value = (kind, utcTicks, oldPath). Persisted to changes.log for Unity side.
@@ -329,14 +334,23 @@ static class RoslynDaemon
             var allFiles = new List<string>(Directory.EnumerateFiles(assetsDir, "*.cs", SearchOption.AllDirectories));
             if (Directory.Exists(packagesDir))
                 allFiles.AddRange(Directory.EnumerateFiles(packagesDir, "*.cs", SearchOption.AllDirectories));
+            // Library/PackageCache holds UPM-resolved package source. Unity treats these
+            // as part of the compile, so CODE_ANALYZE must too. No watcher — UPM rewrites
+            // these on package install/update, daemon restart picks up the change.
+            if (Directory.Exists(packageCacheDir))
+                allFiles.AddRange(Directory.EnumerateFiles(packageCacheDir, "*.cs", SearchOption.AllDirectories));
             Interlocked.Exchange(ref totalFilesToIndex, allFiles.Count);
 
+            // C# language version: Latest matches Unity 6's LangVersion default. Without this
+            // Roslyn defaults to 7.3 and falsely flags C# 8+ features (target-typed new, records,
+            // single-element tuples in xliff_core_2.0.cs, file-scoped namespaces, etc.).
+            var defaultParseOpts = CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Latest);
             Parallel.ForEach(allFiles, file =>
             {
                 try
                 {
                     string text = File.ReadAllText(file);
-                    trees[file] = CSharpSyntaxTree.ParseText(text, path: file);
+                    trees[file] = CSharpSyntaxTree.ParseText(text, defaultParseOpts, file);
                     fileTexts[file] = text;
                 }
                 catch { }
@@ -344,6 +358,22 @@ static class RoslynDaemon
             sw.Stop();
             Console.Error.WriteLine($" {trees.Count} files in {sw.ElapsedMilliseconds}ms");
             indexReady.Set();
+
+            // Phase 1b: Index plugin DLLs after source. Cheap (Cecil reads metadata only)
+            // but parallelisable — runs without blocking source-only queries.
+            Task.Run(() =>
+            {
+                try
+                {
+                    Console.Error.Write("Indexing DLLs...");
+                    dllIndex.Build();
+                    Console.Error.WriteLine($" {dllIndex.TypeCount} types in {dllIndex.DllCount} DLLs ({dllIndex.BuildMs}ms)");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"\n[daemon] DLL index build failed: {ex.GetType().Name}: {ex.Message}");
+                }
+            });
         });
 
         // Phase 2: File watcher (covers both Assets and Packages)
@@ -354,7 +384,8 @@ static class RoslynDaemon
             {
                 Thread.Sleep(100); // debounce
                 string text = File.ReadAllText(filePath);
-                trees[filePath] = CSharpSyntaxTree.ParseText(text, path: filePath);
+                var opts = CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Latest);
+                trees[filePath] = CSharpSyntaxTree.ParseText(text, opts, filePath);
                 fileTexts[filePath] = text;
                 Interlocked.Increment(ref reParseCount);
             }
@@ -460,7 +491,7 @@ static class RoslynDaemon
                         response = indexReady.IsSet ? "ok" : "indexing";
                         break;
                     case "status":
-                        response = $"files: {trees.Count}/{Volatile.Read(ref totalFilesToIndex)}\nready: {indexReady.IsSet}\nreparses: {reParseCount}\nuptime: {(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds:F0}s\nproject: {projectPath}";
+                        response = $"files: {trees.Count}/{Volatile.Read(ref totalFilesToIndex)}\nready: {indexReady.IsSet}\nreparses: {reParseCount}\ndlls: {dllIndex.DllCount} ({dllIndex.TypeCount} types, ready={dllIndex.Ready})\nuptime: {(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds:F0}s\nproject: {projectPath}";
                         break;
                     case "analyze":
                         // Don't block the connection on indexing — return a progress sentinel
@@ -472,6 +503,7 @@ static class RoslynDaemon
                             break;
                         }
                         response = HandleAnalyze(trees, fileTexts, projectPath, query);
+                        response = AugmentWithDllHits(response, dllIndex, query);
                         break;
                     case "compile-changes":
                     {
@@ -512,12 +544,31 @@ static class RoslynDaemon
                         }
                         break;
                     }
+                    case "lint":
+                    {
+                        // Syntax check across every cached SyntaxTree. Daemon FileSystemWatcher
+                        // sees new files Unity hasn't seen → catches errors in just-added .cs files.
+                        // Query: "" (syntax-only, default), "warnings", "semantic" (+ Unity DLL binding),
+                        //        "semantic warnings" (semantic + warnings).
+                        if (!indexReady.IsSet)
+                        {
+                            response = $"__indexing:{trees.Count}/{Volatile.Read(ref totalFilesToIndex)}";
+                            break;
+                        }
+                        string q = (query ?? "").Trim().ToLowerInvariant();
+                        bool semantic = q.Contains("semantic") || q.Contains("full");
+                        bool includeWarnings = q.Contains("warning");
+                        response = semantic
+                            ? RunSemanticLint(trees, projectPath, includeWarnings)
+                            : RunSyntaxLint(trees, projectPath, includeWarnings);
+                        break;
+                    }
                     case "shutdown":
                         response = "shutting down";
                         shutdownCts.Cancel();
                         break;
                     default:
-                        response = "endpoints: health, status, analyze, search, compile-changes, compile-mark, shutdown";
+                        response = "endpoints: health, status, analyze, search, lint, compile-changes, compile-mark, shutdown";
                         break;
                 }
 
@@ -616,6 +667,65 @@ static class RoslynDaemon
     // in clibridge4unity.cs can share the same logic. This wrapper filters the long-lived
     // trees/fileTexts cache to files matching the query and hands them to the core.
 
+    /// <summary>If <paramref name="response"/> indicates source-only Analyze couldn't pin
+    /// the type and the DLL index has a hit, prepend a DLL-defined report.
+    /// Skipped for kind-prefixed queries (`method:`, `field:`, etc.) — those are listings, not type lookups.</summary>
+    static string AugmentWithDllHits(string response, DllIndex dllIndex, string query)
+    {
+        if (dllIndex == null) return response;
+        if (string.IsNullOrWhiteSpace(query)) return response;
+
+        string trimmed = query.Trim();
+        // Skip prefix queries — they're cross-cutting listings, not type lookups.
+        int colonIdx = trimmed.IndexOf(':');
+        if (colonIdx > 0 && trimmed.IndexOf(' ') < 0)
+        {
+            string prefix = trimmed.Substring(0, colonIdx).ToLowerInvariant();
+            if (prefix is "method" or "field" or "property" or "inherits" or "extends" or "attribute")
+                return response;
+            // class:/type: — strip prefix and continue.
+            if (prefix is "class" or "type")
+                trimmed = trimmed.Substring(colonIdx + 1).Trim();
+        }
+
+        // Member zoom (Type.Member) only augments on source miss — DLL members are noisy
+        // when the type is well-defined in source. Plain type queries always augment if DLL
+        // has a match: source can shadow engine types (e.g. a nested test `struct Vector3`
+        // hides `UnityEngine.Vector3`). Showing both keeps the engine answer visible.
+        bool sourceMissed =
+            response.StartsWith("Error: '", StringComparison.Ordinal) && response.Contains("' not found")
+            || response.Contains("not found as a declaration, but found in source", StringComparison.Ordinal)
+            || response.StartsWith("'", StringComparison.Ordinal) && response.Contains("' is not a type", StringComparison.Ordinal);
+        bool isMemberZoom = trimmed.Contains('.');
+        if (isMemberZoom && !sourceMissed) return response;
+
+        // DLL index is built in background after source — first query after startup may
+        // race ahead of it. Wait up to 5s for it to finish (typical: <2s).
+        if (!dllIndex.Ready)
+        {
+            var sw = Stopwatch.StartNew();
+            while (!dllIndex.Ready && sw.ElapsedMilliseconds < 5000)
+                Thread.Sleep(50);
+            if (!dllIndex.Ready) return response;
+        }
+
+        // Split dotted form `Type.Member` for DLL lookup.
+        string typePart = trimmed;
+        string memberPart = null;
+        int lastDot = trimmed.LastIndexOf('.');
+        if (lastDot > 0)
+        {
+            typePart = trimmed.Substring(0, lastDot);
+            memberPart = trimmed.Substring(lastDot + 1);
+        }
+        string simple = DllIndex.SimpleName(typePart);
+        var hits = dllIndex.Lookup(simple);
+        if (hits == null || hits.Count == 0) return response;
+
+        string dllReport = dllIndex.Format(trimmed, hits, memberPart);
+        return dllReport + "\n\n" + response;
+    }
+
     static string HandleAnalyze(ConcurrentDictionary<string, SyntaxTree> trees, ConcurrentDictionary<string, string> fileTexts, string projectPath, string query)
     {
         var sw = Stopwatch.StartNew();
@@ -648,5 +758,121 @@ static class RoslynDaemon
         var resp = CodeAnalysisCore.Analyze(matchingTrees, matchingTexts, projectPath, query, sw.ElapsedMilliseconds, trees.Count);
         // Full trees needed for "did you mean" — pre-filter eliminates candidates on miss.
         return CodeAnalysisCore.AppendSuggestionsIfMissing(resp, trees, query);
+    }
+
+    static string RunSyntaxLint(ConcurrentDictionary<string, SyntaxTree> trees, string projectPath, bool includeWarnings)
+    {
+        var sb = new StringBuilder();
+        int errorCount = 0, warnCount = 0, userFiles = 0;
+        foreach (var kvp in trees)
+        {
+            // Only surface diagnostics for user-owned code. PackageCache is third-party,
+            // not actionable, and frequently has files that need package-specific csc settings.
+            if (!IsUserCode(kvp.Key, projectPath)) continue;
+            userFiles++;
+            foreach (var d in kvp.Value.GetDiagnostics())
+            {
+                if (d.Severity == DiagnosticSeverity.Error) errorCount++;
+                else if (d.Severity == DiagnosticSeverity.Warning) warnCount++;
+                else continue;
+                if (d.Severity == DiagnosticSeverity.Warning && !includeWarnings) continue;
+                AppendDiag(sb, kvp.Key, projectPath, d);
+            }
+        }
+        return FormatLintResponse(sb, userFiles, errorCount, warnCount, includeWarnings,
+            mode: $"syntax-only ({trees.Count - userFiles} package files skipped)",
+            okHint: "Catches missing braces, bad keywords, unclosed strings.\nMisses: type errors, missing usings, wrong arg counts. Use `LINT semantic` or COMPILE for those.");
+    }
+
+    /// <summary>True if `file` is user-editable code: Assets/ or non-PackageCache Packages/.
+    /// Excludes Library/PackageCache/ (UPM-managed third-party packages).</summary>
+    static bool IsUserCode(string file, string projectPath)
+    {
+        string norm = file.Replace('\\', '/');
+        string proj = projectPath.Replace('\\', '/').TrimEnd('/');
+        if (norm.StartsWith(proj + "/Assets/", StringComparison.OrdinalIgnoreCase)) return true;
+        if (norm.StartsWith(proj + "/Packages/", StringComparison.OrdinalIgnoreCase)
+            && !norm.Contains("/PackageCache/", StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    static string RunSemanticLint(ConcurrentDictionary<string, SyntaxTree> trees, string projectPath, bool includeWarnings)
+    {
+        var sw = Stopwatch.StartNew();
+        var (refs, builtin, user, editorRoot, version, error) = LintSemantic.Resolve(projectPath);
+        if (error != null)
+            return $"Error: cannot run semantic lint — {error}\nFalling back to syntax-only mode is recommended.";
+
+        // Re-parse each tree with file-scoped preprocessor symbols (UNITY_EDITOR for /Editor/ files).
+        // Skip PackageCache — third-party, not actionable for user.
+        var parsed = new List<SyntaxTree>(trees.Count);
+        int userFileCount = 0;
+        foreach (var kvp in trees)
+        {
+            if (!IsUserCode(kvp.Key, projectPath)) continue;
+            userFileCount++;
+            var opts = LintSemantic.BuildParseOptions(kvp.Key, builtin, user);
+            var origText = kvp.Value.GetText();
+            parsed.Add(CSharpSyntaxTree.ParseText(origText, opts, kvp.Key));
+        }
+
+        var compilation = CSharpCompilation.Create(
+            assemblyName: "LintSemantic",
+            syntaxTrees: parsed,
+            references: refs,
+            options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary,
+                allowUnsafe: true,
+                concurrentBuild: true,
+                metadataImportOptions: MetadataImportOptions.All));
+
+        var sb = new StringBuilder();
+        int errorCount = 0, warnCount = 0;
+        // Filter noise: PDB-related, missing-XML-comment, etc. that aren't actionable for AI.
+        var ignoredIds = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "CS1701", "CS1702", "CS1705",   // assembly version mismatches (Unity DLLs are messy)
+            "CS8019",                        // unnecessary using directive
+            "CS1591",                        // missing XML comment
+            "CS0436",                        // type defined in source AND ref'd assembly (Unity asmdef overlap)
+        };
+        foreach (var d in compilation.GetDiagnostics())
+        {
+            if (ignoredIds.Contains(d.Id)) continue;
+            if (d.Severity == DiagnosticSeverity.Error) errorCount++;
+            else if (d.Severity == DiagnosticSeverity.Warning) warnCount++;
+            else continue;
+            if (d.Severity == DiagnosticSeverity.Warning && !includeWarnings) continue;
+            string filePath = d.Location.SourceTree?.FilePath ?? "(no file)";
+            AppendDiag(sb, filePath, projectPath, d);
+        }
+        sw.Stop();
+        string mode = $"semantic ({version}, {refs.Count} refs, {sw.ElapsedMilliseconds}ms, {trees.Count - userFileCount} package files skipped)";
+        string okHint = "Full type-binding pass — would compile under Unity.\nNote: per-file UNITY_EDITOR scoping is best-effort by /Editor/ folder, not asmdef-perfect.";
+        return FormatLintResponse(sb, userFileCount, errorCount, warnCount, includeWarnings, mode, okHint);
+    }
+
+    static void AppendDiag(StringBuilder sb, string filePath, string projectPath, Diagnostic d)
+    {
+        var pos = d.Location.GetLineSpan().StartLinePosition;
+        string sev = d.Severity == DiagnosticSeverity.Error ? "ERROR" : "WARN";
+        string rel = CodeAnalysisCore.ToRelativePath(filePath, projectPath);
+        sb.Append(rel).Append(':').Append(pos.Line + 1).Append(':').Append(pos.Character + 1)
+          .Append(": ").Append(sev).Append(' ').Append(d.Id).Append(": ")
+          .Append(d.GetMessage()).Append('\n');
+    }
+
+    static string FormatLintResponse(StringBuilder body, int fileCount, int errorCount, int warnCount,
+                                     bool includeWarnings, string mode, string okHint)
+    {
+        var header = new StringBuilder();
+        header.Append("Files: ").Append(fileCount).Append("  Errors: ").Append(errorCount);
+        if (includeWarnings) header.Append("  Warnings: ").Append(warnCount);
+        header.Append("  Mode: ").Append(mode).Append('\n');
+        if (errorCount == 0 && (!includeWarnings || warnCount == 0))
+        {
+            header.Append("OK — no errors.\n").Append(okHint);
+            return header.ToString();
+        }
+        return header.Append('\n').Append(body.ToString().TrimEnd('\n')).ToString();
     }
 }

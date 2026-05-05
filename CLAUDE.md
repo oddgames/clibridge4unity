@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.15)
+│   └── package.json           # UPM manifest (v1.1.16)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -226,7 +226,9 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `PROBE` - Quick main thread health check
 - `DIAG` - Diagnostic info (no main thread needed)
 - `STATUS` - Get Unity Editor status, including C# compile and UI Toolkit import errors
-- `COMPILE` - Force script recompilation
+- `LINT [warnings]` - **Offline syntax check.** Sub-second on 5k files. Catches syntax errors in new files Unity hasn't seen.
+- `LINT semantic [warnings]` - **Offline FULL semantic check (PREFER OVER COMPILE).** Loads Unity DLLs + scripting defines, runs full type-binding compile. Catches missing methods, wrong arg counts, type errors. ~5-10s first run, ~1s cached. Same coverage as COMPILE, no Unity needed.
+- `COMPILE` - Force script recompilation (Unity-side, triggers domain reload, breaks pipe). Use only when you need Unity-specific behavior (asmdef boundaries, post-compile callbacks).
 - `REFRESH` - Force asset database refresh
 - `LOG [filter]` - Get bridge-captured Unity logs; use `LOG ui errors` for current USS/UXML/TSS import errors
   - Commands that reference `.uss`, `.uxml`, or `.tss` assets append matching UI Toolkit import errors automatically

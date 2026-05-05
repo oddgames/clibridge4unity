@@ -114,13 +114,16 @@ Commands that reference `.uss`, `.uxml`, or `.tss` assets also append matching U
 clibridge4unity SETUP           # Installs UPM package + generates CLAUDE.md and AGENTS.md
 clibridge4unity SETUP chatgpt   # Refreshes AGENTS.md only
 ```
-The generated docs tell AI assistants which commands are available, when to use COMPILE vs CODE_EXEC, and how to handle busy/timeout errors. Run `SETUP` again after updates to regenerate.
+The generated docs tell AI assistants which commands are available, when to use `LINT` vs `COMPILE` vs `CODE_EXEC`, and how to handle busy/timeout errors. Run `SETUP` again after updates to regenerate.
+
+> **Workflow tip**: After editing C#, run `LINT` first (offline, instant). Only escalate to `COMPILE` when you need full semantic check (type errors, missing usings).
 
 ## All Commands
 
 | Category | Commands |
 |----------|----------|
 | **Core** | `PING` `PROBE` `DIAG` `STATUS` `HELP` `COMPILE` `REFRESH` `LOG` `STACK_MINIMIZE` `MENU` `PROFILE` |
+| **Lint** | `LINT` — offline syntax check, sub-second, no Unity needed. **Prefer over `COMPILE` first.** Catches errors in new files Unity hasn't seen. |
 | **Code** | `CODE_EXEC` `CODE_EXEC_RETURN` `TEST` |
 | **Scene** | `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `PLAYMODE` `SCENEVIEW` `GAMEVIEW` `WINDOWS` |
 | **Prefab** | `PREFAB_CREATE` `PREFAB_INSTANTIATE` `PREFAB_SAVE` |

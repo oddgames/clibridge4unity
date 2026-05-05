@@ -8,7 +8,7 @@
     <PublishTrimmed>true</PublishTrimmed>
     <PublishReadyToRun>true</PublishReadyToRun>
     <AssemblyName>clibridge4unity</AssemblyName>
-    <Version>1.1.15</Version>
+    <Version>1.1.16</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
@@ -19,11 +19,13 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
+    <PackageReference Include="Mono.Cecil" Version="0.11.5" />
   </ItemGroup>
 
   <ItemGroup>
     <TrimmerRootAssembly Include="Microsoft.CodeAnalysis" />
     <TrimmerRootAssembly Include="Microsoft.CodeAnalysis.CSharp" />
+    <TrimmerRootAssembly Include="Mono.Cecil" />
   </ItemGroup>
 
 </Project>

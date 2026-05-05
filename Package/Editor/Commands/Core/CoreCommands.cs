@@ -463,13 +463,16 @@ namespace clibridge4unity
             });
         }
 
-        [BridgeCommand("COMPILE", "Force script recompilation. Pass 'force' to bypass the no-change skip check.",
+        [BridgeCommand("COMPILE", "Force script recompilation. Pass 'force' to bypass the no-change skip check. " +
+                                  "TIP: For fast syntax-only check (no Unity, no domain reload), use LINT instead.",
             Category = "Core",
-            Usage = "COMPILE [force]",
+            Usage = "COMPILE [force]\n" +
+                    "  Prefer LINT first — offline, instant, catches syntax errors in NEW files Unity hasn't seen.\n" +
+                    "  Use COMPILE only when you need full semantic check (type errors, missing usings).",
             Streaming = false,
             RequiresMainThread = true,
             TimeoutSeconds = 300,
-            RelatedCommands = new[] { "LOG", "STATUS", "REFRESH" })]
+            RelatedCommands = new[] { "LINT", "LOG", "STATUS", "REFRESH" })]
         public static string Compile(string data)
         {
             if (EditorApplication.isPlaying)

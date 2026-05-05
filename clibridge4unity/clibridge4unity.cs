@@ -1322,6 +1322,133 @@ class Program
             return fallbackResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
         }
 
+        // LINT: offline syntax check via Roslyn daemon. Catches errors in newly-added .cs
+        // files Unity hasn't seen yet (daemon's FileSystemWatcher is authoritative).
+        // Misses semantic errors (type mismatches, missing usings) — use COMPILE for those.
+        if (command.Equals("LINT", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("SYNTAX_CHECK", StringComparison.OrdinalIgnoreCase))
+        {
+            string daemonPipe = RoslynDaemon.GetRunningPipe(projectPath);
+            if (daemonPipe == null)
+            {
+                Console.Error.WriteLine("[roslyn] Starting daemon...");
+                daemonPipe = RoslynDaemon.StartBackground(projectPath);
+            }
+            if (daemonPipe != null)
+            {
+                string lintResult = QueryDaemonWithIndexingHeartbeat(daemonPipe, "lint", data ?? "");
+                if (lintResult != null)
+                {
+                    Console.WriteLine(lintResult);
+                    return lintResult.Contains("ERROR ") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+                }
+            }
+
+            // Fallback: parse all Assets/*.cs in-process. Slower but never fails.
+            Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass lint");
+            string assetsDir = Path.Combine(projectPath, "Assets");
+            if (!Directory.Exists(assetsDir))
+            {
+                Console.Error.WriteLine($"Error: Assets directory not found: {assetsDir}");
+                return EXIT_COMMAND_ERROR;
+            }
+            var files = Directory.EnumerateFiles(assetsDir, "*.cs", SearchOption.AllDirectories).ToArray();
+            string lintQ = (data ?? "").Trim().ToLowerInvariant();
+            bool incWarn = lintQ.Contains("warning");
+            bool semantic = lintQ.Contains("semantic") || lintQ.Contains("full");
+
+            // Semantic path: build refs + per-file parse options + full compilation.
+            if (semantic)
+            {
+                var (refs, builtin, user, _, version, error) = LintSemantic.Resolve(projectPath);
+                if (error != null)
+                {
+                    Console.Error.WriteLine($"[lint] Cannot run semantic — {error}");
+                    Console.Error.WriteLine("[lint] Falling back to syntax-only.");
+                    semantic = false;
+                }
+                else
+                {
+                    var trees = new System.Collections.Concurrent.ConcurrentBag<Microsoft.CodeAnalysis.SyntaxTree>();
+                    System.Threading.Tasks.Parallel.ForEach(files, file =>
+                    {
+                        try
+                        {
+                            var text = File.ReadAllText(file);
+                            var opts = LintSemantic.BuildParseOptions(file, builtin, user);
+                            trees.Add(Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, opts, file));
+                        }
+                        catch { }
+                    });
+                    var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                        "LintSemantic", trees, refs,
+                        new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(
+                            Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary,
+                            allowUnsafe: true, concurrentBuild: true));
+                    var ignored = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+                    { "CS1701", "CS1702", "CS1705", "CS8019", "CS1591", "CS0436" };
+                    int e = 0, w = 0;
+                    var lns = new System.Collections.Generic.List<string>();
+                    foreach (var d in compilation.GetDiagnostics())
+                    {
+                        if (ignored.Contains(d.Id)) continue;
+                        bool isErr = d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error;
+                        bool isWarn = d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Warning;
+                        if (!isErr && !isWarn) continue;
+                        if (isErr) e++; else w++;
+                        if (isWarn && !incWarn) continue;
+                        var pos = d.Location.GetLineSpan().StartLinePosition;
+                        string fp = d.Location.SourceTree?.FilePath ?? "(no file)";
+                        string rel = fp.Replace(projectPath + "\\", "").Replace(projectPath + "/", "");
+                        lns.Add($"{rel}:{pos.Line + 1}:{pos.Character + 1}: {(isErr ? "ERROR" : "WARN")} {d.Id}: {d.GetMessage()}");
+                    }
+                    Console.WriteLine($"Files: {files.Length}  Errors: {e}{(incWarn ? $"  Warnings: {w}" : "")}  Mode: semantic ({version}, {refs.Count} refs)");
+                    if (e == 0 && (!incWarn || w == 0))
+                        Console.WriteLine("OK — no errors.\nFull type-binding pass — would compile under Unity.");
+                    else
+                    {
+                        lns.Sort(StringComparer.Ordinal);
+                        foreach (var l in lns) Console.WriteLine(l);
+                    }
+                    return e > 0 ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+                }
+            }
+
+            // Syntax-only single-pass.
+            int errors = 0, warnings = 0;
+            var lines = new System.Collections.Generic.List<string>();
+            System.Threading.Tasks.Parallel.ForEach(files, file =>
+            {
+                try
+                {
+                    var text = File.ReadAllText(file);
+                    var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, path: file);
+                    foreach (var d in tree.GetDiagnostics())
+                    {
+                        bool isErr = d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error;
+                        bool isWarn = d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Warning;
+                        if (!isErr && !isWarn) continue;
+                        if (isErr) System.Threading.Interlocked.Increment(ref errors);
+                        else System.Threading.Interlocked.Increment(ref warnings);
+                        if (isWarn && !incWarn) continue;
+                        var pos = d.Location.GetLineSpan().StartLinePosition;
+                        string rel = file.Replace(projectPath + "\\", "").Replace(projectPath + "/", "");
+                        lock (lines) lines.Add($"{rel}:{pos.Line + 1}:{pos.Character + 1}: {(isErr ? "ERROR" : "WARN")} {d.Id}: {d.GetMessage()}");
+                    }
+                }
+                catch { }
+            });
+            Console.WriteLine($"Files: {files.Length}  Errors: {errors}{(incWarn ? $"  Warnings: {warnings}" : "")}  Mode: syntax-only (no semantic check)");
+            if (errors == 0 && (!incWarn || warnings == 0))
+                Console.WriteLine("OK — no syntax errors.\nNote: this catches missing braces, bad keywords, unclosed strings.\nMisses: type errors, missing usings, wrong arg counts. Use `LINT semantic` or COMPILE for full check.");
+            else
+            {
+                lines.Sort(StringComparer.Ordinal);
+                foreach (var l in lines) Console.WriteLine(l);
+            }
+            return errors > 0 ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+        }
+
         // Offline YAML fallback: INSPECTOR with a prefab/scene asset path works without Unity
         if ((unityInfo.State == UnityProcessState.NotRunning || unityInfo.State == UnityProcessState.DifferentProject)
             && command.Equals("INSPECTOR", StringComparison.OrdinalIgnoreCase)
@@ -1526,6 +1653,8 @@ class Program
         Console.Error.WriteLine("  UPDATE                     Self-update CLI + UPM package");
         Console.Error.WriteLine("  SERVE [--port N] [--ttl M] Start local file server (port 8420)");
         Console.Error.WriteLine("  CODE_ANALYZE <query>       Offline Roslyn/source analysis");
+        Console.Error.WriteLine("  LINT [warnings]            Offline syntax check (sub-second, catches new files)");
+        Console.Error.WriteLine("  LINT semantic [warnings]   Offline FULL semantic check (Unity DLLs + defines, ~5-10s first run)");
         Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");
         Console.Error.WriteLine("  WAKEUP refresh             Bring to foreground + force recompile (Ctrl+R)");
         Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");
@@ -3947,6 +4076,19 @@ class Program
         md.AppendLine();
         md.AppendLine("Flags: `--inspect [depth]` dumps the result tree, `--trace` emits line-by-line execution, `--vars x,y` filters.");
         md.AppendLine();
+        md.AppendLine("## LINT — offline check (works without Unity)");
+        md.AppendLine();
+        md.AppendLine("**Always prefer `LINT` over `COMPILE` first.** Works when Unity is busy/closed. Two modes:");
+        md.AppendLine();
+        md.AppendLine("- `LINT` — syntax-only. Sub-second on 5k files. Catches missing braces, unclosed strings, bad keywords.");
+        md.AppendLine("- `LINT semantic` — full type-binding compile against Unity DLLs + scripting defines. ~5-10s first run, ~1s cached. Catches missing methods, wrong arg counts, type mismatches, missing usings — same coverage as `COMPILE`, no Unity needed.");
+        md.AppendLine("- `LINT warnings` / `LINT semantic warnings` — include warnings.");
+        md.AppendLine();
+        md.AppendLine("Backed by the Roslyn daemon's FileSystemWatcher → catches errors in `.cs` files Unity hasn't seen yet.");
+        md.AppendLine("`LINT semantic` reads `ProjectSettings/ProjectSettings.asset` for scripting defines + applies `UNITY_EDITOR` to files under `/Editor/` folders (best-effort, not asmdef-perfect).");
+        md.AppendLine();
+        md.AppendLine("Workflow: `LINT semantic` first → fix any errors → `COMPILE` only if Unity-specific behavior needed (domain reload, asmdef boundaries) → `STATUS` to verify.");
+        md.AppendLine();
         md.AppendLine("## CODE_ANALYZE — offline code search (works without Unity)");
         md.AppendLine();
         md.AppendLine("- `CODE_ANALYZE Foo` — deep view: definition, usages, derived types, GetComponent sites, own members");
@@ -3979,7 +4121,7 @@ class Program
         md.AppendLine();
         md.AppendLine("## Other workflows");
         md.AppendLine();
-        md.AppendLine("- Build / state: `COMPILE` | `REFRESH` | `STATUS` | `LOG errors` | `DIAG` (always works — no main thread needed) | `PROBE` (quick main-thread health)");
+        md.AppendLine("- Build / state: `LINT` (offline syntax) | `LINT semantic` (offline full check — try first) | `COMPILE` (Unity-side, triggers domain reload) | `REFRESH` | `STATUS` | `LOG errors` | `DIAG` (always works — no main thread needed) | `PROBE` (quick main-thread health)");
         md.AppendLine("- Scene: `PLAY` | `STOP` | `PAUSE` | `STEP` | `CREATE` | `FIND` | `DELETE` | `SAVE` | `LOAD` | `SCENEVIEW frame|2d|3d` | `WINDOWS` | `GAMEVIEW WxH`");
         md.AppendLine("- Components: `COMPONENT_SET obj comp field value` | `COMPONENT_ADD obj comp` | `COMPONENT_REMOVE obj comp`");
         md.AppendLine("- Prefabs: `PREFAB_CREATE name path` | `PREFAB_INSTANTIATE path [parent]`");
@@ -5557,9 +5699,16 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             while (filterTerm.EndsWith("[]")) filterTerm = filterTerm.Substring(0, filterTerm.Length - 2);
 
             string assetsDir = Path.Combine(projectPath, "Assets");
-            string[] allFiles = Directory.Exists(assetsDir)
-                ? Directory.EnumerateFiles(assetsDir, "*.cs", SearchOption.AllDirectories).ToArray()
-                : Array.Empty<string>();
+            string packagesDir = Path.Combine(projectPath, "Packages");
+            string packageCacheDir = Path.Combine(projectPath, "Library", "PackageCache");
+            var fileList = new List<string>();
+            if (Directory.Exists(assetsDir))
+                fileList.AddRange(Directory.EnumerateFiles(assetsDir, "*.cs", SearchOption.AllDirectories));
+            if (Directory.Exists(packagesDir))
+                fileList.AddRange(Directory.EnumerateFiles(packagesDir, "*.cs", SearchOption.AllDirectories));
+            if (Directory.Exists(packageCacheDir))
+                fileList.AddRange(Directory.EnumerateFiles(packageCacheDir, "*.cs", SearchOption.AllDirectories));
+            string[] allFiles = fileList.ToArray();
 
             var trees = new System.Collections.Concurrent.ConcurrentDictionary<string, Microsoft.CodeAnalysis.SyntaxTree>();
             var texts = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
@@ -5577,6 +5726,33 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
 
             sw.Stop();
             var resp = CodeAnalysisCore.Analyze(trees, texts, projectPath, query, sw.ElapsedMilliseconds, allFiles.Length);
+
+            // DLL fallback: scan plugin DLLs + Unity engine reference DLLs.
+            // Member zoom (Type.Member) only augments on source miss; plain type queries
+            // always augment when DLL has a match (source can shadow engine types).
+            bool sourceMissed =
+                resp.StartsWith("Error: '", StringComparison.Ordinal) && resp.Contains("' not found")
+                || resp.Contains("not found as a declaration, but found in source", StringComparison.Ordinal)
+                || resp.StartsWith("'", StringComparison.Ordinal) && resp.Contains("' is not a type", StringComparison.Ordinal);
+            int qColon = query.IndexOf(':');
+            string qPrefix = qColon > 0 && query.IndexOf(' ') < 0 ? query.Substring(0, qColon).ToLowerInvariant() : "";
+            bool isPrefixListing = qPrefix is "method" or "field" or "property" or "inherits" or "extends" or "attribute";
+            string typeQuery = qPrefix is "class" or "type" ? query.Substring(qColon + 1).Trim() : query;
+            bool isMemberZoom = typeQuery.Contains('.');
+            bool runDllFallback = !isPrefixListing && (sourceMissed || !isMemberZoom);
+            if (runDllFallback)
+            {
+                string typePart = typeQuery;
+                string memberPart = null;
+                int ld = typeQuery.LastIndexOf('.');
+                if (ld > 0) { typePart = typeQuery.Substring(0, ld); memberPart = typeQuery.Substring(ld + 1); }
+                var dllIndex = new DllIndex(projectPath);
+                dllIndex.Build();
+                var hits = dllIndex.Lookup(DllIndex.SimpleName(typePart));
+                if (hits != null && hits.Count > 0)
+                    resp = dllIndex.Format(typeQuery, hits, memberPart) + "\n\n" + resp;
+            }
+
             // Not-found suggestions: re-parse skipped (too costly for single-pass) — fuzzy-rank
             // against file stems instead, which by Unity convention match type names.
             if (resp.StartsWith("Error: '", StringComparison.Ordinal) && resp.Contains("' not found"))
