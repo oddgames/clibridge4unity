@@ -888,6 +888,15 @@ class Program
 
     static int Main(string[] args)
     {
+        // Force UTF-8 stdout/stderr so unicode chars (em-dash, etc.) survive being piped
+        // through bash/cmd with non-UTF8 codepages instead of throwing EncoderFallbackException.
+        try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
+        try
+        {
+            var utf8NoBom = new System.Text.UTF8Encoding(false);
+            Console.SetError(new StreamWriter(Console.OpenStandardError(), utf8NoBom) { AutoFlush = true });
+        }
+        catch { }
         CliTrace("Main", $"enter args={string.Join(" ", args.Select(a => a?.Length > 120 ? a.Substring(0, 120) + "..." : a ?? ""))}");
         bool versionOnly = args.Length == 1 && args[0] == "--version";
 
@@ -3202,18 +3211,47 @@ class Program
         public RECT Rect;
     }
 
+    /// <summary>Strip non-ASCII chars to stay safe when stderr is piped through a non-UTF8 console codepage.</summary>
+    static string SafeAscii(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        var sb = new StringBuilder(s.Length);
+        foreach (var ch in s)
+            sb.Append(ch < 32 || ch > 126 ? '?' : ch);
+        return sb.ToString();
+    }
+
     static void PrintUnityWorkspaceList(List<UnityWorkspaceInfo> workspaces, List<string> fallbackTitles)
     {
         if (workspaces != null && workspaces.Count > 0)
         {
             Console.Error.WriteLine($"       Running Unity workspaces ({workspaces.Count}):");
-            foreach (var w in workspaces.OrderBy(w => w.ProjectPath ?? ""))
+            // Wrap each entry — Console.Error.WriteLine can throw EncoderFallbackException when
+            // stderr is piped through a non-UTF8 codepage and the title has unicode chars.
+            // ASCII-only output here; em-dash replaced with `-`.
+            try
             {
-                Console.Error.WriteLine($"         {w.ProjectPath}");
-                if (!string.IsNullOrEmpty(w.WindowTitle))
-                    Console.Error.WriteLine($"           pid {w.Pid} — {w.WindowTitle}");
-                else
-                    Console.Error.WriteLine($"           pid {w.Pid}");
+                foreach (var w in workspaces.Where(x => x != null).OrderBy(w => w.ProjectPath ?? ""))
+                {
+                    try
+                    {
+                        string path = w.ProjectPath ?? "(unknown)";
+                        Console.Error.WriteLine($"         {path}");
+                        string title = SafeAscii(w.WindowTitle);
+                        if (!string.IsNullOrEmpty(title))
+                            Console.Error.WriteLine($"           pid {w.Pid} - {title}");
+                        else
+                            Console.Error.WriteLine($"           pid {w.Pid}");
+                    }
+                    catch (Exception ex)
+                    {
+                        try { Console.Error.WriteLine($"           (failed to print: {ex.GetType().Name})"); } catch { }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                try { Console.Error.WriteLine($"       (workspace list failed: {ex.GetType().Name}: {ex.Message})"); } catch { }
             }
             return;
         }
