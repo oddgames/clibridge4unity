@@ -1356,6 +1356,19 @@ class Program
             string lintQ = (data ?? "").Trim().ToLowerInvariant();
             bool incWarn = lintQ.Contains("warning");
             bool semantic = lintQ.Contains("semantic") || lintQ.Contains("full");
+            bool syntaxMode = lintQ.Contains("syntax");
+            // Default = unity (Unity-faithful per-asmdef). `LINT syntax` and `LINT semantic` opt out.
+            bool unityMode = !syntaxMode && !semantic;
+
+            // Unity-faithful per-asmdef compile (single-pass — bypass daemon pipe timeout).
+            if (unityMode)
+            {
+                Console.Error.WriteLine("[lint] Running unity per-asmdef compile (can take 30-90s)...");
+                var unityRun = LintUnity.Run(projectPath, fileTexts: null);
+                Console.WriteLine(LintUnity.Format(unityRun, projectPath, incWarn));
+                return unityRun.PerAsmdef.Any(r => r.Diagnostics.Any(d => d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error))
+                    ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+            }
 
             // Semantic path: build refs + per-file parse options + full compilation.
             if (semantic)
@@ -1653,8 +1666,9 @@ class Program
         Console.Error.WriteLine("  UPDATE                     Self-update CLI + UPM package");
         Console.Error.WriteLine("  SERVE [--port N] [--ttl M] Start local file server (port 8420)");
         Console.Error.WriteLine("  CODE_ANALYZE <query>       Offline Roslyn/source analysis");
-        Console.Error.WriteLine("  LINT [warnings]            Offline syntax check (sub-second, catches new files)");
-        Console.Error.WriteLine("  LINT semantic [warnings]   Offline FULL semantic check (Unity DLLs + defines, ~5-10s first run)");
+        Console.Error.WriteLine("  LINT [warnings]            Unity-faithful per-asmdef compile (default, ~2-3s, asmdef-aware)");
+        Console.Error.WriteLine("  LINT syntax [warnings]     Syntax-only fast check (~1s, catches braces/strings/typos)");
+        Console.Error.WriteLine("  LINT semantic [warnings]   Lump-compile semantic (~1s, cross-asmdef false positives)");
         Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");
         Console.Error.WriteLine("  WAKEUP refresh             Bring to foreground + force recompile (Ctrl+R)");
         Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");
@@ -4078,16 +4092,17 @@ class Program
         md.AppendLine();
         md.AppendLine("## LINT — offline check (works without Unity)");
         md.AppendLine();
-        md.AppendLine("**Always prefer `LINT` over `COMPILE` first.** Works when Unity is busy/closed. Two modes:");
+        md.AppendLine("**Always prefer `LINT` over `COMPILE` first.** Works when Unity is busy/closed. Three modes:");
         md.AppendLine();
-        md.AppendLine("- `LINT` — syntax-only. Sub-second on 5k files. Catches missing braces, unclosed strings, bad keywords.");
-        md.AppendLine("- `LINT semantic` — full type-binding compile against Unity DLLs + scripting defines. ~5-10s first run, ~1s cached. Catches missing methods, wrong arg counts, type mismatches, missing usings — same coverage as `COMPILE`, no Unity needed.");
-        md.AppendLine("- `LINT warnings` / `LINT semantic warnings` — include warnings.");
+        md.AppendLine("- `LINT` (default) — **Unity-faithful per-asmdef compile.** ~2-3s. Parses every `*.asmdef`, builds DAG, compiles each user asmdef separately with correct refs + defines + `UNITY_EDITOR` scoping. Catches missing methods, type errors, missing usings, AND respects asmdef boundaries (editor-only-leaks-into-runtime). Closest we get to Unity's own pipeline.");
+        md.AppendLine("- `LINT syntax` — syntax-only. Sub-second on 5k files. Catches missing braces, unclosed strings, bad keywords. No type binding.");
+        md.AppendLine("- `LINT semantic` — lump-compile (all source in one CSharpCompilation). ~1s. Catches type errors but loses asmdef boundaries (false positives on cross-asmdef partial classes).");
+        md.AppendLine("- Append `warnings` to any mode to include warnings.");
         md.AppendLine();
         md.AppendLine("Backed by the Roslyn daemon's FileSystemWatcher → catches errors in `.cs` files Unity hasn't seen yet.");
-        md.AppendLine("`LINT semantic` reads `ProjectSettings/ProjectSettings.asset` for scripting defines + applies `UNITY_EDITOR` to files under `/Editor/` folders (best-effort, not asmdef-perfect).");
+        md.AppendLine("`LINT` (unity mode) uses `Library/ScriptAssemblies/<package>.dll` as MetadataReferences for package asmdefs (Unity already compiled them) — only USER asmdefs get re-compiled, hence the speed.");
         md.AppendLine();
-        md.AppendLine("Workflow: `LINT semantic` first → fix any errors → `COMPILE` only if Unity-specific behavior needed (domain reload, asmdef boundaries) → `STATUS` to verify.");
+        md.AppendLine("Workflow: `LINT` first → fix any errors → `COMPILE` only if Unity-specific behavior needed (domain reload, source generators, post-compile callbacks) → `STATUS` to verify.");
         md.AppendLine();
         md.AppendLine("## CODE_ANALYZE — offline code search (works without Unity)");
         md.AppendLine();
@@ -4121,7 +4136,7 @@ class Program
         md.AppendLine();
         md.AppendLine("## Other workflows");
         md.AppendLine();
-        md.AppendLine("- Build / state: `LINT` (offline syntax) | `LINT semantic` (offline full check — try first) | `COMPILE` (Unity-side, triggers domain reload) | `REFRESH` | `STATUS` | `LOG errors` | `DIAG` (always works — no main thread needed) | `PROBE` (quick main-thread health)");
+        md.AppendLine("- Build / state: `LINT` (Unity-faithful per-asmdef offline check — try first) | `LINT syntax` (sub-second) | `COMPILE` (Unity-side, triggers domain reload) | `REFRESH` | `STATUS` | `LOG errors` | `DIAG` (always works — no main thread needed) | `PROBE` (quick main-thread health)");
         md.AppendLine("- Scene: `PLAY` | `STOP` | `PAUSE` | `STEP` | `CREATE` | `FIND` | `DELETE` | `SAVE` | `LOAD` | `SCENEVIEW frame|2d|3d` | `WINDOWS` | `GAMEVIEW WxH`");
         md.AppendLine("- Components: `COMPONENT_SET obj comp field value` | `COMPONENT_ADD obj comp` | `COMPONENT_REMOVE obj comp`");
         md.AppendLine("- Prefabs: `PREFAB_CREATE name path` | `PREFAB_INSTANTIATE path [parent]`");

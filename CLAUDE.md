@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.16)
+│   └── package.json           # UPM manifest (v1.1.17)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -226,9 +226,10 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `PROBE` - Quick main thread health check
 - `DIAG` - Diagnostic info (no main thread needed)
 - `STATUS` - Get Unity Editor status, including C# compile and UI Toolkit import errors
-- `LINT [warnings]` - **Offline syntax check.** Sub-second on 5k files. Catches syntax errors in new files Unity hasn't seen.
-- `LINT semantic [warnings]` - **Offline FULL semantic check (PREFER OVER COMPILE).** Loads Unity DLLs + scripting defines, runs full type-binding compile. Catches missing methods, wrong arg counts, type errors. ~5-10s first run, ~1s cached. Same coverage as COMPILE, no Unity needed.
-- `COMPILE` - Force script recompilation (Unity-side, triggers domain reload, breaks pipe). Use only when you need Unity-specific behavior (asmdef boundaries, post-compile callbacks).
+- `LINT [warnings]` - **Default: Unity-faithful per-asmdef compile (PREFER OVER COMPILE).** ~2-3s. Parses every asmdef, builds DAG, compiles each USER asmdef separately with correct refs + defines + UNITY_EDITOR scoping. Uses `Library/ScriptAssemblies/<package>.dll` for package refs (already Unity-compiled). Respects asmdef boundaries.
+- `LINT syntax [warnings]` - Syntax-only fast check (~1s). Catches braces, strings, keywords, malformed declarations. No type binding.
+- `LINT semantic [warnings]` - Lump-compile semantic (~1s). Catches type errors but cross-asmdef false positives.
+- `COMPILE` - Force script recompilation (Unity-side, triggers domain reload, breaks pipe). Use only when you need source generators, post-compile callbacks, or generated code (ILPP).
 - `REFRESH` - Force asset database refresh
 - `LOG [filter]` - Get bridge-captured Unity logs; use `LOG ui errors` for current USS/UXML/TSS import errors
   - Commands that reference `.uss`, `.uxml`, or `.tss` assets append matching UI Toolkit import errors automatically

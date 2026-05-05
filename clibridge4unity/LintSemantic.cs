@@ -93,11 +93,15 @@ internal static class LintSemantic
             {
                 AddDir(compatNs);
                 if (Directory.Exists(nsRoot)) AddDir(nsRoot);
-                // mscorlib v4 facade — needed for assemblies in Library/ScriptAssemblies that
-                // forward ValueType/IEnumerable through mscorlib v4 instead of netstandard.
-                string mscorlibFacade = Path.Combine(editorRoot, "Data", "NetStandard", "compat", "2.1.0", "shims", "netfx", "mscorlib.dll");
-                if (File.Exists(mscorlibFacade) && seen.Add("mscorlib.dll"))
-                    try { refs.Add(MetadataReference.CreateFromFile(mscorlibFacade)); } catch { }
+                // netfx v4 facades — needed for ScriptAssemblies that forward ValueType/HashSet/etc.
+                // through mscorlib v4 / System.Core v4 instead of netstandard.
+                string netfxDir = Path.Combine(editorRoot, "Data", "NetStandard", "compat", "2.1.0", "shims", "netfx");
+                foreach (var facade in new[] { "mscorlib.dll", "System.Core.dll", "System.dll" })
+                {
+                    string p = Path.Combine(netfxDir, facade);
+                    if (File.Exists(p) && seen.Add(facade))
+                        try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
+                }
             }
             else
             {
