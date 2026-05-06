@@ -1424,9 +1424,11 @@ class Program
                 }
             }
 
-            // Syntax-only single-pass.
+            // Syntax-only single-pass + UI lint (UXML/USS).
             int errors = 0, warnings = 0;
             var lines = new System.Collections.Generic.List<string>();
+            var uiRun = LintUI.Run(projectPath);
+            int uiErrors = uiRun.Issues.Count;
             System.Threading.Tasks.Parallel.ForEach(files, file =>
             {
                 try
@@ -1456,7 +1458,13 @@ class Program
                 lines.Sort(StringComparer.Ordinal);
                 foreach (var l in lines) Console.WriteLine(l);
             }
-            return errors > 0 ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+            // Append UI lint output if any UXML/USS files were scanned.
+            if (uiRun.UxmlScanned + uiRun.UssScanned > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine(LintUI.Format(uiRun, projectPath));
+            }
+            return (errors > 0 || uiErrors > 0) ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
         }
 
         // Offline YAML fallback: INSPECTOR with a prefab/scene asset path works without Unity

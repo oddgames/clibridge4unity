@@ -44,6 +44,9 @@ static class RoslynDaemon
     // ─── Client side ─────────────────────────────────────────────────
 
     /// <summary>Check if daemon is running. Returns pipe name or null.</summary>
+    static string GetVersionFile(string projectPath)
+        => Path.Combine(GetDaemonDir(projectPath), "daemon.version");
+
     public static string GetRunningPipe(string projectPath)
     {
         string pidFile = GetPidFile(projectPath);
@@ -55,8 +58,34 @@ static class RoslynDaemon
             try { Process.GetProcessById(pid); }
             catch { CleanupFiles(projectPath); return null; }
 
-            // Process is alive — trust the PID and return pipe name
-            // Skip health check to avoid consuming a pipe connection
+            // Version check: if daemon was started by an older CLI, kill + restart.
+            // Avoids stale-daemon hangs after `clibridge4unity UPDATE` or version bumps.
+            string versionFile = GetVersionFile(projectPath);
+            string currentVer = typeof(RoslynDaemon).Assembly.GetName().Version?.ToString() ?? "?";
+            if (File.Exists(versionFile))
+            {
+                try
+                {
+                    string daemonVer = File.ReadAllText(versionFile).Trim();
+                    if (daemonVer != currentVer)
+                    {
+                        Console.Error.WriteLine($"[roslyn] daemon version mismatch ({daemonVer} vs {currentVer}) — restarting");
+                        try { Process.GetProcessById(pid).Kill(entireProcessTree: true); } catch { }
+                        CleanupFiles(projectPath);
+                        return null;
+                    }
+                }
+                catch { }
+            }
+            else
+            {
+                // Old daemon without version file — kill it, force fresh start.
+                Console.Error.WriteLine("[roslyn] daemon predates version tracking — restarting");
+                try { Process.GetProcessById(pid).Kill(entireProcessTree: true); } catch { }
+                CleanupFiles(projectPath);
+                return null;
+            }
+
             return GeneratePipeName(projectPath);
         }
         catch { return null; }
@@ -180,6 +209,7 @@ static class RoslynDaemon
     {
         try { File.Delete(GetPidFile(projectPath)); } catch { }
         try { File.Delete(GetPipeFile(projectPath)); } catch { }
+        try { File.Delete(GetVersionFile(projectPath)); } catch { }
     }
 
     /// <summary>Kill the daemon process (if alive) and remove its state files. Used to recover from a stuck daemon.</summary>
@@ -252,6 +282,7 @@ static class RoslynDaemon
         string daemonDir = GetDaemonDir(projectPath);
         Directory.CreateDirectory(daemonDir);
         File.WriteAllText(GetPidFile(projectPath), Process.GetCurrentProcess().Id.ToString());
+        try { File.WriteAllText(GetVersionFile(projectPath), typeof(RoslynDaemon).Assembly.GetName().Version?.ToString() ?? "?"); } catch { }
 
         var trees = new ConcurrentDictionary<string, SyntaxTree>();
         var fileTexts = new ConcurrentDictionary<string, string>();
@@ -786,9 +817,14 @@ static class RoslynDaemon
                 AppendDiag(sb, kvp.Key, projectPath, d);
             }
         }
-        return FormatLintResponse(sb, userFiles, errorCount, warnCount, includeWarnings,
+        // Always also lint UXML/USS — well-formedness check, sub-second on typical projects.
+        var uiRun = LintUI.Run(projectPath);
+        int uiErrors = uiRun.Issues.Count;
+        var csResult = FormatLintResponse(sb, userFiles, errorCount, warnCount, includeWarnings,
             mode: $"syntax-only ({trees.Count - userFiles} package files skipped)",
             okHint: "Catches missing braces, bad keywords, unclosed strings.\nMisses: type errors, missing usings, wrong arg counts. Use `LINT semantic` or COMPILE for those.");
+        if (uiErrors == 0 && uiRun.UxmlScanned + uiRun.UssScanned == 0) return csResult;
+        return csResult + "\n\n" + LintUI.Format(uiRun, projectPath);
     }
 
     /// <summary>True if `file` is user-editable code: Assets/ or non-PackageCache Packages/.
