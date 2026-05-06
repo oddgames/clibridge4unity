@@ -40,6 +40,8 @@ internal static class LintUnity
         public string Error;             // top-level fatal error (no Unity install, etc.)
         public long TotalMs;
         public int RefCount;             // engine refs reused across all compiles
+        public int FilterDebugCount;     // debug: how many engine refs were filtered as user dupes
+        public int UserAsmdefCount;      // debug: how many user asmdefs detected
         public string UnityVersion;
     }
 
@@ -54,13 +56,24 @@ internal static class LintUnity
         // 1) Engine refs (BCL + UnityEngine + UnityEditor + ScriptAssemblies). Reused across asmdefs.
         //    LintSemantic.Resolve already loads ALL Library/ScriptAssemblies DLLs — package asmdef
         //    outputs come "for free" as MetadataReferences without us recompiling them.
-        var (engineRefs, builtinDefines, userDefines, _, version, refError) = LintSemantic.Resolve(projectPath);
+        var (engineRefsRaw, builtinDefines, userDefines, _, version, refError) = LintSemantic.Resolve(projectPath);
         if (refError != null) { result.Error = refError; return result; }
         result.UnityVersion = version;
-        result.RefCount = engineRefs.Count;
+        result.RefCount = engineRefsRaw.Count;
+
+        // 2) Build asmdef graph FIRST so we know which asmdefs are user-owned.
+        var graph = LintAsmdef.Build(projectPath);
+
+        bool IsUserAsmdef(LintAsmdef.AsmdefNode n)
+        {
+            if (n.AsmdefPath == null) return true; // predefined Assembly-CSharp — user code
+            return !n.AsmdefPath.Replace('\\', '/').Contains("/PackageCache/", StringComparison.OrdinalIgnoreCase);
+        }
+        var userAsmdefs = graph.All.Where(IsUserAsmdef).ToList();
+        var userAsmdefNames = new HashSet<string>(userAsmdefs.Select(a => a.Name), StringComparer.OrdinalIgnoreCase);
 
         // Map: asmdef name → its compiled DLL in Library/ScriptAssemblies (Unity emits one .dll per asmdef).
-        // Used to resolve a user-asmdef's reference to a package-asmdef without recompiling.
+        // Used as ref for user asmdef → package asmdef deps WITHOUT recompiling.
         var prebuiltAsmdefRefs = new Dictionary<string, MetadataReference>(StringComparer.OrdinalIgnoreCase);
         string scriptAsmDir = Path.Combine(projectPath, "Library", "ScriptAssemblies");
         if (Directory.Exists(scriptAsmDir))
@@ -71,6 +84,30 @@ internal static class LintUnity
                 try { prebuiltAsmdefRefs[asmName] = MetadataReference.CreateFromFile(dll); } catch { }
             }
         }
+
+        // 3) Filter engine refs: drop ANY DLL whose name matches a user asmdef name. Otherwise
+        //    we'd have BOTH the prebuilt user-asmdef DLL AND our recompiled trees containing the
+        //    same types → CS0121/CS0433/CS0104 ambiguity cascades (thousands of false positives).
+        var debugLog = new StringBuilder();
+        debugLog.AppendLine($"=== {DateTime.Now} LintUnity.Run ===");
+        debugLog.AppendLine($"userAsmdefNames count: {userAsmdefNames.Count}");
+        debugLog.AppendLine($"engineRefsRaw count: {engineRefsRaw.Count}");
+        debugLog.AppendLine($"first 5 user asmdef names: {string.Join(", ", userAsmdefNames.Take(5))}");
+        debugLog.AppendLine($"first 5 ref displays: {string.Join("\n  ", engineRefsRaw.Take(5).Select(r => r.Display ?? "(null)"))}");
+        int filteredOut = 0;
+        var engineRefs = engineRefsRaw.Where(r =>
+        {
+            string disp = r.Display ?? "";
+            string name = Path.GetFileNameWithoutExtension(disp);
+            bool drop = userAsmdefNames.Contains(name);
+            if (drop) { filteredOut++; debugLog.AppendLine($"DROP: {disp}"); }
+            return !drop;
+        }).ToList();
+        debugLog.AppendLine($"filteredOut: {filteredOut}");
+        result.FilterDebugCount = filteredOut;
+        result.UserAsmdefCount = userAsmdefNames.Count;
+        try { File.WriteAllText(@"C:\Workspaces\tool_claude_unity_bridge\lint_debug.log", debugLog.ToString()); }
+        catch (Exception logEx) { Console.Error.WriteLine($"[lint:debug] log failed: {logEx.Message}"); }
 
         // Split engine refs into runtime-only vs editor-included.
         var runtimeRefs = new List<MetadataReference>();
@@ -83,29 +120,26 @@ internal static class LintUnity
         }
         editorRefs.AddRange(runtimeRefs);
 
-        // 2) Build asmdef graph.
-        var graph = LintAsmdef.Build(projectPath);
+        // 4) Topo-sort + group by depth — asmdefs at the same depth have no cross-deps and
+        //    can compile in parallel. Cuts wall-clock time on multi-core for big projects.
+        var levels = TopoLevels(userAsmdefs, graph);
 
-        // 3) Pick USER asmdefs only — anything in Assets/ or Packages/ but NOT Library/PackageCache/.
-        //    Package asmdefs use prebuilt DLLs as refs.
-        bool IsUserAsmdef(LintAsmdef.AsmdefNode n)
+        // 5) Compile each level in parallel; emitted refs flow into the next level.
+        var emittedRefs = new System.Collections.Concurrent.ConcurrentDictionary<string, MetadataReference>(StringComparer.OrdinalIgnoreCase);
+        foreach (var level in levels)
         {
-            if (n.AsmdefPath == null) return true; // predefined Assembly-CSharp — user code
-            return !n.AsmdefPath.Replace('\\', '/').Contains("/PackageCache/", StringComparison.OrdinalIgnoreCase);
-        }
-        var userAsmdefs = graph.All.Where(IsUserAsmdef).ToList();
-
-        // 4) Topo-sort USER asmdefs. Package deps resolve via prebuiltAsmdefRefs (no compile).
-        var sorted = TopoSortUserOnly(userAsmdefs, graph);
-
-        // 5) Compile each user asmdef in topo order.
-        var emittedRefs = new Dictionary<string, MetadataReference>(StringComparer.OrdinalIgnoreCase);
-        foreach (var node in sorted)
-        {
-            var r = CompileOne(node, graph, runtimeRefs, editorRefs, emittedRefs, prebuiltAsmdefRefs,
-                               builtinDefines, userDefines, fileTexts);
-            result.PerAsmdef.Add(r);
-            if (r.EmittedRef != null) emittedRefs[node.Name] = r.EmittedRef;
+            var levelResults = new CompileResult[level.Count];
+            System.Threading.Tasks.Parallel.For(0, level.Count, i =>
+            {
+                levelResults[i] = CompileOne(level[i], graph, runtimeRefs, editorRefs,
+                    new Dictionary<string, MetadataReference>(emittedRefs, StringComparer.OrdinalIgnoreCase),
+                    prebuiltAsmdefRefs, builtinDefines, userDefines, fileTexts);
+            });
+            foreach (var r in levelResults)
+            {
+                result.PerAsmdef.Add(r);
+                if (r.EmittedRef != null) emittedRefs[r.Node.Name] = r.EmittedRef;
+            }
         }
 
         swTotal.Stop();
@@ -113,30 +147,38 @@ internal static class LintUnity
         return result;
     }
 
-    static List<LintAsmdef.AsmdefNode> TopoSortUserOnly(List<LintAsmdef.AsmdefNode> userAsmdefs, LintAsmdef.Graph graph)
+    /// <summary>Group user asmdefs into topological depth levels — every asmdef at level N
+    /// depends only on asmdefs at level &lt;N. Same-level asmdefs are independent and can
+    /// compile in parallel. Predefined Assembly-CSharp* go in the deepest level.</summary>
+    static List<List<LintAsmdef.AsmdefNode>> TopoLevels(List<LintAsmdef.AsmdefNode> userAsmdefs, LintAsmdef.Graph graph)
     {
-        var visited = new HashSet<LintAsmdef.AsmdefNode>();
-        var sorted = new List<LintAsmdef.AsmdefNode>();
         var userSet = new HashSet<LintAsmdef.AsmdefNode>(userAsmdefs);
+        var depth = new Dictionary<LintAsmdef.AsmdefNode, int>();
 
-        void Visit(LintAsmdef.AsmdefNode n)
+        int Compute(LintAsmdef.AsmdefNode n, HashSet<LintAsmdef.AsmdefNode> stack)
         {
-            if (!visited.Add(n)) return;
+            if (depth.TryGetValue(n, out var d)) return d;
+            if (!stack.Add(n)) return 0; // cycle — clamp
+            int max = 0;
             foreach (var refTok in n.References)
             {
                 var dep = LintAsmdef.ResolveRef(refTok, graph);
-                if (dep != null && dep != n && userSet.Contains(dep)) Visit(dep);
+                if (dep == null || dep == n || !userSet.Contains(dep)) continue;
+                int dd = Compute(dep, stack);
+                if (dd + 1 > max) max = dd + 1;
             }
-            sorted.Add(n);
+            stack.Remove(n);
+            depth[n] = max;
+            return max;
         }
-        foreach (var n in userAsmdefs.Where(a => a.AsmdefPath != null)) Visit(n);
-        // Predefined assemblies last.
+        foreach (var n in userAsmdefs.Where(a => a.AsmdefPath != null))
+            Compute(n, new HashSet<LintAsmdef.AsmdefNode>());
+        int predefinedDepth = (depth.Values.Count > 0 ? depth.Values.Max() : 0) + 1;
         foreach (var p in userAsmdefs.Where(a => a.AsmdefPath == null))
-        {
-            visited.Add(p);
-            sorted.Add(p);
-        }
-        return sorted;
+            depth[p] = predefinedDepth;
+
+        return depth.GroupBy(kvp => kvp.Value).OrderBy(g => g.Key)
+                    .Select(g => g.Select(x => x.Key).ToList()).ToList();
     }
 
     /// <summary>Topological sort of the asmdef DAG. Predefined assemblies depend on every
@@ -345,7 +387,7 @@ internal static class LintUnity
                 lines.Add($"{rel}:{pos.Line + 1}:{pos.Character + 1}: {sev} {d.Id}: {d.GetMessage()}  [{r.Node.Name}]");
             }
         }
-        sb.AppendLine($"Files: {totalFiles}  Errors: {totalErrors}{(includeWarnings ? $"  Warnings: {totalWarnings}" : "")}  Mode: unity (asmdef-aware, {asmdefsCompiled} compiled, {asmdefsSkipped} skipped, {run.RefCount} engine refs, {run.TotalMs}ms)");
+        sb.AppendLine($"Files: {totalFiles}  Errors: {totalErrors}{(includeWarnings ? $"  Warnings: {totalWarnings}" : "")}  Mode: unity (asmdef-aware, {asmdefsCompiled} compiled, {asmdefsSkipped} skipped, {run.UserAsmdefCount} user asmdefs, {run.RefCount} engine refs, {run.FilterDebugCount} dupe-refs filtered, {run.TotalMs}ms)");
         if (totalErrors == 0 && (!includeWarnings || totalWarnings == 0))
         {
             sb.Append("OK — no errors. Per-asmdef compile passed.\nThis is the closest we get to Unity's compile pipeline without running Unity.");

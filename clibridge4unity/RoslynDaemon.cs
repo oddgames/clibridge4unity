@@ -62,16 +62,19 @@ static class RoslynDaemon
         catch { return null; }
     }
 
-    /// <summary>Query the daemon via named pipe. Retries once on transient failure.</summary>
+    /// <summary>Query the daemon via named pipe. Retries once on transient failure.
+    /// Long-running endpoints (`lint` per-asmdef compile, `analyze` deep) get a 5-min
+    /// timeout — others use 30s.</summary>
     public static string Query(string pipeName, string endpoint, string query)
     {
-        var result = QueryInternal(pipeName, endpoint, query, 30000, out string error);
+        int timeoutMs = endpoint == "lint" ? 300_000 : 30_000;
+        var result = QueryInternal(pipeName, endpoint, query, timeoutMs, out string error);
         if (result != null) return result;
 
         // One retry — covers the brief window after a listener finishes and before
         // a sibling listener re-arms under heavy concurrent load.
         Thread.Sleep(100);
-        result = QueryInternal(pipeName, endpoint, query, 30000, out error);
+        result = QueryInternal(pipeName, endpoint, query, timeoutMs, out error);
         if (result == null && error != null)
             Console.Error.WriteLine($"[roslyn] daemon query failed: {error}");
         return result;
@@ -556,13 +559,15 @@ static class RoslynDaemon
                             break;
                         }
                         string q = (query ?? "").Trim().ToLowerInvariant();
-                        bool syntaxMode = q.Contains("syntax");
                         bool semantic = q.Contains("semantic") || q.Contains("full");
+                        bool unityMode = q.Contains("unity");
                         bool includeWarnings = q.Contains("warning");
                         bool graphProbe = q.Contains("graph");
-                        // Default = unity (per-asmdef, Unity-faithful). Other modes are explicit opt-ins.
-                        bool unityMode = !syntaxMode && !semantic && !graphProbe;
                         if (graphProbe) { response = RunAsmdefGraphProbe(projectPath); break; }
+                        // Default = syntax-only. The semantic/unity modes work great on small/clean
+                        // projects but false-positive on big projects with precompiled-DLL/source
+                        // type overlaps (typical for legacy Unity asset-store-heavy codebases).
+                        // Opt into deeper checks explicitly with `LINT semantic` or `LINT unity`.
                         if (unityMode)
                         {
                             // Unity-faithful per-asmdef compile. Reuses daemon's parsed file texts.

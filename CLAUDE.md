@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
 │   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.18)
+│   └── package.json           # UPM manifest (v1.1.19)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -226,10 +226,10 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `PROBE` - Quick main thread health check
 - `DIAG` - Diagnostic info (no main thread needed)
 - `STATUS` - Get Unity Editor status, including C# compile and UI Toolkit import errors
-- `LINT [warnings]` - **Default: Unity-faithful per-asmdef compile (PREFER OVER COMPILE).** ~2-3s. Parses every asmdef, builds DAG, compiles each USER asmdef separately with correct refs + defines + UNITY_EDITOR scoping. Uses `Library/ScriptAssemblies/<package>.dll` for package refs (already Unity-compiled). Respects asmdef boundaries.
-- `LINT syntax [warnings]` - Syntax-only fast check (~1s). Catches braces, strings, keywords, malformed declarations. No type binding.
-- `LINT semantic [warnings]` - Lump-compile semantic (~1s). Catches type errors but cross-asmdef false positives.
-- `COMPILE` - Force script recompilation (Unity-side, triggers domain reload, breaks pipe). Use only when you need source generators, post-compile callbacks, or generated code (ILPP).
+- `LINT [warnings]` - **Default: syntax-only fast check (~1s).** Catches braces, strings, keywords, malformed decls. Reliable on any project. Daemon FileSystemWatcher → catches errors in NEW files Unity hasn't seen.
+- `LINT semantic [warnings]` - Lump-compile with type binding (~1-3s). Catches missing methods, type errors, missing usings. **May false-positive on plugin-heavy projects** with precompiled-DLL/source type overlaps.
+- `LINT unity [warnings]` - Per-asmdef Unity-faithful (~2-30s). Respects asmdef boundaries. **Experimental** — can false-positive on big legacy projects.
+- `COMPILE` - Force script recompilation (Unity-side, triggers domain reload, breaks pipe). The ground truth — use when LINT modes give false positives or you need source generators / post-compile callbacks.
 - `REFRESH` - Force asset database refresh
 - `LOG [filter]` - Get bridge-captured Unity logs; use `LOG ui errors` for current USS/UXML/TSS import errors
   - Commands that reference `.uss`, `.uxml`, or `.tss` assets append matching UI Toolkit import errors automatically
