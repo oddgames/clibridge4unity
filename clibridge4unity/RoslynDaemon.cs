@@ -560,23 +560,11 @@ static class RoslynDaemon
                         }
                         string q = (query ?? "").Trim().ToLowerInvariant();
                         bool semantic = q.Contains("semantic") || q.Contains("full");
-                        bool unityMode = q.Contains("unity");
                         bool includeWarnings = q.Contains("warning");
-                        bool graphProbe = q.Contains("graph");
-                        if (graphProbe) { response = RunAsmdefGraphProbe(projectPath); break; }
-                        // Default = syntax-only. The semantic/unity modes work great on small/clean
-                        // projects but false-positive on big projects with precompiled-DLL/source
-                        // type overlaps (typical for legacy Unity asset-store-heavy codebases).
-                        // Opt into deeper checks explicitly with `LINT semantic` or `LINT unity`.
-                        if (unityMode)
-                        {
-                            // Unity-faithful per-asmdef compile. Reuses daemon's parsed file texts.
-                            var fileTextsSnapshot = new Dictionary<string, string>(fileTexts.Count, StringComparer.OrdinalIgnoreCase);
-                            foreach (var kvp in fileTexts) fileTextsSnapshot[kvp.Key] = kvp.Value;
-                            var run = LintUnity.Run(projectPath, fileTextsSnapshot);
-                            response = LintUnity.Format(run, projectPath, includeWarnings);
-                            break;
-                        }
+                        // Default = syntax-only (sub-second, reliable). `LINT semantic` opts into
+                        // type-binding (~1-15s depending on project size). The previous `LINT unity`
+                        // per-asmdef mode was removed — too slow on big projects + false-positives
+                        // from precompiled-DLL/source type overlaps.
                         response = semantic
                             ? RunSemanticLint(trees, projectPath, includeWarnings)
                             : RunSyntaxLint(trees, projectPath, includeWarnings);
@@ -880,39 +868,6 @@ static class RoslynDaemon
           .Append(d.GetMessage()).Append('\n');
     }
 
-    static string RunAsmdefGraphProbe(string projectPath)
-    {
-        var sw = Stopwatch.StartNew();
-        var graph = LintAsmdef.Build(projectPath);
-        sw.Stop();
-        var sb = new StringBuilder();
-        sb.AppendLine($"=== asmdef graph ({sw.ElapsedMilliseconds}ms) ===");
-        sb.AppendLine($"Total asmdefs: {graph.All.Count}");
-        sb.AppendLine($"  Predefined: 4 ({graph.AssemblyCSharp.SourceFiles.Count} + {graph.AssemblyCSharpEditor.SourceFiles.Count} + {graph.AssemblyCSharpFirstpass.SourceFiles.Count} + {graph.AssemblyCSharpEditorFirstpass.SourceFiles.Count} files)");
-        int realCount = graph.All.Count - 4;
-        int withFiles = graph.All.Count(a => a.SourceFiles.Count > 0);
-        int totalFiles = graph.All.Sum(a => a.SourceFiles.Count);
-        sb.AppendLine($"  Real asmdefs: {realCount}");
-        sb.AppendLine($"  Asmdefs with files: {withFiles}");
-        sb.AppendLine($"  Total .cs routed: {totalFiles}");
-        sb.AppendLine();
-        sb.AppendLine("Top 10 by file count:");
-        foreach (var a in graph.All.OrderByDescending(x => x.SourceFiles.Count).Take(10))
-            sb.AppendLine($"  {a.SourceFiles.Count,5}  {a.Name}");
-        sb.AppendLine();
-        sb.AppendLine("Sample reference resolution (first 5 user asmdefs):");
-        foreach (var a in graph.All.Where(x => x.AsmdefPath != null && !x.AsmdefPath.Contains("PackageCache")).Take(5))
-        {
-            sb.AppendLine($"  {a.Name}:");
-            foreach (var refTok in a.References.Take(3))
-            {
-                var resolved = LintAsmdef.ResolveRef(refTok, graph);
-                sb.AppendLine($"    {refTok} → {(resolved != null ? resolved.Name : "(unresolved)")}");
-            }
-            if (a.References.Count > 3) sb.AppendLine($"    ... +{a.References.Count - 3} more");
-        }
-        return sb.ToString().TrimEnd();
-    }
 
     static string FormatLintResponse(StringBuilder body, int fileCount, int errorCount, int warnCount,
                                      bool includeWarnings, string mode, string okHint)

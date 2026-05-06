@@ -549,6 +549,13 @@ namespace clibridge4unity
             return _commands.TryGetValue(name, out var cmd) ? cmd : null;
         }
 
+        // Commands that don't need main thread, safe to run during Player Build (read-only diagnostics).
+        // All other commands are blocked while BuildPipeline.isBuildingPlayer is true.
+        private static readonly HashSet<string> BuildBypassCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "PING", "DIAG", "STATUS", "PROBE", "HELP", "LOG", "STACK_MINIMIZE"
+        };
+
         // Commands that work even with compile errors (diagnostics, non-Unity-code commands)
         private static readonly HashSet<string> CompileErrorBypassCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -562,6 +569,17 @@ namespace clibridge4unity
             var cmd = GetCommand(name);
             if (cmd == null)
                 return Response.Error($"Unknown command: {name}. Use HELP for available commands.");
+
+            // Block commands during Player Build — main thread is monopolised by the build,
+            // so any RequiresMainThread command will time out + bubble as a build failure.
+            // Allow only read-only diagnostics that don't need main thread.
+            if (UnityEditor.BuildPipeline.isBuildingPlayer && !BuildBypassCommands.Contains(name))
+            {
+                return Response.Error(
+                    $"Unity is in the middle of a Player Build — '{name}' is blocked to prevent timeouts.\n" +
+                    "Wait for the build to finish, or use these read-only commands during build:\n" +
+                    $"  {string.Join(", ", BuildBypassCommands)}");
+            }
 
             // Block commands when there are compile errors (except diagnostic/fix commands)
             if (GetCompileErrors != null && !CompileErrorBypassCommands.Contains(name))
