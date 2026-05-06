@@ -18,10 +18,14 @@ namespace clibridge4unity
     [UnityEditor.InitializeOnLoad]
     public static class LogCommands
     {
-        private static readonly ConcurrentQueue<LogEntry> _pendingWrites = new ConcurrentQueue<LogEntry>();
-        private static string _logFilePath;
+        // Lazy log capture: `Application.logMessageReceived` is subscribed only WHILE a command
+        // is executing — ExecuteCommand wraps each command in BeginCommandCapture/EndCommandCapture.
+        // Logs from before/between commands aren't buffered (use Unity's Console via LOG instead).
+        // Eliminates the per-frame allocation churn the old streaming-to-file design caused.
+        private static readonly List<LogEntry> _currentCapture = new List<LogEntry>();
+        private static readonly object _currentCaptureLock = new object();
         private static long _nextId;
-        private static bool _flushSubscribed;
+        private static bool _captureSubscribed;
 
         // Compile errors persist across log clears — tracked separately
         private static readonly List<CompilerMessage> _compileErrors = new List<CompilerMessage>();
@@ -67,52 +71,83 @@ namespace clibridge4unity
                 }
             }
 
-            string projectRoot = Application.dataPath.Replace("/Assets", "");
-            string normalizedPath = projectRoot.ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
-            string projectHash = BridgeServer.GetDeterministicHashCode(normalizedPath).ToString("X8");
-            string projectName = Heartbeat.SanitizeName(Path.GetFileName(projectRoot.TrimEnd('/', '\\')));
-            _logFilePath = Path.Combine(Path.GetTempPath(), $"clibridge4unity_logs_{projectHash}_{projectName}.log");
-            BridgeDiagnostics.Log("LogCommands", $"log file: {_logFilePath}");
-
             BridgeDiagnostics.Log("LogCommands", "registering hooks");
-            CommandRegistry.GetLastLogId = GetLastLogId;
-            CommandRegistry.GetLogsSinceFormatted = GetLogsSinceFormatted;
+            CommandRegistry.BeginCommandLogCapture = BeginCommandCapture;
+            CommandRegistry.EndCommandLogCapture = EndCommandCapture;
             CommandRegistry.GetCompileErrors = GetCompileErrorsSummary;
             CommandRegistry.GetUiToolkitDiagnosticsForCommand = GetUiToolkitDiagnosticsForCommand;
             CommandRegistry.ShortenResponsePaths = StackTraceMinimizer.ShortenPaths;
 
-            BridgeDiagnostics.Log("LogCommands", "subscribing events");
+            BridgeDiagnostics.Log("LogCommands", "subscribing compile events (rare, cheap)");
             CompilationPipeline.assemblyCompilationFinished += OnAssemblyCompilationFinished;
             CompilationPipeline.compilationStarted += _ =>
             {
                 lock (_compileErrorLock) _compileErrors.Clear();
                 SessionState.SetString("Bridge_CompileErrors", "");
             };
-
-            Application.logMessageReceived += OnLogMessage;
-            BridgeDiagnostics.Log("LogCommands", "events subscribed");
-
-            try
-            {
-                if (File.Exists(_logFilePath) && new FileInfo(_logFilePath).Length > 1_000_000)
-                {
-                    TrimLogFile(500);
-                    BridgeDiagnostics.Log("LogCommands", "trimmed log file");
-                }
-            }
-            catch (Exception ex) { BridgeDiagnostics.LogException("LogCommands trim", ex); }
             BridgeDiagnostics.Log("LogCommands", "Initialize exit");
+        }
+
+        // ─── Lazy command-scoped log capture ─────────────────────────────────────
+        /// <summary>Subscribe to `Application.logMessageReceived` for the duration of one command.
+        /// Reset capture buffer. Called by CommandRegistry.ExecuteCommand at command start.</summary>
+        public static void BeginCommandCapture()
+        {
+            lock (_currentCaptureLock) _currentCapture.Clear();
+            if (!_captureSubscribed)
+            {
+                Application.logMessageReceived += OnLogMessage;
+                _captureSubscribed = true;
+            }
+        }
+
+        /// <summary>Unsubscribe + return formatted captured logs (errors/exceptions only by default).
+        /// Returns null if nothing to surface.</summary>
+        public static string EndCommandCapture(int maxLines = 5, bool errorsOnly = true)
+        {
+            if (_captureSubscribed)
+            {
+                Application.logMessageReceived -= OnLogMessage;
+                _captureSubscribed = false;
+            }
+            return GetCurrentCaptureFormatted(maxLines, errorsOnly);
+        }
+
+        /// <summary>Peek current capture without unsubscribing — used by CODE_EXEC for log-settling polls.</summary>
+        public static int GetCurrentCaptureCount()
+        {
+            lock (_currentCaptureLock) return _currentCapture.Count;
+        }
+
+        /// <summary>Format captured logs for response. errorsOnly=false includes Debug.Log
+        /// (used by CODE_EXEC where info logs are the primary user feedback).</summary>
+        public static string GetCurrentCaptureFormatted(int maxLines = 50, bool errorsOnly = false)
+        {
+            List<LogEntry> snapshot;
+            lock (_currentCaptureLock)
+            {
+                if (_currentCapture.Count == 0) return null;
+                snapshot = errorsOnly
+                    ? _currentCapture.Where(e => e.Type == LogType.Error || e.Type == LogType.Exception || e.Type == LogType.Assert).ToList()
+                    : new List<LogEntry>(_currentCapture);
+            }
+            if (snapshot.Count == 0) return null;
+            if (snapshot.Count > maxLines)
+                snapshot = snapshot.Skip(snapshot.Count - maxLines).ToList();
+            var sb = new StringBuilder();
+            sb.AppendLine($"--- {(errorsOnly ? "Errors" : "Logs")} ({snapshot.Count}) ---");
+            FormatEntriesCompact(snapshot, sb, includeTimestamp: false);
+            return sb.ToString().TrimEnd();
         }
 
         private static void ShutdownForReload()
         {
             BridgeDiagnostics.Log("LogCommands", "ShutdownForReload enter");
-            if (_flushSubscribed)
+            if (_captureSubscribed)
             {
-                UnityEditor.EditorApplication.update -= FlushPendingWrites;
-                _flushSubscribed = false;
+                Application.logMessageReceived -= OnLogMessage;
+                _captureSubscribed = false;
             }
-            Application.logMessageReceived -= OnLogMessage;
             CompilationPipeline.assemblyCompilationFinished -= OnAssemblyCompilationFinished;
             UnityEditor.SessionState.SetInt(SessionKeys.LogNextId, (int)_nextId);
 
@@ -124,8 +159,6 @@ namespace clibridge4unity
                     SessionState.SetString("Bridge_CompileErrors", errors);
                 }
             }
-
-            FlushPendingWrites();
             BridgeDiagnostics.Log("LogCommands", "ShutdownForReload exit");
         }
 
@@ -280,6 +313,8 @@ namespace clibridge4unity
 
         private static void OnLogMessage(string message, string stackTrace, LogType type)
         {
+            // Cap buffer size to prevent runaway growth if a command logs in a tight loop.
+            const int maxBufferSize = 500;
             var entry = new LogEntry
             {
                 Id = System.Threading.Interlocked.Increment(ref _nextId),
@@ -288,127 +323,16 @@ namespace clibridge4unity
                 Message = message,
                 StackTrace = stackTrace
             };
-
-            _pendingWrites.Enqueue(entry);
-            EnsureFlushSubscribed();
-        }
-
-        private static void EnsureFlushSubscribed()
-        {
-            if (_flushSubscribed) return;
-            UnityEditor.EditorApplication.update += FlushPendingWrites;
-            _flushSubscribed = true;
-        }
-
-        private static void FlushPendingWrites()
-        {
-            if (_pendingWrites.IsEmpty)
+            lock (_currentCaptureLock)
             {
-                if (_flushSubscribed)
-                {
-                    UnityEditor.EditorApplication.update -= FlushPendingWrites;
-                    _flushSubscribed = false;
-                }
-                return;
-            }
-
-            var sb = new StringBuilder();
-            int count = 0;
-            while (_pendingWrites.TryDequeue(out var entry))
-            {
-                count++;
-                string typeTag = LogTypeToTag(entry.Type);
-                // Tab-separated format: ID\tTimestamp\tType\tMessage\tStackTrace
-                string msg = entry.Message?.Replace("\n", "\\n").Replace("\t", " ") ?? "";
-                string stack = entry.StackTrace?.Replace("\n", "\\n").Replace("\t", " ") ?? "";
-                sb.AppendLine($"{entry.Id}\t{entry.Timestamp:yyyy-MM-dd HH:mm:ss.fff}\t{typeTag}\t{msg}\t{stack}");
-            }
-
-            if (sb.Length > 0)
-            {
-                try { File.AppendAllText(_logFilePath, sb.ToString()); }
-                catch (Exception ex) { BridgeDiagnostics.LogException("LogCommands FlushPendingWrites", ex); }
-                BridgeDiagnostics.Log("LogCommands", $"flushed pending writes: {count}");
-            }
-
-            if (_pendingWrites.IsEmpty && _flushSubscribed)
-            {
-                UnityEditor.EditorApplication.update -= FlushPendingWrites;
-                _flushSubscribed = false;
+                if (_currentCapture.Count >= maxBufferSize) _currentCapture.RemoveAt(0);
+                _currentCapture.Add(entry);
             }
         }
 
-        /// <summary>
-        /// Returns the current last log ID (for capturing logs during a command).
-        /// </summary>
-        public static long GetLastLogId()
-        {
-            FlushPendingWrites();
-            var entries = ReadLogFile();
-            return entries.Count > 0 ? entries[entries.Count - 1].Id : 0;
-        }
-
-        /// <summary>
-        /// Returns formatted log entries since the given ID (for appending to command responses).
-        /// Only includes errors/exceptions — warnings and info are noise for LLM consumers.
-        /// Suppresses duplicates of errors that were already in the log before the command ran:
-        /// Unity re-emits compile errors on many internal events, so they would otherwise pollute
-        /// every command's response with stale, already-known errors.
-        /// </summary>
-        public static string GetLogsSinceFormatted(long sinceId, int maxLines = 5)
-        {
-            FlushPendingWrites();
-            var all = ReadLogFile();
-
-            // Set of error messages that already existed in the log when the command started.
-            // Anything new with the same message text is a re-emission, not a fresh error.
-            var seenBefore = new HashSet<string>(StringComparer.Ordinal);
-            for (int i = 0; i < all.Count; i++)
-            {
-                var e = all[i];
-                if (e.Id <= sinceId
-                    && (e.Type == LogType.Error || e.Type == LogType.Exception || e.Type == LogType.Assert))
-                    seenBefore.Add(e.Message ?? "");
-            }
-
-            var entries = all
-                .Where(e => e.Id > sinceId
-                         && (e.Type == LogType.Error || e.Type == LogType.Exception || e.Type == LogType.Assert)
-                         && !seenBefore.Contains(e.Message ?? ""))
-                .ToList();
-            if (entries.Count == 0) return null;
-
-            // Limit to last N to avoid bloating responses
-            if (entries.Count > maxLines)
-                entries = entries.Skip(entries.Count - maxLines).ToList();
-
-            var sb = new StringBuilder();
-            sb.AppendLine($"--- Errors ({entries.Count}) ---");
-            FormatEntriesCompact(entries, sb, includeTimestamp: false);
-            return sb.ToString().TrimEnd();
-        }
-
-        /// <summary>
-        /// Returns ALL log entries since the given ID (any severity), formatted compactly.
-        /// Used by commands that surface user-visible output, e.g. CODE_EXEC where Debug.Log
-        /// is the primary feedback channel and `GetLogsSinceFormatted` (errors-only) misses it.
-        /// </summary>
-        public static string GetLogsSinceAllFormatted(long sinceId, int maxLines = 30)
-        {
-            FlushPendingWrites();
-            var entries = ReadLogFile()
-                .Where(e => e.Id > sinceId)
-                .ToList();
-            if (entries.Count == 0) return null;
-
-            if (entries.Count > maxLines)
-                entries = entries.Skip(entries.Count - maxLines).ToList();
-
-            var sb = new StringBuilder();
-            sb.AppendLine($"--- Logs ({entries.Count}) ---");
-            FormatEntriesCompact(entries, sb, includeTimestamp: false);
-            return sb.ToString().TrimEnd();
-        }
+        // GetLastLogId / GetLogsSinceFormatted / GetLogsSinceAllFormatted removed — replaced by
+        // BeginCommandCapture / EndCommandCapture / GetCurrentCaptureFormatted (lazy in-memory).
+        // LOG command queries Unity's Console directly via LogEntries reflection (see GetLogs).
 
         public sealed class UiToolkitDiagnostic
         {
@@ -655,13 +579,18 @@ namespace clibridge4unity
             RelatedCommands = new[] { "STACK_MINIMIZE", "STATUS" })]
         public static string GetLogs(string data)
         {
-            FlushPendingWrites();
-
             var args = CommandArgs.Parse(data, LogFlags, LogOptions);
 
             if (args.Has("clear"))
             {
-                try { File.Delete(_logFilePath); }
+                lock (_currentCaptureLock) _currentCapture.Clear();
+                try
+                {
+                    var logEntries = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntries");
+                    var clearMethod = logEntries?.GetMethod("Clear",
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                    clearMethod?.Invoke(null, null);
+                }
                 catch { }
                 return Response.Success("Log buffer cleared");
             }
@@ -673,7 +602,8 @@ namespace clibridge4unity
                 return args.WarningPrefix() + FormatUiToolkitDiagnostics(diagnostics, args.Has("errors"));
             }
 
-            var entries = ReadLogFile();
+            // Read entries directly from Unity's Console via reflection (no in-process file).
+            var entries = ReadConsoleEntries();
 
             // Type filter
             if (args.Has("errors"))
@@ -681,7 +611,7 @@ namespace clibridge4unity
             else if (args.Has("warnings"))
                 entries = entries.Where(e => e.Type != LogType.Log).ToList();
 
-            // Text filter (--filter or filter:text or grep:text — substring match on message + stack)
+            // Text filter
             string filterText = args.Get("filter") ?? args.Get("grep");
             if (!string.IsNullOrEmpty(filterText))
             {
@@ -689,16 +619,6 @@ namespace clibridge4unity
                     (e.Message != null && e.Message.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) >= 0) ||
                     (e.StackTrace != null && e.StackTrace.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) >= 0)
                 ).ToList();
-            }
-
-            // Range filter
-            if (args.Options.ContainsKey("since"))
-            {
-                long sinceId = args.GetLong("since", -1);
-                if (sinceId >= 0)
-                    entries = entries.Where(e => e.Id > sinceId).ToList();
-                else
-                    return Response.Error("Invalid ID in since:N");
             }
 
             // Count: last:N or all bypass default cap
@@ -716,7 +636,6 @@ namespace clibridge4unity
                     entries = entries.Skip(entries.Count - DefaultLogCount).ToList();
             }
 
-            // Format
             string prefix = args.WarningPrefix();
 
             if (args.Has("raw"))
@@ -731,45 +650,64 @@ namespace clibridge4unity
             return prefix + FormatLogResponse(entries);
         }
 
-        private static List<LogEntry> ReadLogFile()
+        /// <summary>Read entries from Unity's Console via LogEntries reflection. Replaces the
+        /// old streamed-to-file capture — Console is the source of truth and survives reloads.</summary>
+        private static List<LogEntry> ReadConsoleEntries()
         {
             var entries = new List<LogEntry>();
-            if (!File.Exists(_logFilePath)) return entries;
-
             try
             {
-                foreach (var line in File.ReadAllLines(_logFilePath))
-                {
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    var parts = line.Split('\t');
-                    if (parts.Length < 4) continue;
+                var asm = typeof(UnityEditor.Editor).Assembly;
+                var logEntriesType = asm.GetType("UnityEditor.LogEntries");
+                var logEntryType = asm.GetType("UnityEditor.LogEntry");
+                if (logEntriesType == null || logEntryType == null) return entries;
 
-                    var entry = new LogEntry();
-                    if (!long.TryParse(parts[0], out entry.Id)) continue;
-                    if (!DateTime.TryParse(parts[1], out entry.Timestamp)) continue;
-                    entry.Type = TagToLogType(parts[2]);
-                    entry.Message = parts[3].Replace("\\n", "\n");
-                    entry.StackTrace = parts.Length > 4 ? parts[4].Replace("\\n", "\n") : "";
-                    entries.Add(entry);
+                var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public;
+                var startGetting = logEntriesType.GetMethod("StartGettingEntries", flags);
+                var endGetting = logEntriesType.GetMethod("EndGettingEntries", flags);
+                var getEntry = logEntriesType.GetMethod("GetEntryInternal", flags);
+                var getCount = logEntriesType.GetMethod("GetCount", flags);
+                var messageField = logEntryType.GetField("message");
+                var modeField = logEntryType.GetField("mode");
+                if (startGetting == null || getCount == null || getEntry == null || messageField == null) return entries;
+
+                startGetting.Invoke(null, null);
+                try
+                {
+                    int count = (int)getCount.Invoke(null, null);
+                    for (int i = 0; i < count; i++)
+                    {
+                        var entryObj = Activator.CreateInstance(logEntryType);
+                        if (!(bool)getEntry.Invoke(null, new object[] { i, entryObj })) continue;
+                        string msg = messageField.GetValue(entryObj)?.ToString() ?? "";
+                        int mode = 0;
+                        if (modeField != null)
+                            try { mode = Convert.ToInt32(modeField.GetValue(entryObj)); } catch { }
+                        var split = msg.Split(new[] { '\n' }, 2);
+                        entries.Add(new LogEntry
+                        {
+                            Id = i + 1,
+                            Timestamp = DateTime.Now,
+                            Type = ModeToLogType(mode),
+                            Message = split[0],
+                            StackTrace = split.Length > 1 ? split[1] : ""
+                        });
+                    }
                 }
+                finally { endGetting?.Invoke(null, null); }
             }
             catch { }
-
             return entries;
         }
 
-        private static void TrimLogFile(int keepLines)
+        static LogType ModeToLogType(int mode)
         {
-            try
-            {
-                var lines = File.ReadAllLines(_logFilePath);
-                if (lines.Length > keepLines)
-                {
-                    var trimmed = lines.Skip(lines.Length - keepLines).ToArray();
-                    File.WriteAllLines(_logFilePath, trimmed);
-                }
-            }
-            catch { }
+            // Unity LogEntry.mode bits (best-effort, internal API):
+            // 0x100 = Error, 0x200 = Assert, 0x400 = Warning, otherwise Log
+            if ((mode & 0x100) != 0 || (mode & 0x10000) != 0) return LogType.Error;
+            if ((mode & 0x200) != 0) return LogType.Assert;
+            if ((mode & 0x400) != 0) return LogType.Warning;
+            return LogType.Log;
         }
 
         private static string FormatLogResponse(List<LogEntry> entries)

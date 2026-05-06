@@ -43,8 +43,10 @@ namespace clibridge4unity
         private static bool _isInitialized;
 
         // Log capture hooks - set by LogCommands to avoid circular asmdef dependency
-        public static Func<long> GetLastLogId;
-        public static Func<long, int, string> GetLogsSinceFormatted;
+        // Lazy log capture hooks — wired by LogCommands. Begin subscribes to logMessageReceived
+        // for the duration of one command; End unsubscribes + returns formatted captured logs.
+        public static Action BeginCommandLogCapture;
+        public static Func<int, bool, string> EndCommandLogCapture;
         public static Func<string, string, string, string> GetUiToolkitDiagnosticsForCommand;
 
         // Compile error hook - set by LogCommands to check for active compiler errors
@@ -561,7 +563,9 @@ namespace clibridge4unity
         // Cached `BuildPipeline.isBuildingPlayer` flag — that API is main-thread-only, so we poll
         // it from a dedicated EditorApplication.update tick and read the cached value from any
         // thread (ExecuteCommand runs on the threadpool when invoked from a pipe handler).
+        // Throttled to every 0.5s — Player Builds last seconds-to-minutes, no need to poll 60Hz.
         private static volatile bool _isBuildingPlayer;
+        private static double _lastBuildPollTime;
         private static bool _buildPollSubscribed;
         private static void StartBuildPolling()
         {
@@ -569,6 +573,9 @@ namespace clibridge4unity
             _buildPollSubscribed = true;
             EditorApplication.update += () =>
             {
+                double now = EditorApplication.timeSinceStartup;
+                if (now - _lastBuildPollTime < 0.5) return;
+                _lastBuildPollTime = now;
                 try { _isBuildingPlayer = UnityEditor.BuildPipeline.isBuildingPlayer; }
                 catch { /* ignore — Unity not ready */ }
             };
@@ -612,13 +619,13 @@ namespace clibridge4unity
                 catch { }
             }
 
-            // Capture log position before command execution
-            // Skip for: LOG itself, lightweight commands, and internal calls (pipe == null)
-            long logIdBefore = 0;
-            bool captureLogs = pipe != null && name != "LOG" && name != "PING" && name != "HELP" && name != "PROBE" && name != "DIAG" && GetLastLogId != null;
+            // Lazy log capture: subscribe only for commands that benefit from it.
+            // Skip lightweight diagnostics + LOG itself + internal calls (pipe == null).
+            bool captureLogs = pipe != null && name != "LOG" && name != "PING" && name != "HELP"
+                            && name != "PROBE" && name != "DIAG" && BeginCommandLogCapture != null;
             if (captureLogs)
             {
-                try { logIdBefore = GetLastLogId(); }
+                try { BeginCommandLogCapture(); }
                 catch { captureLogs = false; }
             }
 
@@ -629,8 +636,6 @@ namespace clibridge4unity
             }
             catch (Exception ex)
             {
-                // Timeouts during domain reload / asset import are expected and noisy —
-                // log at warning level so they don't spam the Unity console as errors.
                 if (ex is TimeoutException)
                     Debug.LogWarning($"[Bridge] Command '{name}' timed out: {ex.Message}");
                 else
@@ -638,12 +643,12 @@ namespace clibridge4unity
                 response = Response.Exception(ex);
             }
 
-            // Append any logs that occurred during command execution
-            if (captureLogs && response != null && GetLogsSinceFormatted != null)
+            // End capture + append errors that occurred during command execution
+            if (captureLogs && response != null && EndCommandLogCapture != null)
             {
                 try
                 {
-                    string recentLogs = GetLogsSinceFormatted(logIdBefore, 5);
+                    string recentLogs = EndCommandLogCapture(5, true);
                     if (recentLogs != null)
                         response = response + "\n" + recentLogs;
                 }

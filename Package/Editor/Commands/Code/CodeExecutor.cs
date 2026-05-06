@@ -81,9 +81,8 @@ namespace clibridge4unity
 
                 if (!initialized) Initialize();
 
-                // Snapshot log position BEFORE running so we can return everything CODE_EXEC produced.
-                long execStartLogId = CommandRegistry.GetLastLogId?.Invoke() ?? 0;
-
+                // ExecuteCommand wrapper already started log capture for this command —
+                // we just need to peek the buffer + wait for logs to settle.
                 string fullCode = WrapCode(code);
                 int codeHash = fullCode.GetHashCode();
 
@@ -117,29 +116,28 @@ namespace clibridge4unity
 
                 // Wait up to 5s for additional logs (code may trigger async operations)
                 // Exit early once logs settle (no new logs for 500ms)
-                long lastLogId = CommandRegistry.GetLastLogId?.Invoke() ?? 0;
+                int lastCount = LogCommands.GetCurrentCaptureCount();
                 int elapsed = 0;
                 int stableMs = 0;
                 while (elapsed < 5000)
                 {
                     await Task.Delay(250);
                     elapsed += 250;
-                    long currentId = CommandRegistry.GetLastLogId?.Invoke() ?? 0;
-                    if (currentId > lastLogId)
+                    int currentCount = LogCommands.GetCurrentCaptureCount();
+                    if (currentCount > lastCount)
                     {
-                        lastLogId = currentId;
-                        stableMs = 0; // reset stability counter on new log
+                        lastCount = currentCount;
+                        stableMs = 0;
                     }
                     else
                     {
                         stableMs += 250;
-                        if (stableMs >= 500) break; // no new logs for 500ms, we're done
+                        if (stableMs >= 500) break;
                     }
                 }
 
-                // Pull every log line emitted during this CODE_EXEC (Debug.Log, warnings, errors)
-                // and include them in the response — they're the primary feedback channel.
-                string captured = LogCommands.GetLogsSinceAllFormatted(execStartLogId, maxLines: 50);
+                // Return every log captured during this command (Debug.Log/Warning/Error).
+                string captured = LogCommands.GetCurrentCaptureFormatted(maxLines: 50, errorsOnly: false);
                 if (!string.IsNullOrEmpty(captured))
                     return Response.Success("Code executed on main thread.\n" + captured);
 
@@ -195,9 +193,7 @@ namespace clibridge4unity
                 if (trace)
                     return await ExecuteTrace(code, maxTraceLines, traceFrom, traceOnly, traceVars, traceSkip);
 
-                // Snapshot log position so we can attach Debug.Log/Warning output to the response.
-                long execStartLogId = CommandRegistry.GetLastLogId?.Invoke() ?? 0;
-
+                // ExecuteCommand wrapper started log capture for this command — peek when done.
                 string fullCode = WrapCode(code);
                 int codeHash = fullCode.GetHashCode();
 
@@ -222,7 +218,7 @@ namespace clibridge4unity
                     baseResponse = FormatResult(result);
 
                 // Attach captured logs (Debug.Log/Warning/Error) so the LLM sees user output
-                string captured = LogCommands.GetLogsSinceAllFormatted(execStartLogId, maxLines: 50);
+                string captured = LogCommands.GetCurrentCaptureFormatted(maxLines: 50, errorsOnly: false);
                 if (!string.IsNullOrEmpty(captured))
                     baseResponse = baseResponse + "\n" + captured;
 

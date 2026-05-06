@@ -144,8 +144,8 @@ namespace clibridge4unity
                 return result;
             }
 
-            // Get log ID before import to detect only new errors
-            long beforeLogId = CommandRegistry.GetLastLogId != null ? CommandRegistry.GetLastLogId() : 0;
+            // Console scan is content-based (matches asset path), so no sinceLogId tracking needed.
+            long beforeLogId = 0;
 
             // Force-reimport the asset and its dependencies
             try
