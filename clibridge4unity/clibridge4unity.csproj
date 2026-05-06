@@ -8,7 +8,7 @@
     <PublishTrimmed>true</PublishTrimmed>
     <PublishReadyToRun>true</PublishReadyToRun>
     <AssemblyName>clibridge4unity</AssemblyName>
-    <Version>1.1.22</Version>
+    <Version>1.1.23</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 

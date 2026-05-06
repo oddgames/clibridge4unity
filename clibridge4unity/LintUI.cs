@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Text;
 using System.Xml;
 
@@ -36,7 +35,8 @@ internal static class LintUI
         public string Note;
     }
 
-    /// <summary>Lint every *.uxml + *.uss under Assets/ (skips Library/PackageCache).</summary>
+    /// <summary>Lint every *.uxml + *.uss under Assets/ (skips Library/PackageCache).
+    /// Pure System.Xml + brace/quote balance — no heavy deps, sub-second on 1k+ files.</summary>
     public static RunResult Run(string projectPath)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -49,13 +49,13 @@ internal static class LintUI
         result.UxmlScanned = uxml.Count;
         result.UssScanned = uss.Count;
 
-        // UXML — XML well-formedness via System.Xml. Cheap, no deps.
+        // UXML — XML well-formedness via System.Xml.
         foreach (var file in uxml) LintUxml(file, result.Issues);
 
-        // USS — load Unity's bundled ExCSS.Unity.dll via reflection. Best-effort: if not found,
-        // fall back to a hand-rolled brace/quote balance check.
-        var excssParserType = TryLoadExCSSParser();
-        foreach (var file in uss) LintUss(file, excssParserType, result.Issues);
+        // USS — brace/quote balance only. The ExCSS deep parse path was removed because
+        // bootstrapping it required LintSemantic.Resolve which is ~30s on big projects.
+        // The cheap balance check catches the common 90% (missing `}`, unclosed strings).
+        foreach (var file in uss) LintUss(file, result.Issues);
 
         sw.Stop();
         result.ElapsedMs = sw.ElapsedMilliseconds;
@@ -92,23 +92,7 @@ internal static class LintUI
         }
     }
 
-    /// <summary>Locate Unity's ExCSS.Unity.dll Parser class. Returns null if unavailable.</summary>
-    static Type TryLoadExCSSParser()
-    {
-        try
-        {
-            var (_, _, _, editorRoot, _, error) = LintSemantic.Resolve(Directory.GetCurrentDirectory());
-            if (error != null || editorRoot == null) return null;
-            string excssPath = Path.Combine(editorRoot, "Data", "Managed", "ExCSS.Unity.dll");
-            if (!File.Exists(excssPath)) return null;
-            var asm = Assembly.LoadFrom(excssPath);
-            // ExCSS exposes `Parser` for stylesheet parsing.
-            return asm.GetType("ExCSS.Parser") ?? asm.GetType("ExCSS.StylesheetParser");
-        }
-        catch { return null; }
-    }
-
-    static void LintUss(string file, Type parserType, List<Issue> issues)
+    static void LintUss(string file, List<Issue> issues)
     {
         string text;
         try { text = File.ReadAllText(file); }
@@ -117,40 +101,7 @@ internal static class LintUI
             issues.Add(new Issue { File = file, Line = 1, Column = 1, Code = "USS999", Message = $"read failed: {ex.Message}" });
             return;
         }
-
-        // Always run cheap brace/quote balance check — catches the common "missing }" / "unclosed string".
-        var balanceIssues = CheckBraceAndQuoteBalance(file, text);
-        if (balanceIssues.Count > 0) { issues.AddRange(balanceIssues); return; }
-
-        // ExCSS deeper parse if available.
-        if (parserType == null) return;
-        try
-        {
-            object parser = Activator.CreateInstance(parserType);
-            // Method signatures vary across ExCSS versions — try common ones.
-            var parseMethod = parserType.GetMethod("Parse", new[] { typeof(string) });
-            if (parseMethod == null) return;
-            var stylesheet = parseMethod.Invoke(parser, new object[] { text });
-            // Stylesheet has `Errors` collection.
-            var errorsProp = stylesheet?.GetType().GetProperty("Errors");
-            if (errorsProp == null) return;
-            var errorsObj = errorsProp.GetValue(stylesheet);
-            if (errorsObj is System.Collections.IEnumerable errors)
-            {
-                foreach (var err in errors)
-                {
-                    if (err == null) continue;
-                    var msgProp = err.GetType().GetProperty("Message") ?? err.GetType().GetProperty("Description");
-                    var lineProp = err.GetType().GetProperty("Line");
-                    var colProp = err.GetType().GetProperty("Column");
-                    int line = (lineProp?.GetValue(err) as int?) ?? 1;
-                    int col = (colProp?.GetValue(err) as int?) ?? 1;
-                    string msg = msgProp?.GetValue(err)?.ToString() ?? err.ToString();
-                    issues.Add(new Issue { File = file, Line = line, Column = col, Code = "USS001", Message = msg });
-                }
-            }
-        }
-        catch { /* ExCSS layout differs across Unity versions — silent fallback is OK */ }
+        issues.AddRange(CheckBraceAndQuoteBalance(file, text));
     }
 
     /// <summary>Cheap brace/quote balance check. Walks USS counting `{`/`}` (skipping strings + comments)
