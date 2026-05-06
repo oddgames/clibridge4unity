@@ -1353,8 +1353,10 @@ class Program
                 }
             }
 
-            // Fallback: parse all Assets/*.cs in-process. Slower but never fails.
-            Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass lint");
+            // Fallback: parse all Assets/*.cs in-process. 20s budget — fail fast on big projects.
+            Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass lint (20s budget)");
+            var lintBudget = System.Diagnostics.Stopwatch.StartNew();
+            const int lintBudgetMs = 20_000;
             string assetsDir = Path.Combine(projectPath, "Assets");
             if (!Directory.Exists(assetsDir))
             {
@@ -1380,16 +1382,28 @@ class Program
                 else
                 {
                     var trees = new System.Collections.Concurrent.ConcurrentBag<Microsoft.CodeAnalysis.SyntaxTree>();
-                    System.Threading.Tasks.Parallel.ForEach(files, file =>
+                    using var semCts = new System.Threading.CancellationTokenSource(
+                        Math.Max(100, lintBudgetMs - (int)lintBudget.ElapsedMilliseconds));
+                    try
                     {
-                        try
+                        System.Threading.Tasks.Parallel.ForEach(files,
+                            new System.Threading.Tasks.ParallelOptions { CancellationToken = semCts.Token },
+                            file =>
                         {
-                            var text = File.ReadAllText(file);
-                            var opts = LintSemantic.BuildParseOptions(file, builtin, user);
-                            trees.Add(Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, opts, file));
-                        }
-                        catch { }
-                    });
+                            try
+                            {
+                                var text = File.ReadAllText(file);
+                                var opts = LintSemantic.BuildParseOptions(file, builtin, user);
+                                trees.Add(Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, opts, file));
+                            }
+                            catch { }
+                        });
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        Console.Error.WriteLine($"Error: LINT semantic timed out during parse ({files.Length} files, {lintBudgetMs}ms budget). Run plain LINT instead.");
+                        return EXIT_COMMAND_ERROR;
+                    }
                     var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
                         "LintSemantic", trees, refs,
                         new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(
@@ -1424,32 +1438,44 @@ class Program
                 }
             }
 
-            // Syntax-only single-pass + UI lint (UXML/USS).
+            // Syntax-only single-pass + UI lint (UXML/USS). Honor 20s budget.
             int errors = 0, warnings = 0;
             var lines = new System.Collections.Generic.List<string>();
             var uiRun = LintUI.Run(projectPath);
             int uiErrors = uiRun.Issues.Count;
-            System.Threading.Tasks.Parallel.ForEach(files, file =>
+            using var lintCts = new System.Threading.CancellationTokenSource(
+                Math.Max(100, lintBudgetMs - (int)lintBudget.ElapsedMilliseconds));
+            try
             {
-                try
+                System.Threading.Tasks.Parallel.ForEach(files,
+                    new System.Threading.Tasks.ParallelOptions { CancellationToken = lintCts.Token },
+                    file =>
                 {
-                    var text = File.ReadAllText(file);
-                    var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, path: file);
-                    foreach (var d in tree.GetDiagnostics())
+                    try
                     {
-                        bool isErr = d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error;
-                        bool isWarn = d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Warning;
-                        if (!isErr && !isWarn) continue;
-                        if (isErr) System.Threading.Interlocked.Increment(ref errors);
-                        else System.Threading.Interlocked.Increment(ref warnings);
-                        if (isWarn && !incWarn) continue;
-                        var pos = d.Location.GetLineSpan().StartLinePosition;
-                        string rel = file.Replace(projectPath + "\\", "").Replace(projectPath + "/", "");
-                        lock (lines) lines.Add($"{rel}:{pos.Line + 1}:{pos.Character + 1}: {(isErr ? "ERROR" : "WARN")} {d.Id}: {d.GetMessage()}");
+                        var text = File.ReadAllText(file);
+                        var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, path: file);
+                        foreach (var d in tree.GetDiagnostics())
+                        {
+                            bool isErr = d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error;
+                            bool isWarn = d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Warning;
+                            if (!isErr && !isWarn) continue;
+                            if (isErr) System.Threading.Interlocked.Increment(ref errors);
+                            else System.Threading.Interlocked.Increment(ref warnings);
+                            if (isWarn && !incWarn) continue;
+                            var pos = d.Location.GetLineSpan().StartLinePosition;
+                            string rel = file.Replace(projectPath + "\\", "").Replace(projectPath + "/", "");
+                            lock (lines) lines.Add($"{rel}:{pos.Line + 1}:{pos.Character + 1}: {(isErr ? "ERROR" : "WARN")} {d.Id}: {d.GetMessage()}");
+                        }
                     }
-                }
-                catch { }
-            });
+                    catch { }
+                });
+            }
+            catch (OperationCanceledException)
+            {
+                Console.Error.WriteLine($"Error: LINT timed out after {lintBudgetMs}ms ({files.Length} files). Project too big — split into smaller asmdefs or run COMPILE.");
+                return EXIT_COMMAND_ERROR;
+            }
             Console.WriteLine($"Files: {files.Length}  Errors: {errors}{(incWarn ? $"  Warnings: {warnings}" : "")}  Mode: syntax-only (no semantic check)");
             if (errors == 0 && (!incWarn || warnings == 0))
                 Console.WriteLine("OK — no syntax errors.\nNote: this catches missing braces, bad keywords, unclosed strings.\nMisses: type errors, missing usings, wrong arg counts. Use `LINT semantic` or COMPILE for full check.");

@@ -109,11 +109,10 @@ static class RoslynDaemon
     }
 
     /// <summary>Query the daemon via named pipe. Retries once on transient failure.
-    /// Long-running endpoints (`lint` per-asmdef compile, `analyze` deep) get a 5-min
-    /// timeout — others use 30s.</summary>
+    /// LINT capped at 20s — fail fast rather than letting AI wait. Other endpoints 30s.</summary>
     public static string Query(string pipeName, string endpoint, string query)
     {
-        int timeoutMs = endpoint == "lint" ? 300_000 : 30_000;
+        int timeoutMs = endpoint == "lint" ? 20_000 : 30_000;
         var result = QueryInternal(pipeName, endpoint, query, timeoutMs, out string error);
         if (result != null) return result;
 
