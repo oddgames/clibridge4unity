@@ -55,11 +55,25 @@ static class RoslynDaemon
         try
         {
             if (!int.TryParse(File.ReadAllText(pidFile).Trim(), out int pid)) return null;
-            try { Process.GetProcessById(pid); }
+
+            // Verify process is alive AND is OUR daemon (PID reuse defense — Windows recycles PIDs
+            // and an unrelated process inheriting a stale PID would make us hang waiting on a pipe
+            // that doesn't exist).
+            Process proc;
+            try { proc = Process.GetProcessById(pid); }
             catch { CleanupFiles(projectPath); return null; }
 
+            string procName;
+            try { procName = proc.ProcessName; }
+            catch { CleanupFiles(projectPath); return null; }
+            if (!procName.Equals("clibridge4unity", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine($"[roslyn] PID {pid} is '{procName}', not our daemon — cleaning up");
+                CleanupFiles(projectPath);
+                return null;
+            }
+
             // Version check: if daemon was started by an older CLI, kill + restart.
-            // Avoids stale-daemon hangs after `clibridge4unity UPDATE` or version bumps.
             string versionFile = GetVersionFile(projectPath);
             string currentVer = typeof(RoslynDaemon).Assembly.GetName().Version?.ToString() ?? "?";
             if (File.Exists(versionFile))
@@ -70,7 +84,7 @@ static class RoslynDaemon
                     if (daemonVer != currentVer)
                     {
                         Console.Error.WriteLine($"[roslyn] daemon version mismatch ({daemonVer} vs {currentVer}) — restarting");
-                        try { Process.GetProcessById(pid).Kill(entireProcessTree: true); } catch { }
+                        try { proc.Kill(entireProcessTree: true); } catch { }
                         CleanupFiles(projectPath);
                         return null;
                     }
@@ -81,11 +95,14 @@ static class RoslynDaemon
             {
                 // Old daemon without version file — kill it, force fresh start.
                 Console.Error.WriteLine("[roslyn] daemon predates version tracking — restarting");
-                try { Process.GetProcessById(pid).Kill(entireProcessTree: true); } catch { }
+                try { proc.Kill(entireProcessTree: true); } catch { }
                 CleanupFiles(projectPath);
                 return null;
             }
 
+            // No pipe-existence pre-check — racy with daemon startup (daemon may still be indexing
+            // when CLI checks, killing a healthy-but-busy daemon and spawning duplicates).
+            // The actual command query carries its own timeout + retry, which surfaces dead pipes.
             return GeneratePipeName(projectPath);
         }
         catch { return null; }
