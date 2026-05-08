@@ -78,7 +78,7 @@ clibridge4unity ASSET_LABEL Assets/Enemy.prefab +Boss +Spawnable  # Tag with lab
 
 ### Scene & Play Mode
 ```bash
-clibridge4unity SCENE                            # Full hierarchy
+clibridge4unity INSPECTOR                        # Full active scene hierarchy (brief)
 clibridge4unity CREATE MyObject                  # Create GameObject
 clibridge4unity COMPONENT_SET Player Transform position "(1,2,3)"
 clibridge4unity PLAY                             # Enter play mode
@@ -123,14 +123,14 @@ The generated docs tell AI assistants which commands are available, when to use 
 | Category | Commands |
 |----------|----------|
 | **Core** | `PING` `PROBE` `DIAG` `STATUS` `HELP` `COMPILE` `REFRESH` `LOG` `STACK_MINIMIZE` `MENU` `PROFILE` |
-| **Lint** | `LINT` — offline syntax check, sub-second, no Unity needed. **Prefer over `COMPILE` first.** Catches errors in new files Unity hasn't seen. |
-| **Code** | `CODE_EXEC` `CODE_EXEC_RETURN` `TEST` |
-| **Scene** | `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `PLAYMODE` `SCENEVIEW` `GAMEVIEW` `WINDOWS` |
+| **Lint (offline, no Unity needed)** | `LINT` — syntax check + UXML well-formedness + USS brace/quote balance. Sub-second, fails fast at 20s on huge projects. `LINT semantic` — type-binding compile against Unity DLLs. **Prefer over `COMPILE` first.** Daemon FileSystemWatcher catches errors in new files Unity hasn't seen. |
+| **Code** | `CODE_EXEC` `CODE_EXEC_RETURN` `TEST` `DEBUG` |
+| **Scene** | `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `PLAYMODE` `SCENEVIEW` `GAMEVIEW` `WINDOWS` `MENU` |
 | **Prefab** | `PREFAB_CREATE` `PREFAB_INSTANTIATE` `PREFAB_SAVE` |
 | **Component** | `INSPECTOR` `COMPONENT_SET` `COMPONENT_ADD` `COMPONENT_REMOVE` |
 | **Asset** | `ASSET_SEARCH` `ASSET_DISCOVER` `ASSET_MOVE` `ASSET_COPY` `ASSET_DELETE` `ASSET_MKDIR` `ASSET_LABEL` `ASSET_RESERIALIZE` |
-| **UI** | `SCREENSHOT` |
-| **CLI-side** | `CODE_ANALYZE` `SETUP` `UPDATE` `SCREENSHOT` `WAKEUP` `DISMISS` |
+| **UI** | `UI_DISCOVER` `SCREENSHOT` |
+| **CLI-side** | `LINT` `CODE_ANALYZE` `SETUP` `UPDATE` `SCREENSHOT` `WAKEUP` `DISMISS` `OPEN` |
 
 Run `clibridge4unity HELP` for full usage details.
 

@@ -15,7 +15,7 @@ tool_claude_unity_bridge/
 │   ├── Editor/
 │   │   ├── Core/                  # BridgeServer, CommandRegistry, BridgeCommand
 │   │   └── Commands/              # Command implementations by category
-│   │       ├── Core/              # PING, STATUS, HELP, COMPILE, REFRESH, LOG, STACK_MINIMIZE
+│   │       ├── Core/              # PING, STATUS, HELP, DIAG, PROBE, COMPILE, REFRESH, LOG, MENU, PROFILE, STACK_MINIMIZE
 │   │       ├── Scene/             # Scene/hierarchy/play mode commands
 │   │       ├── Prefab/            # Prefab creation/instantiation/save
 │   │       ├── Component/         # Component inspection & modification
@@ -35,28 +35,29 @@ tool_claude_unity_bridge/
 - Reconnection after assembly reload
 
 ### Commands
-- **Core**: PING, HELP, PROBE, DIAG, STATUS, COMPILE, REFRESH, LOG, STACK_MINIMIZE
-- **CLI-side Code**: CODE_ANALYZE
-- **Unity Code**: CODE_EXEC, CODE_EXEC_RETURN, TEST
-- **Scene**: CREATE, FIND, DELETE, SAVE, LOAD, SCENE, SCENEVIEW, WINDOWS, PLAY, STOP, PAUSE, STEP, PLAYMODE, GAMEVIEW
-- **Prefab**: PREFAB_CREATE, PREFAB_INSTANTIATE, PREFAB_HIERARCHY, PREFAB_SAVE
-- **Component**: COMPONENT_SET, COMPONENT_ADD, COMPONENT_REMOVE, INSPECTOR
-- **Asset**: ASSET_SEARCH
-- **UI**: UI_DISCOVER, SCREENSHOT
+- **Core**: PING, HELP, PROBE, DIAG, STATUS, COMPILE, REFRESH, LOG, STACK_MINIMIZE, MENU, PROFILE
+- **CLI-side**: LINT (syntax + UXML/USS, fails fast at 20s), LINT semantic (type-binding), CODE_ANALYZE, SETUP, UPDATE, OPEN, WAKEUP, DISMISS, SCREENSHOT (window capture)
+- **Unity Code**: CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG
+- **Scene**: CREATE, FIND, DELETE, SAVE, LOAD, SCENEVIEW, WINDOWS, PLAY, STOP, PAUSE, STEP, PLAYMODE, GAMEVIEW
+- **Prefab**: PREFAB_CREATE, PREFAB_INSTANTIATE, PREFAB_SAVE
+- **Component**: COMPONENT_SET, COMPONENT_ADD, COMPONENT_REMOVE, INSPECTOR (also handles full scene + prefab assets)
+- **Asset**: ASSET_SEARCH, ASSET_DISCOVER, ASSET_MOVE, ASSET_COPY, ASSET_DELETE, ASSET_MKDIR, ASSET_LABEL, ASSET_RESERIALIZE
+- **UI**: UI_DISCOVER, SCREENSHOT (server-side render: prefab/UXML/scene GO)
 
 ### CLI Workflow
 ```bash
-# Compile and wait for results
-clibridge4unity COMPILE --wait
+# Offline lint (sub-second, no Unity needed)
+clibridge4unity LINT
+clibridge4unity LINT semantic            # Adds type-binding (~1-15s)
 
-# Compile and get only errors
-clibridge4unity COMPILE --wait --log-filter errors
+# Recompile + check
+clibridge4unity COMPILE
+clibridge4unity STATUS
 
-# Get logs
+# Logs (read Unity Console on demand)
 clibridge4unity LOG errors
 clibridge4unity LOG ui errors
-clibridge4unity LOG last:20
-clibridge4unity LOG since:42
+clibridge4unity LOG --filter "MyClass"
 ```
 
 ## Architecture
@@ -69,4 +70,4 @@ clibridge4unity LOG since:42
 
 ## Version
 
-Current: 1.1.26
+Current: 1.1.27

@@ -102,15 +102,15 @@ tool_claude_unity_bridge/
 │   │   │   ├── SessionKeys.cs     # SessionState key constants
 │   │   │   └── SetupWizard.cs     # CLI installer & PATH setup
 │   │   └── Commands/          # Command implementations (one asmdef per category)
-│   │       ├── Core/          # PING, STATUS, HELP, COMPILE, REFRESH, LOG
+│   │       ├── Core/          # PING, STATUS, HELP, DIAG, PROBE, COMPILE, REFRESH, LOG, MENU, PROFILE, STACK_MINIMIZE
 │   │       ├── Scene/         # Scene manipulation, play mode, windows
 │   │       ├── Prefab/        # Prefab creation/instantiation
 │   │       ├── Component/     # Component inspection & modification
 │   │       ├── Asset/         # Asset search, move, copy, delete, labels
-│   │       ├── Code/          # SEARCH, ANALYZE, CODE_EXEC, TEST
-│   │       └── UI/            # ASSET_DISCOVER, SCREENSHOT
+│   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (CODE_ANALYZE + LINT are CLI-side)
+│   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.26)
+│   └── package.json           # UPM manifest (v1.1.27)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -226,9 +226,9 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `PROBE` - Quick main thread health check
 - `DIAG` - Diagnostic info (no main thread needed)
 - `STATUS` - Get Unity Editor status, including C# compile and UI Toolkit import errors
-- `LINT [warnings]` - **Default: syntax-only fast check (~1s).** Catches braces, strings, keywords, malformed decls. Reliable on any project. Daemon FileSystemWatcher → catches errors in NEW files Unity hasn't seen.
-- `LINT semantic [warnings]` - Lump-compile with type binding (~1-15s). Catches missing methods, type errors, missing usings. **May false-positive on plugin-heavy projects** with precompiled-DLL/source type overlaps.
-- `COMPILE` - Force script recompilation (Unity-side, triggers domain reload, breaks pipe). The ground truth — use when LINT modes give false positives or you need source generators / post-compile callbacks.
+- `LINT [warnings]` - **Default: offline syntax + UXML/USS well-formedness check (~1s).** Catches missing braces, unclosed strings, bad keywords, malformed C#/UXML/USS. Daemon FileSystemWatcher → catches errors in NEW files Unity hasn't seen. Fails fast at 20s on huge projects.
+- `LINT semantic [warnings]` - Lump-compile with type binding (~1-15s). Catches missing methods, type errors, missing usings. **May false-positive on plugin-heavy projects** with precompiled-DLL/source type overlaps. Same 20s budget.
+- `COMPILE` - Force script recompilation (Unity-side, triggers domain reload, breaks pipe). The ground truth — use when LINT modes give false positives or you need source generators / post-compile callbacks. Bridge auto-blocks all commands during Unity Player Build (returns clear error instead of timing out).
 - `REFRESH` - Force asset database refresh
 - `LOG [filter]` - Get bridge-captured Unity logs; use `LOG ui errors` for current USS/UXML/TSS import errors
   - Commands that reference `.uss`, `.uxml`, or `.tss` assets append matching UI Toolkit import errors automatically
@@ -274,6 +274,7 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 ### Prefab
 - `PREFAB_CREATE name path` - Create a prefab asset
 - `PREFAB_INSTANTIATE path [parent]` - Instantiate a prefab in the scene
+- `PREFAB_SAVE name [path]` - Save scene GameObject as prefab (apply changes if existing instance)
 
 ### Component / Inspect
 - `INSPECTOR` - Whole-scene hierarchy (brief, all roots recursed)
@@ -287,8 +288,9 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `COMPONENT_REMOVE gameObject component` - Remove a component
 
 ### Asset
-- `ASSET_SEARCH query` - Search assets using Unity Search syntax
+- `ASSET_SEARCH query` - Search assets using Unity Search syntax (fuzzy "did you mean" suggestions on miss)
 - `ASSET_DISCOVER [category]` - Discover assets (ui, sprites, prefabs, scenes, fonts, shaders, materials, models, variants)
+- `UI_DISCOVER` - Inventory UXML/USS/TSS files + custom VisualElement registrations
 - `ASSET_MOVE src dst` - Move/rename assets (preserves GUIDs), supports multi-source to folder
 - `ASSET_COPY src dst` - Copy assets, supports multi-source to folder
 - `ASSET_DELETE path [path2...]` - Delete assets (batch)
@@ -307,8 +309,12 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `SCREENSHOT path1.prefab path2.prefab` - Grid render (multi-asset)
 
 ### CLI-side (no Unity connection needed)
+- `LINT` / `LINT semantic` - Offline syntax/semantic check (see Core section above)
+- `CODE_ANALYZE query` - Roslyn-based code analysis (Roslyn daemon, persistent index)
 - `SETUP` - Install UPM package + verify Unity + generate CLAUDE.md and AGENTS.md (alias: `INSTALL`)
 - `UPDATE` - Self-update CLI exe + UPM package tag (no Unity connection needed)
+- `OPEN` - Launch Unity with project (auto-detects Unity version via ProjectVersion.txt)
 - `WAKEUP` - Bring Unity to foreground (targets project via -d)
 - `WAKEUP refresh` - Bring to foreground + send Ctrl+R to force recompile
 - `DISMISS` - Close modal dialogs
+- `SCREENSHOT` - CLI-side window capture (see Screenshot section)
