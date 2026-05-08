@@ -27,7 +27,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.28";
+        public const string Version = "1.1.29";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -921,9 +921,15 @@ namespace clibridge4unity
         {
             string msg = $"Error: {ex.GetType().Name}: {ex.Message}";
             if (string.IsNullOrEmpty(ex.StackTrace)) return msg;
-            string trace;
-            try { trace = StackTraceMinimizer.Minimize(ex.StackTrace); }
-            catch { trace = ex.StackTrace; }
+            // Minimization (StackTraceMinimizer) lives in a separate asmdef — apply via the
+            // ShortenResponsePaths hook if LogCommands wired it, else emit raw trace.
+            string trace = ex.StackTrace;
+            try
+            {
+                if (CommandRegistry.ShortenResponsePaths != null)
+                    trace = CommandRegistry.ShortenResponsePaths(trace);
+            }
+            catch { }
             return msg + "\n" + trace;
         }
     }
