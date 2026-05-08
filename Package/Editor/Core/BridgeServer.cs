@@ -27,7 +27,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.27";
+        public const string Version = "1.1.28";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -919,7 +919,12 @@ namespace clibridge4unity
 
         public static string Exception(Exception ex)
         {
-            return $"Error: {ex.GetType().Name}: {ex.Message}";
+            string msg = $"Error: {ex.GetType().Name}: {ex.Message}";
+            if (string.IsNullOrEmpty(ex.StackTrace)) return msg;
+            string trace;
+            try { trace = StackTraceMinimizer.Minimize(ex.StackTrace); }
+            catch { trace = ex.StackTrace; }
+            return msg + "\n" + trace;
         }
     }
 }
