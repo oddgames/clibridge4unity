@@ -278,6 +278,28 @@ namespace clibridge4unity
                 // Wait for UI Toolkit to layout and paint
                 await Task.Delay(500);
 
+                // Multi-pass settle: dynamic font atlas, TMP text, and image-after-load layout
+                // need several paint cycles before text positions stabilize. Pump RepaintImmediately
+                // across multiple frames so each pass picks up sizes from the previous one.
+                for (int i = 0; i < 6; i++)
+                {
+                    await CommandRegistry.RunOnMainThreadAsync<int>(() =>
+                    {
+                        var pField = typeof(EditorWindow).GetField("m_Parent",
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                        var p = pField?.GetValue(window);
+                        if (p != null)
+                        {
+                            var rImm = p.GetType().GetMethod("RepaintImmediately",
+                                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                            rImm?.Invoke(p, null);
+                        }
+                        instantiatedRoot?.MarkDirtyRepaint();
+                        return 0;
+                    });
+                    await Task.Delay(50);
+                }
+
                 // Use GrabPixels via reflection to capture the internal backing buffer
                 return await CommandRegistry.RunOnMainThreadAsync(() =>
                 {
@@ -288,7 +310,7 @@ namespace clibridge4unity
                     if (parent == null)
                         return Response.Error("EditorWindow has no parent view");
 
-                    // RepaintImmediately ensures the backing buffer is up to date
+                    // Final RepaintImmediately so backing buffer matches settled layout
                     var repaintImm = parent.GetType().GetMethod("RepaintImmediately",
                         System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                     repaintImm?.Invoke(parent, null);

@@ -33,8 +33,32 @@ Verify these are up to date (only edit if actually wrong):
 3. `SUMMARY.md` — command count must match actual
 4. Run `grep -c "BridgeCommand" Package/Editor/Commands/**/*.cs` to count actual commands
 
-### 4. Run the deploy script
-The script handles: build → verify version → package → git commit+push → tag → release → upload → verify → update local CLI.
+### 4. Write release notes to `.claude/RELEASE_NOTES.md`
+Before running the script, write a human-readable changelog to `.claude/RELEASE_NOTES.md`.
+The deploy script reads it, attaches it to the GitHub release, then BLANKS the file (so the
+next deploy doesn't reuse stale notes). If you skip this, the release body falls back to a
+file-diff dump — useless for downstream readers.
+
+Format:
+```markdown
+## vX.Y.Z
+
+### New
+- Bullet points of new features / commands / flags
+
+### Fixed
+- Bullet points of bug fixes (root cause + symptom)
+
+### Internal
+- Refactors, perf, deploy/CI tweaks
+```
+
+Recall what changed in this session (the work the agent did right before /deploy) and write
+that. Don't dump the file diff — describe behavior changes.
+
+### 5. Run the deploy script
+The script handles: build → verify version → package → git commit+push (`git add -A` so all
+edits ship) → tag → release → upload → verify → update local CLI.
 
 ```bash
 python .claude/scripts/deploy.py X.Y.Z

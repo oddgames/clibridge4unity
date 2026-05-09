@@ -38,6 +38,9 @@ def build_release_notes(tag, version, root):
             pass
         if body:
             return body + f"\n\n---\nInstall: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`"
+    # Loud warning so the agent knows synthesised notes are coming and can fix them.
+    print("  WARNING: .claude/RELEASE_NOTES.md is empty — synthesising notes from git diff stats.", file=sys.stderr)
+    print("           For human-readable changelogs, write a New/Fixed summary to that file before /deploy.", file=sys.stderr)
 
     # Synthesise from git: commits since previous tag + file-change shortstat. We run BEFORE
     # the "Release vX.Y.Z" commit is created — so we also need to surface the working-tree
