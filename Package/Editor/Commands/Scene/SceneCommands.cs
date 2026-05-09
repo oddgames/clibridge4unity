@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -246,21 +247,41 @@ namespace clibridge4unity
         }
 
         /// <summary>
-        /// Loads a scene.
+        /// Loads a scene and waits briefly so OnEnable / [InitializeOnLoadMethod] / OnValidate
+        /// side effects can fire. Errors raised during the load window are surfaced by the
+        /// generic per-command log-capture in CommandRegistry (no custom plumbing here).
+        /// Built-in delay matters: without it, LOAD returns before editor-side handlers run
+        /// and their errors land *after* the response, where no command sees them.
         /// </summary>
-        [BridgeCommand("LOAD", "Load a scene by path",
+        [BridgeCommand("LOAD", "Load a scene by path; waits for editor handlers to settle so errors get captured",
             Category = "Scene",
-            Usage = "LOAD Assets/Scenes/MyScene.unity",
-            RequiresMainThread = true)]
-        public static string Load(string scenePath)
+            Usage = "LOAD Assets/Scenes/MyScene.unity  OR  LOAD Assets/Scenes/MyScene.unity --wait 2",
+            RequiresMainThread = false)]
+        public static async Task<string> Load(string data)
         {
             try
             {
-                if (string.IsNullOrEmpty(scenePath))
+                if (string.IsNullOrEmpty(data))
                     return Response.Error("Scene path required");
 
-                EditorSceneManager.OpenScene(scenePath);
-                return Response.Success($"Loaded {scenePath}");
+                int waitSeconds = 1;
+                string scenePath = data.Trim();
+                int waitIdx = scenePath.IndexOf("--wait", StringComparison.OrdinalIgnoreCase);
+                if (waitIdx >= 0)
+                {
+                    var rest = scenePath.Substring(waitIdx + "--wait".Length).Trim();
+                    var tokens = rest.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (tokens.Length > 0 && int.TryParse(tokens[0], out int s)) waitSeconds = Math.Clamp(s, 0, 30);
+                    scenePath = scenePath.Substring(0, waitIdx).Trim();
+                }
+
+                await CommandRegistry.RunOnMainThreadAsync(() =>
+                {
+                    EditorSceneManager.OpenScene(scenePath);
+                    return 0;
+                });
+                if (waitSeconds > 0) await Task.Delay(waitSeconds * 1000);
+                return Response.Success($"Loaded {scenePath} (settled {waitSeconds}s).");
             }
             catch (Exception ex)
             {

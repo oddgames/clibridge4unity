@@ -103,6 +103,16 @@ internal static class CodeAnalysisCore
         // Grep term is the member (if dotted) else the class name.
         string grepTerm = memberName ?? className;
 
+        // Primary file for compressing repeated-path suffixes. Set on first matching
+        // type-decl; subsequent members in the same file omit the path entirely.
+        string primaryRel = null;
+        string Loc(string fileRel, int line) =>
+            string.Equals(fileRel, primaryRel, StringComparison.OrdinalIgnoreCase)
+                ? $":{line}"
+                : $"[{System.IO.Path.GetFileName(fileRel)}]:{line}";
+        // Drop `public` (default for member listings — AI infers; saves bytes per line).
+        string TrimMods(string mods) => mods.Replace("public ", "").Replace("public", "").Trim();
+
         foreach (var kvp in trees)
         {
             var root = kvp.Value.GetRoot();
@@ -161,58 +171,84 @@ internal static class CodeAnalysisCore
                     string qualified = ancestors.Count > 0
                         ? string.Join(".", ancestors.Select(a => a.Identifier.Text)) + "." + enc
                         : enc;
+                    if (primaryRel == null) primaryRel = rel;
                     sourceFiles.Add($"{rel}:{line} ({td.Modifiers} {td.Keyword} {qualified}" + (bases.Length > 0 ? $" : {string.Join(", ", bases)}" : "") + ")");
                     baseTypes.AddRange(bases);
 
+                    // Pre-collect own-type method names so ExtractCallees can filter them out.
+                    var ownNames = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var mm in td.Members.OfType<MethodDeclarationSyntax>()) ownNames.Add(mm.Identifier.Text);
+                    foreach (var pp in td.Members.OfType<PropertyDeclarationSyntax>()) ownNames.Add(pp.Identifier.Text);
+                    // Build class-level name→type map (fields + properties). Used by ExtractCallees
+                    // to annotate `currentPanel.X()` as `currentPanel:Animator.X()`.
+                    var classNameToType = new Dictionary<string, string>(StringComparer.Ordinal);
+                    foreach (var f in td.Members.OfType<FieldDeclarationSyntax>())
+                        foreach (var v in f.Declaration.Variables)
+                            classNameToType[v.Identifier.Text] = f.Declaration.Type.ToString();
+                    foreach (var p in td.Members.OfType<PropertyDeclarationSyntax>())
+                        classNameToType[p.Identifier.Text] = p.Type.ToString();
+                    string ownTypeName = td.Identifier.Text;
                     foreach (var m in td.Members.OfType<MethodDeclarationSyntax>())
                     {
                         int mLine = m.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
                         var parms = string.Join(", ", m.ParameterList.Parameters.Select(p => $"{p.Type} {p.Identifier}"));
-                        ownMethods.Add((m.Identifier.Text, $"{m.Modifiers} {m.ReturnType} {m.Identifier.Text}({parms}) — {rel}:{mLine}"));
+                        string calleeTail = ExtractCallees(m, ownNames, ownTypeName, classNameToType);
+                        string mods = TrimMods(m.Modifiers.ToString());
+                        string head = (mods.Length > 0 ? mods + " " : "") + $"{m.ReturnType} {m.Identifier.Text}({parms}){Loc(rel, mLine)}";
+                        string formatted = string.IsNullOrEmpty(calleeTail) ? head : $"{head} → {calleeTail}";
+                        ownMethods.Add((m.Identifier.Text, formatted));
                     }
                     foreach (var f in td.Members.OfType<FieldDeclarationSyntax>())
                         foreach (var v in f.Declaration.Variables)
                         {
                             int fl = v.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                            ownFields.Add((v.Identifier.Text, $"{f.Modifiers} {f.Declaration.Type} {v.Identifier} — {rel}:{fl}"));
+                            string mods = TrimMods(f.Modifiers.ToString());
+                            string head = (mods.Length > 0 ? mods + " " : "") + $"{f.Declaration.Type} {v.Identifier}{Loc(rel, fl)}";
+                            ownFields.Add((v.Identifier.Text, head));
                         }
                     foreach (var p in td.Members.OfType<PropertyDeclarationSyntax>())
                     {
                         int pl = p.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                        ownFields.Add((p.Identifier.Text, $"{p.Modifiers} {p.Type} {p.Identifier} {{ get; set; }} — {rel}:{pl}"));
+                        string mods = TrimMods(p.Modifiers.ToString());
+                        string head = (mods.Length > 0 ? mods + " " : "") + $"{p.Type} {p.Identifier} {{ get; set; }}{Loc(rel, pl)}";
+                        ownFields.Add((p.Identifier.Text, head));
                     }
                     foreach (var e in td.Members.OfType<EventFieldDeclarationSyntax>())
                         foreach (var v in e.Declaration.Variables)
                         {
                             int el = v.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                            ownFields.Add((v.Identifier.Text, $"{e.Modifiers} event {e.Declaration.Type} {v.Identifier} — {rel}:{el}"));
+                            string mods = TrimMods(e.Modifiers.ToString());
+                            string head = (mods.Length > 0 ? mods + " " : "") + $"event {e.Declaration.Type} {v.Identifier}{Loc(rel, el)}";
+                            ownFields.Add((v.Identifier.Text, head));
                         }
-                    // Constructors — match both `.ctor` (for direct lookup) and the type name
-                    // itself so `CODE_ANALYZE Foo.Foo` or `Foo.ctor` both work.
+                    // Constructors — match both `.ctor` (for direct lookup) and the type name.
                     foreach (var c in td.Members.OfType<ConstructorDeclarationSyntax>())
                     {
                         int cl = c.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
                         var parms = string.Join(", ", c.ParameterList.Parameters.Select(p => $"{p.Type} {p.Identifier}"));
-                        string formatted = $"{c.Modifiers} {c.Identifier.Text}({parms}) — {rel}:{cl}";
+                        string mods = TrimMods(c.Modifiers.ToString());
+                        string formatted = (mods.Length > 0 ? mods + " " : "") + $"{c.Identifier.Text}({parms}){Loc(rel, cl)}";
                         ownMethods.Add((c.Identifier.Text, formatted));
                         ownMethods.Add((".ctor", formatted));
                     }
-                    // Indexers — `public T this[int i]`. Matched via "this" or "Item".
+                    // Indexers
                     foreach (var idx in td.Members.OfType<IndexerDeclarationSyntax>())
                     {
                         int il = idx.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
                         var parms = string.Join(", ", idx.ParameterList.Parameters.Select(p => $"{p.Type} {p.Identifier}"));
-                        string formatted = $"{idx.Modifiers} {idx.Type} this[{parms}] — {rel}:{il}";
+                        string mods = TrimMods(idx.Modifiers.ToString());
+                        string formatted = (mods.Length > 0 ? mods + " " : "") + $"{idx.Type} this[{parms}]{Loc(rel, il)}";
                         ownMethods.Add(("this", formatted));
                         ownMethods.Add(("Item", formatted));
                     }
-                    // Operators — `operator +`, `operator implicit`, etc.
+                    // Operators
                     foreach (var op in td.Members.OfType<OperatorDeclarationSyntax>())
                     {
                         int ol = op.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
                         var parms = string.Join(", ", op.ParameterList.Parameters.Select(p => $"{p.Type} {p.Identifier}"));
                         string opToken = op.OperatorToken.Text;
-                        string formatted = $"{op.Modifiers} {op.ReturnType} operator {opToken}({parms}) — {rel}:{ol}";
+                        string mods = TrimMods(op.Modifiers.ToString());
+                        string formatted = (mods.Length > 0 ? mods + " " : "") + $"{op.ReturnType} operator {opToken}({parms}){Loc(rel, ol)}";
                         ownMethods.Add(($"operator{opToken}", formatted));
                         ownMethods.Add(($"operator {opToken}", formatted));
                     }
@@ -221,7 +257,8 @@ internal static class CodeAnalysisCore
                         int ol = op.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
                         var parms = string.Join(", ", op.ParameterList.Parameters.Select(p => $"{p.Type} {p.Identifier}"));
                         string impl = op.ImplicitOrExplicitKeyword.Text;
-                        string formatted = $"{op.Modifiers} {impl} operator {op.Type}({parms}) — {rel}:{ol}";
+                        string mods = TrimMods(op.Modifiers.ToString());
+                        string formatted = (mods.Length > 0 ? mods + " " : "") + $"{impl} operator {op.Type}({parms}){Loc(rel, ol)}";
                         ownMethods.Add(($"operator {op.Type}", formatted));
                         ownMethods.Add(($"op_{impl}", formatted));
                     }
@@ -738,6 +775,85 @@ internal static class CodeAnalysisCore
         sb.AppendLine("Did you mean:");
         foreach (var s in suggestions) sb.AppendLine($"  {s}");
         return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>Walk a method body + expression body for invocations and return deduped, capped
+    /// list of EXTERNAL callees — invocations on own type are filtered. Annotates receivers
+    /// with their resolved type when available (`currentPanel.X()` → `currentPanel:Animator.X()`).
+    /// Type resolution is purely syntactic: own fields/props (passed in), method parameters, and
+    /// local var declarations. Cheap — single Roslyn syntax walk per method, ~µs.</summary>
+    static string ExtractCallees(MethodDeclarationSyntax m, HashSet<string> ownNames, string ownTypeName,
+                                 Dictionary<string, string> classNameToType)
+    {
+        var node = (SyntaxNode)m.Body ?? m.ExpressionBody;
+        if (node == null) return null;
+
+        // Build per-method name→type map. Locals shadow class fields when both present.
+        var nameToType = new Dictionary<string, string>(classNameToType, StringComparer.Ordinal);
+        foreach (var p in m.ParameterList.Parameters)
+            if (p.Type != null) nameToType[p.Identifier.Text] = p.Type.ToString();
+        foreach (var ld in node.DescendantNodes().OfType<LocalDeclarationStatementSyntax>())
+        {
+            string typeStr = ld.Declaration.Type.ToString();
+            // `var` provides no syntactic type — skip annotation, leave receiver bare.
+            bool isVar = typeStr == "var";
+            foreach (var v in ld.Declaration.Variables)
+                if (!isVar) nameToType[v.Identifier.Text] = typeStr;
+        }
+        foreach (var fe in node.DescendantNodes().OfType<ForEachStatementSyntax>())
+            if (fe.Type != null && fe.Type.ToString() != "var")
+                nameToType[fe.Identifier.Text] = fe.Type.ToString();
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var ordered = new List<string>();
+        const int cap = 12;
+        int total = 0;
+        foreach (var inv in node.DescendantNodes().OfType<InvocationExpressionSyntax>())
+        {
+            string name = null;
+            string receiver = null;     // syntactic — `obj` or `Type` before the dot
+            bool isOwn = false;
+            switch (inv.Expression)
+            {
+                case MemberAccessExpressionSyntax ma:
+                    name = ma.Name.Identifier.Text;
+                    if (ma.Expression is ThisExpressionSyntax) isOwn = true;
+                    else if (ma.Expression is IdentifierNameSyntax recvId)
+                    {
+                        if (recvId.Identifier.Text == ownTypeName) isOwn = true;
+                        else receiver = recvId.Identifier.Text;
+                    }
+                    else
+                    {
+                        // Trim multi-segment expressions to the last identifier (e.g. `a.b.Foo()` → `b`).
+                        receiver = ma.Expression.ToString();
+                        int lastDot = receiver.LastIndexOf('.');
+                        if (lastDot >= 0) receiver = receiver.Substring(lastDot + 1);
+                        if (receiver.IndexOfAny(new[] { '(', ')', '[', ']', '<', '>', ' ' }) >= 0) receiver = null;
+                    }
+                    break;
+                case IdentifierNameSyntax id:
+                    name = id.Identifier.Text;
+                    if (ownNames.Contains(name)) isOwn = true;
+                    break;
+                case GenericNameSyntax gn:
+                    name = gn.Identifier.Text;
+                    if (ownNames.Contains(name)) isOwn = true;
+                    break;
+            }
+            if (string.IsNullOrEmpty(name) || isOwn) continue;
+            // Annotate receiver with its resolved type when known.
+            string recvFormatted = receiver;
+            if (receiver != null && nameToType.TryGetValue(receiver, out var t))
+                recvFormatted = $"{receiver}:{t}";
+            string formatted = recvFormatted != null ? $"{recvFormatted}.{name}()" : $"{name}()";
+            total++;
+            if (seen.Add(formatted) && ordered.Count < cap) ordered.Add(formatted);
+        }
+        if (total == 0) return null;
+        string list = string.Join(", ", ordered);
+        if (total > ordered.Count) list += $", … +{total - ordered.Count} more";
+        return list;
     }
 
     static string StripGenericsAndArrays(string s)

@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Run tests in file order (not alphabetical) so setup/cleanup within classes works
+addopts = "-v -p no:randomly"

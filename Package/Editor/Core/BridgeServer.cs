@@ -27,7 +27,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.29";
+        public const string Version = "1.1.31";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -355,16 +355,17 @@ namespace clibridge4unity
         {
 #if UNITY_EDITOR_WIN
             var allowedSids = LoadConfiguredPipeSids();
-            if (allowedSids.Count > 0)
-            {
-                var securedPipe = TryCreateSecuredPipeServer(name, allowedSids);
-                if (securedPipe != null)
-                    return securedPipe;
-            }
-#endif
+            var securedPipe = TryCreateSecuredPipeServer(name, allowedSids);
+            if (securedPipe != null)
+                return securedPipe;
+
+            throw new InvalidOperationException(
+                "Could not create owner-restricted bridge pipe. Refusing to start an unsecured pipe.");
+#else
             var pipe = new NamedPipeServerStream(name, PipeDirection.InOut,
                 NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
             return pipe;
+#endif
         }
 
 #if UNITY_EDITOR_WIN

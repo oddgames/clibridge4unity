@@ -9,17 +9,26 @@
 !README.md
 !CLAUDE.md
 !SUMMARY.md
+!CHANGELOG.md
 !LICENSE
+!ConsoleUnityBridge.sln
+!pyproject.toml
 !install.ps1
 !deploy.ps1
 !.gitignore
 !.claude/
 !.claude/**
 .claude/settings.local.json
+!tests/
+!tests/**
 
 # Build outputs
 clibridge4unity/bin/
 clibridge4unity/obj/
+
+# Python generated
+__pycache__/
+*.py[cod]
 
 # Unity generated
 Library/

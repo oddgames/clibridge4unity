@@ -629,6 +629,14 @@ namespace clibridge4unity
                 catch { captureLogs = false; }
             }
 
+            // Universal log-filter flags (applied to the per-command capture appended below):
+            //   --logType error|warning|info|all  (default: error)
+            //   --maxLogs <N>                     (default: 5)
+            // Stripped from `data` so individual commands don't see them.
+            int maxLogs = 5;
+            bool errorsOnly = true;
+            (data, maxLogs, errorsOnly) = ExtractLogFlags(data, maxLogs, errorsOnly);
+
             string response;
             try
             {
@@ -643,12 +651,12 @@ namespace clibridge4unity
                 response = Response.Exception(ex);
             }
 
-            // End capture + append errors that occurred during command execution
+            // End capture + append logs that occurred during command execution
             if (captureLogs && response != null && EndCommandLogCapture != null)
             {
                 try
                 {
-                    string recentLogs = EndCommandLogCapture(5, true);
+                    string recentLogs = EndCommandLogCapture(maxLogs, errorsOnly);
                     if (recentLogs != null)
                         response = response + "\n" + recentLogs;
                 }
@@ -827,7 +835,11 @@ namespace clibridge4unity
             if (cmd.RequiresMainThread)
             {
                 string desc = data?.Length > 80 ? $"{cmd.Name}|{data.Substring(0, 80)}..." : $"{cmd.Name}|{data}";
-                result = await InvokeOnMainThread(() => cmd.Method.Invoke(cmd.Instance, args), desc);
+                result = await InvokeOnMainThread(
+                    () => cmd.Method.Invoke(cmd.Instance, args),
+                    desc,
+                    Math.Max(1000, cmd.TimeoutSeconds * 1000),
+                    ct);
             }
             else
             {
@@ -844,7 +856,7 @@ namespace clibridge4unity
         /// Public utility for commands to invoke work on the Unity main thread.
         /// If already on the main thread, runs directly (prevents deadlock).
         /// </summary>
-        public static async Task<T> RunOnMainThreadAsync<T>(Func<T> action, string description = null)
+        public static async Task<T> RunOnMainThreadAsync<T>(Func<T> action, string description = null, int timeoutMs = 30000)
         {
             // Deadlock guard: if we're already on the main thread, just run it
             if (_mainThreadContext != null &&
@@ -852,7 +864,7 @@ namespace clibridge4unity
             {
                 return action();
             }
-            return await InvokeOnMainThread(action, description ?? "RunOnMainThreadAsync");
+            return await InvokeOnMainThread(action, description ?? "RunOnMainThreadAsync", timeoutMs);
         }
 
         /// <summary>
@@ -1006,7 +1018,11 @@ namespace clibridge4unity
             return sb.ToString().TrimEnd();
         }
 
-        private static async Task<T> InvokeOnMainThread<T>(Func<T> action, string description = null)
+        private static async Task<T> InvokeOnMainThread<T>(
+            Func<T> action,
+            string description = null,
+            int timeoutMs = 30000,
+            CancellationToken ct = default)
         {
             var work = new MainThreadWork
             {
@@ -1027,15 +1043,23 @@ namespace clibridge4unity
             // Poll until the command-level timeout wins. The pipe-level heartbeat keeps
             // clients alive while Unity is legitimately busy during play-mode transitions,
             // reloads, imports, or long editor callbacks.
-            for (int elapsed = 0; elapsed < 30000; elapsed += 500)
+            var deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(1000, timeoutMs));
+            while (!ct.IsCancellationRequested)
             {
-                var done = await Task.WhenAny(work.CompletionSource.Task, Task.Delay(500));
+                var remaining = deadline - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero)
+                    break;
+
+                var delayMs = (int)Math.Min(500, Math.Max(1, remaining.TotalMilliseconds));
+                var done = await Task.WhenAny(work.CompletionSource.Task, Task.Delay(delayMs));
                 if (done == work.CompletionSource.Task)
                     return (T)(await work.CompletionSource.Task);
             }
 
-            // 30s hard limit — something is genuinely stuck
             work.CompletionSource.TrySetCanceled();
+            if (ct.IsCancellationRequested)
+                throw new OperationCanceledException(ct);
+
             BridgeDiagnostics.Log("CommandRegistry", $"main-thread work hard-timeout: {work.Description}");
             throw new TimeoutException(BuildBusyReport(
                 _timerTickCount > 0 ? (DateTime.Now - _lastTimerTick).TotalSeconds : 30, work.Description));
@@ -1051,6 +1075,33 @@ namespace clibridge4unity
             instance = Activator.CreateInstance(type);
             _instances[type] = instance;
             return instance;
+        }
+
+        /// <summary>Extract `--logType X` and `--maxLogs N` from `data`, returning the cleaned
+        /// string + resolved values. Lets callers tune the per-command log-capture appendix
+        /// without each individual command needing to parse those flags.</summary>
+        static (string data, int maxLogs, bool errorsOnly) ExtractLogFlags(string data, int defaultMax, bool defaultErrorsOnly)
+        {
+            if (string.IsNullOrEmpty(data)) return (data, defaultMax, defaultErrorsOnly);
+            int max = defaultMax;
+            bool errorsOnly = defaultErrorsOnly;
+            var tokens = data.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            var keep = new System.Collections.Generic.List<string>();
+            for (int i = 0; i < tokens.Length; i++)
+            {
+                string t = tokens[i];
+                string tl = t.ToLowerInvariant();
+                if ((tl == "--logtype" || tl == "-logtype") && i + 1 < tokens.Length)
+                {
+                    string v = tokens[++i].ToLowerInvariant();
+                    errorsOnly = !(v == "all" || v == "info" || v == "debug" || v == "log" || v == "warning");
+                    continue;
+                }
+                if ((tl == "--maxlogs" || tl == "-maxlogs") && i + 1 < tokens.Length
+                    && int.TryParse(tokens[i + 1], out int n)) { max = Math.Clamp(n, 0, 500); i++; continue; }
+                keep.Add(t);
+            }
+            return (string.Join(" ", keep), max, errorsOnly);
         }
     }
 }

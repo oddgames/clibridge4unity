@@ -109,10 +109,11 @@ static class RoslynDaemon
     }
 
     /// <summary>Query the daemon via named pipe. Retries once on transient failure.
-    /// LINT capped at 20s — fail fast rather than letting AI wait. Other endpoints 30s.</summary>
+    /// LINT capped at 60s — covers per-asmdef compile on big projects (MTD ~30s).
+    /// Other endpoints 30s.</summary>
     public static string Query(string pipeName, string endpoint, string query)
     {
-        int timeoutMs = endpoint == "lint" ? 20_000 : 30_000;
+        int timeoutMs = endpoint == "lint" ? 60_000 : 30_000;
         var result = QueryInternal(pipeName, endpoint, query, timeoutMs, out string error);
         if (result != null) return result;
 
@@ -180,43 +181,52 @@ static class RoslynDaemon
         string exePath = Process.GetCurrentProcess().MainModule?.FileName
             ?? Path.Combine(AppContext.BaseDirectory, "clibridge4unity.exe");
 
+        // Spawn the daemon FULLY DETACHED — no stdio redirection. Otherwise the daemon
+        // inherits CLI's stdin/stdout/stderr handles. Even if we redirect them to our own
+        // pipes, on Windows ALL inheritable handles propagate via CreateProcess(bInheritHandles=TRUE).
+        // The PowerShell host pipeline (e.g. `clibridge4unity LINT 2>&1 | Out-Null`) holds
+        // that pipeline open until *every* writer to its stdout/stderr pipe closes — including
+        // the inherited copy in the long-lived daemon. Result: CLI exits in 5s but `pwsh`
+        // hangs for minutes/hours waiting on the daemon to die.
+        // Detach via cmd.exe `start "" /b` so the new process gets fresh NUL handles, no
+        // inheritance from us, and pick up the pipe name via file (`daemon.pipe`).
+        try { File.Delete(GetPipeFile(projectPath)); } catch { }
         var psi = new ProcessStartInfo
         {
             FileName = exePath,
             Arguments = $"-d \"{projectPath}\" DAEMON",
-            UseShellExecute = false,
+            // UseShellExecute=true → ShellExecuteEx → does NOT inherit our std handles. The
+            // child gets fresh console handles (or none with WindowStyle=Hidden + CreateNoWindow).
+            // The trade-off: we can't redirect stdout/stderr — but we don't need to, because
+            // the daemon also writes its pipe name to `daemon.pipe` (file-based handshake).
+            UseShellExecute = true,
             CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = false, // Don't redirect — let stderr flow freely to avoid buffer deadlock
+            WindowStyle = ProcessWindowStyle.Hidden,
         };
 
         try
         {
             var proc = Process.Start(psi);
             if (proc == null) return null;
+            try { proc.WaitForExit(2000); } catch { } // cmd.exe exits immediately after start
 
-            // Read stdout for "pipe:<name>" signal (daemon writes this when ready)
-            string pipeName = null;
-            var readTask = Task.Run(() =>
+            // Poll the daemon.pipe file for up to 15 seconds.
+            string pipeFile = GetPipeFile(projectPath);
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (DateTime.UtcNow < deadline)
             {
-                try
+                if (File.Exists(pipeFile))
                 {
-                    string line;
-                    while ((line = proc.StandardOutput.ReadLine()) != null)
+                    try
                     {
-                        if (line.StartsWith("pipe:"))
-                        {
-                            pipeName = line.Substring(5).Trim();
-                            break;
-                        }
+                        string name = File.ReadAllText(pipeFile).Trim();
+                        if (!string.IsNullOrEmpty(name)) return name;
                     }
+                    catch { }
                 }
-                catch { }
-            });
-
-            // Wait up to 15 seconds for the daemon to parse + start
-            readTask.Wait(TimeSpan.FromSeconds(15));
-            return pipeName;
+                Thread.Sleep(100);
+            }
+            return null;
         }
         catch { return null; }
     }
@@ -395,7 +405,13 @@ static class RoslynDaemon
             // Roslyn defaults to 7.3 and falsely flags C# 8+ features (target-typed new, records,
             // single-element tuples in xliff_core_2.0.cs, file-scoped namespaces, etc.).
             var defaultParseOpts = CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Latest);
-            Parallel.ForEach(allFiles, file =>
+            // Throttle to N-1 cores so the named-pipe listener thread always has a core to
+            // service heartbeat polls. Otherwise CLI sees same `__indexing:N/M` for seconds and
+            // its 30s stall watchdog wrongly trips.
+            int parseThreads = Math.Max(1, Environment.ProcessorCount - 1);
+            Parallel.ForEach(allFiles,
+                new ParallelOptions { MaxDegreeOfParallelism = parseThreads },
+                file =>
             {
                 try
                 {
@@ -504,8 +520,11 @@ static class RoslynDaemon
         Console.Error.WriteLine($"Daemon started: {pipeName} (indexing in background)");
         Console.Error.WriteLine($"  Auto-shutdown after {TTL_MINUTES} minutes of inactivity");
 
-        // Signal parent that we're ready to ACCEPT — even before indexing finishes.
+        // Signal parent we're ready to ACCEPT. Two channels for back-compat:
+        //   1) Stdout `pipe:<name>` — works for clients that REDIRECT our stdout.
+        //   2) `daemon.pipe` file — used by detached spawn (no stdio inherit, see StartBackground).
         // Queries that arrive during indexing block briefly waiting for it to complete.
+        try { File.WriteAllText(GetPipeFile(projectPath), pipeName); } catch { }
         Console.WriteLine($"pipe:{pipeName}");
         Console.Out.Flush();
 
@@ -598,23 +617,26 @@ static class RoslynDaemon
                     {
                         // Syntax check across every cached SyntaxTree. Daemon FileSystemWatcher
                         // sees new files Unity hasn't seen → catches errors in just-added .cs files.
-                        // Query: "" (syntax-only, default), "warnings", "semantic" (+ Unity DLL binding),
-                        //        "semantic warnings" (semantic + warnings).
+                        // Query: "" (syntax-only, default), "warnings", "unity" (+ per-asmdef compile),
+                        //        "unity warnings" (unity + warnings). 60s budget on unity mode.
                         if (!indexReady.IsSet)
                         {
                             response = $"__indexing:{trees.Count}/{Volatile.Read(ref totalFilesToIndex)}";
                             break;
                         }
                         string q = (query ?? "").Trim().ToLowerInvariant();
-                        bool semantic = q.Contains("semantic") || q.Contains("full");
+                        bool unityMode = q.Contains("unity");
                         bool includeWarnings = q.Contains("warning");
-                        // Default = syntax-only (sub-second, reliable). `LINT semantic` opts into
-                        // type-binding (~1-15s depending on project size). The previous `LINT unity`
-                        // per-asmdef mode was removed — too slow on big projects + false-positives
-                        // from precompiled-DLL/source type overlaps.
-                        response = semantic
-                            ? RunSemanticLint(trees, projectPath, includeWarnings)
-                            : RunSyntaxLint(trees, projectPath, includeWarnings);
+                        if (unityMode)
+                        {
+                            // Per-asmdef compile (Unity-faithful). Re-uses parsed trees + texts from cache.
+                            var fileTextsSnapshot = new Dictionary<string, string>(fileTexts.Count, StringComparer.OrdinalIgnoreCase);
+                            foreach (var kvp in fileTexts) fileTextsSnapshot[kvp.Key] = kvp.Value;
+                            var run = LintUnity.Run(projectPath, fileTextsSnapshot);
+                            response = LintUnity.Format(run, projectPath, includeWarnings);
+                            break;
+                        }
+                        response = RunSyntaxLint(trees, projectPath, includeWarnings);
                         break;
                     }
                     case "shutdown":
@@ -858,7 +880,7 @@ static class RoslynDaemon
     static string RunSemanticLint(ConcurrentDictionary<string, SyntaxTree> trees, string projectPath, bool includeWarnings)
     {
         var sw = Stopwatch.StartNew();
-        var (refs, builtin, user, editorRoot, version, error) = LintSemantic.Resolve(projectPath);
+        var (refs, builtin, user, _, editorRoot, version, error) = LintSemantic.Resolve(projectPath);
         if (error != null)
             return $"Error: cannot run semantic lint — {error}\nFalling back to syntax-only mode is recommended.";
 

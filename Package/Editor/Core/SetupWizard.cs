@@ -201,7 +201,7 @@ namespace clibridge4unity
             const string exeName = "clibridge4unity.exe";
 
             string url = $"https://github.com/oddgames/clibridge4unity/releases/download/v{version}/{assetName}";
-            string tempZip = Path.Combine(Path.GetTempPath(), assetName);
+            string tempZip = Path.Combine(Path.GetTempPath(), $"clibridge4unity_install_{Guid.NewGuid():N}.zip");
             string tempExtract = Path.Combine(Path.GetTempPath(), $"clibridge4unity_install_{Guid.NewGuid():N}");
 
             try
@@ -217,7 +217,11 @@ namespace clibridge4unity
 
                 EditorUtility.DisplayProgressBar("CLI Bridge", "Extracting...", 0.7f);
                 Directory.CreateDirectory(tempExtract);
-                System.IO.Compression.ZipFile.ExtractToDirectory(tempZip, tempExtract, overwriteFiles: true);
+                if (!TrySafeExtractZip(tempZip, tempExtract, out string extractError))
+                {
+                    error = extractError;
+                    return false;
+                }
 
                 string sourceExe = Path.Combine(tempExtract, exeName);
                 if (!File.Exists(sourceExe))
@@ -259,6 +263,50 @@ namespace clibridge4unity
                 try { Directory.Delete(tempExtract, true); } catch { }
             }
 #endif
+        }
+
+        static bool TrySafeExtractZip(string zipPath, string destDir, out string error)
+        {
+            error = null;
+            string destRoot = Path.GetFullPath(destDir)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+
+            try
+            {
+                using (var archive = System.IO.Compression.ZipFile.OpenRead(zipPath))
+                {
+                    foreach (var entry in archive.Entries)
+                    {
+                        string targetPath = Path.GetFullPath(Path.Combine(destDir, entry.FullName));
+                        if (!targetPath.StartsWith(destRoot, StringComparison.OrdinalIgnoreCase))
+                        {
+                            error = $"Downloaded archive contains an unsafe path: {entry.FullName}";
+                            return false;
+                        }
+
+                        if (string.IsNullOrEmpty(entry.Name))
+                        {
+                            Directory.CreateDirectory(targetPath);
+                            continue;
+                        }
+
+                        string parent = Path.GetDirectoryName(targetPath);
+                        if (!string.IsNullOrEmpty(parent))
+                            Directory.CreateDirectory(parent);
+
+                        using (var input = entry.Open())
+                        using (var output = File.Create(targetPath))
+                            input.CopyTo(output);
+                    }
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = $"Could not extract downloaded archive: {ex.GetType().Name}: {ex.Message}";
+                return false;
+            }
         }
 
         [MenuItem("Tools/CLI Bridge for Unity/Setup Wizard")]

@@ -29,6 +29,7 @@ internal static class LintSemantic
         public List<MetadataReference> References;
         public string[] BuiltinDefines;          // UNITY_EDITOR, UNITY_2026_*, etc.
         public string[] UserDefines;             // from ProjectSettings.asset
+        public bool AllowUnsafeCode;             // ProjectSettings.allowUnsafeCode → predefined Assembly-CSharp gets -unsafe
         public string EditorRoot;
         public string UnityVersion;
     }
@@ -38,23 +39,23 @@ internal static class LintSemantic
 
     /// <summary>Build (or fetch cached) references + parse options for `projectPath`.</summary>
     public static (List<MetadataReference> refs, string[] builtinDefines, string[] userDefines,
-                   string editorRoot, string unityVersion, string error)
+                   bool allowUnsafeCode, string editorRoot, string unityVersion, string error)
         Resolve(string projectPath)
     {
         lock (_lock)
         {
             string versionFile = Path.Combine(projectPath, "ProjectSettings", "ProjectVersion.txt");
             if (!File.Exists(versionFile))
-                return (null, null, null, null, null,
+                return (null, null, null, false, null, null,
                         "ProjectVersion.txt missing — not a Unity project.");
 
             string version = ReadEditorVersion(versionFile);
             if (string.IsNullOrEmpty(version))
-                return (null, null, null, null, null, "Could not read Unity version.");
+                return (null, null, null, false, null, null, "Could not read Unity version.");
 
             string editorRoot = FindEditorRoot(version);
             if (editorRoot == null)
-                return (null, null, null, null, null,
+                return (null, null, null, false, null, null,
                         $"Unity {version} not installed under C:\\Program Files\\Unity\\Hub\\Editor.");
 
             string engineDll = Path.Combine(editorRoot, "Data", "Managed", "UnityEngine", "UnityEngine.CoreModule.dll");
@@ -67,7 +68,7 @@ internal static class LintSemantic
                 && _cache.ProjectSettingsMtime == psMtime)
             {
                 return (_cache.References, _cache.BuiltinDefines, _cache.UserDefines,
-                        _cache.EditorRoot, _cache.UnityVersion, null);
+                        _cache.AllowUnsafeCode, _cache.EditorRoot, _cache.UnityVersion, null);
             }
 
             var refs = new List<MetadataReference>();
@@ -83,69 +84,176 @@ internal static class LintSemantic
                 }
             }
 
-            // 1) BCL — Unity 6 compiles against netstandard 2.1. Use the netstandard shim DLLs
-            //    (per-module impl assemblies) — the umbrella `ref/2.1.0/netstandard.dll` is just
-            //    type-forwards and is INCOMPATIBLE with adding netfx shims (mscorlib v4) which
-            //    re-defines the same types and triggers CS0518 cascades.
-            string compatNs = Path.Combine(editorRoot, "Data", "NetStandard", "compat", "2.1.0", "shims", "netstandard");
-            string nsRoot = Path.Combine(editorRoot, "Data", "NetStandard", "ref", "2.1.0");
-            if (Directory.Exists(compatNs))
+            // 1) BCL — use Unity's actual ref-assembly set (`UnityReferenceAssemblies/unity-4.8-api/`),
+            //    the same dir Unity bakes into the generated `Assembly-CSharp.csproj`'s mscorlib /
+            //    System / System.Core / netstandard `<HintPath>` entries. This dir has the full
+            //    Mono mscorlib (with ValueType/Enum/Delegate) AND the `Facades/` subdir with
+            //    System.Threading.Tasks.Extensions.dll (ValueTask), netstandard.dll, etc. — both
+            //    are needed: dropping the mscorlib root → CS0012 (Enum not in mscorlib),
+            //    dropping Facades → CS7069 (ValueTask claimed in mscorlib).
+            string unityApi = Path.Combine(editorRoot, "Data", "UnityReferenceAssemblies", "unity-4.8-api");
+            if (Directory.Exists(unityApi))
             {
-                AddDir(compatNs);
-                if (Directory.Exists(nsRoot)) AddDir(nsRoot);
-                // netfx v4 facades — needed for ScriptAssemblies that forward ValueType/HashSet/etc.
-                // through mscorlib v4 / System.Core v4 instead of netstandard.
-                string netfxDir = Path.Combine(editorRoot, "Data", "NetStandard", "compat", "2.1.0", "shims", "netfx");
-                foreach (var facade in new[] { "mscorlib.dll", "System.Core.dll", "System.dll" })
+                AddDir(unityApi);
+                // Facades/ — load most netstandard split assemblies (System.IO.dll, System.Runtime.dll,
+                // etc.) but EXCLUDE ones that re-define types already in the full Mono `System.dll`
+                // we just added. e.g. `Facades/System.CodeDom.dll` defines `CodeGenerator`, which
+                // also lives in `unity-4.8-api/System.dll` → CS0433 ambiguity. Unity itself only
+                // adds System.CodeDom when explicitly referenced; mirror that.
+                string facadesDir = Path.Combine(unityApi, "Facades");
+                if (Directory.Exists(facadesDir))
                 {
-                    string p = Path.Combine(netfxDir, facade);
-                    if (File.Exists(p) && seen.Add(facade))
-                        try { refs.Add(MetadataReference.CreateFromFile(p)); } catch { }
+                    var facadeSkip = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "System.CodeDom.dll" };
+                    foreach (var f in Directory.EnumerateFiles(facadesDir, "*.dll", SearchOption.TopDirectoryOnly))
+                    {
+                        string n = Path.GetFileName(f);
+                        if (facadeSkip.Contains(n)) continue;
+                        if (!seen.Add(n)) continue;
+                        try { refs.Add(MetadataReference.CreateFromFile(f)); } catch { }
+                    }
                 }
             }
             else
             {
-                // Fallback: Mono BCL (older Unity / no NetStandard).
-                AddDir(Path.Combine(editorRoot, "Data", "MonoBleedingEdge", "lib", "mono", "unityjit-win32"));
-            }
-            // 2) Unity engine modules
-            AddDir(Path.Combine(editorRoot, "Data", "Managed", "UnityEngine"));
-            AddDir(Path.Combine(editorRoot, "Data", "Managed"));   // legacy UnityEngine.dll fallbacks
-            // 3) Unity editor modules (only used when compiling editor-scoped files)
-            AddDir(Path.Combine(editorRoot, "Data", "Managed", "UnityEditor"));
-            // 4) User compiled assemblies — Unity emits these to Library/ScriptAssemblies on each compile.
-            //    Includes per-package compiled outputs (e.g. Unity.TextMeshPro.dll) AND user asmdef outputs.
-            //    This is the right surface — PackageCache itself is mostly source + native plugins (sqlite,
-            //    burst-llvm, etc.) that cause CS0009 noise when loaded as managed metadata.
-            AddDir(Path.Combine(projectPath, "Library", "ScriptAssemblies"));
-            // 5) Package PRECOMPILED .dll refs only — skip any path under known native subdirs to
-            //    avoid CS0009. Heuristic: skip Plugins/ and .Runtime/ subdirs.
-            string pkgCache = Path.Combine(projectPath, "Library", "PackageCache");
-            if (Directory.Exists(pkgCache))
-            {
-                foreach (var pkgDir in Directory.EnumerateDirectories(pkgCache))
+                // Fallback chain: NetStandard 2.1 ref → Mono BCL (older Unity).
+                string compatNs = Path.Combine(editorRoot, "Data", "NetStandard", "compat", "2.1.0", "shims", "netstandard");
+                string nsRoot = Path.Combine(editorRoot, "Data", "NetStandard", "ref", "2.1.0");
+                if (Directory.Exists(compatNs))
                 {
-                    foreach (var f in Directory.EnumerateFiles(pkgDir, "*.dll", SearchOption.AllDirectories))
+                    AddDir(compatNs);
+                    if (Directory.Exists(nsRoot)) AddDir(nsRoot);
+                }
+                else
+                {
+                    AddDir(Path.Combine(editorRoot, "Data", "MonoBleedingEdge", "lib", "mono", "unityjit-win32"));
+                }
+            }
+            // 2) Unity engine + editor modules. Filter to UnityEngine.*/UnityEditor.* only —
+            //    the dir also contains Unity internals (System.CodeDom.dll, Newtonsoft.Json.dll,
+            //    Bee.*, Unity.Cecil.*, etc.) that user code shouldn't see. Including them causes
+            //    duplicate-type ambiguity with `unity-4.8-api/System.dll` (CS0433 on CodeGenerator).
+            void AddUnityModulesIn(string dir)
+            {
+                if (!Directory.Exists(dir)) return;
+                foreach (var f in Directory.EnumerateFiles(dir, "UnityEngine*.dll", SearchOption.TopDirectoryOnly))
+                { var n = Path.GetFileName(f); if (seen.Add(n)) try { refs.Add(MetadataReference.CreateFromFile(f)); } catch { } }
+                foreach (var f in Directory.EnumerateFiles(dir, "UnityEditor*.dll", SearchOption.TopDirectoryOnly))
+                { var n = Path.GetFileName(f); if (seen.Add(n)) try { refs.Add(MetadataReference.CreateFromFile(f)); } catch { } }
+            }
+            AddUnityModulesIn(Path.Combine(editorRoot, "Data", "Managed", "UnityEngine"));
+            AddUnityModulesIn(Path.Combine(editorRoot, "Data", "Managed"));
+            AddUnityModulesIn(Path.Combine(editorRoot, "Data", "Managed", "UnityEditor"));
+            // 4) Library/ScriptAssemblies — Unity-compiled outputs. Includes packages (e.g.
+            //    Unity.TextMeshPro.dll) AND user asmdef outputs. We MUST skip user-asmdef DLLs
+            //    here, because LINT semantic re-parses their source from Assets/. Loading both
+            //    the source AND the prebuilt DLL gives every type two definitions → cascading
+            //    CS0121/CS0433/CS0104 false positives ("ambiguous" / "defined in multiple
+            //    assemblies"). Only keep DLLs whose source is OUTSIDE Assets/ (= packages).
+            string scriptAsmDir = Path.Combine(projectPath, "Library", "ScriptAssemblies");
+            if (Directory.Exists(scriptAsmDir))
+            {
+                var skipDllNames = CollectUserAsmdefDllNames(projectPath);
+                foreach (var dll in Directory.EnumerateFiles(scriptAsmDir, "*.dll", SearchOption.TopDirectoryOnly))
+                {
+                    string asmName = Path.GetFileNameWithoutExtension(dll);
+                    if (skipDllNames.Contains(asmName)) continue;
+                    string fileName = Path.GetFileName(dll);
+                    if (!seen.Add(fileName)) continue;
+                    try { refs.Add(MetadataReference.CreateFromFile(dll)); } catch { }
+                }
+            }
+            // 4b) Plugin DLLs under Assets/ (e.g., Photon Fusion, Google APIs, third-party SDKs).
+            //     Unity auto-references these for Assembly-CSharp + asmdefs without overrideReferences.
+            //     Skip native (architecture suffix) and skip if name collides with Library/ScriptAssemblies entry.
+            string assetsDir2 = Path.Combine(projectPath, "Assets");
+            if (Directory.Exists(assetsDir2))
+            {
+                foreach (var f in Directory.EnumerateFiles(assetsDir2, "*.dll", SearchOption.AllDirectories))
+                {
+                    string norm = f.Replace('\\', '/');
+                    if (norm.Contains("WINARM64", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (norm.Contains("/x86_64/", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (norm.Contains("/Android/", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (norm.Contains("/iOS/", StringComparison.OrdinalIgnoreCase)) continue;
+                    string name = Path.GetFileName(f);
+                    if (!seen.Add(name)) continue;
+                    if (!IsManagedDll(f)) continue;
+                    try { refs.Add(MetadataReference.CreateFromFile(f)); } catch { }
+                }
+            }
+
+            // 5) Package PRECOMPILED .dll refs — Library/PackageCache + any `file:` UPM packages
+            //    declared in manifest.json (live outside the project tree). Skip native DLLs by
+            //    architecture-suffix path heuristic + PE-header probe.
+            void ScanPackageDir(string pkgRoot)
+            {
+                if (!Directory.Exists(pkgRoot)) return;
+                IEnumerable<string> pkgs;
+                try { pkgs = Directory.EnumerateDirectories(pkgRoot); }
+                catch { return; }
+                foreach (var pkgDir in pkgs)
+                {
+                    IEnumerable<string> files;
+                    try { files = Directory.EnumerateFiles(pkgDir, "*.dll", SearchOption.AllDirectories); }
+                    catch { continue; }
+                    foreach (var f in files)
                     {
                         string norm = f.Replace('\\', '/');
-                        if (norm.Contains("/Plugins/", StringComparison.OrdinalIgnoreCase)) continue;
-                        if (norm.Contains("/.Runtime/", StringComparison.OrdinalIgnoreCase)) continue;
-                        if (norm.Contains("/Lib/Editor/", StringComparison.OrdinalIgnoreCase)) continue;
-                        if (norm.Contains("/Dependencies/Assemblies/", StringComparison.OrdinalIgnoreCase)) continue;
-                        // Skip anything that looks native (architecture in path)
                         if (norm.Contains("WINARM64", StringComparison.OrdinalIgnoreCase)) continue;
                         if (norm.Contains("/x86_64/", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (norm.Contains("/Android/", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (norm.Contains("/iOS/", StringComparison.OrdinalIgnoreCase)) continue;
                         string name = Path.GetFileName(f);
                         if (!seen.Add(name)) continue;
-                        // Probe PE header — managed DLLs have CLI metadata.
                         if (!IsManagedDll(f)) continue;
                         try { refs.Add(MetadataReference.CreateFromFile(f)); } catch { }
                     }
                 }
             }
+            ScanPackageDir(Path.Combine(projectPath, "Library", "PackageCache"));
+            // `file:` UPM packages — manifest.json `"name": "file:C:/abs/path"` resolves to that
+            // dir. Treat each as a single package (NOT a parent containing many packages).
+            foreach (var filePkg in LintAsmdef.ResolveFilePackagePaths(projectPath))
+            {
+                IEnumerable<string> files;
+                try { files = Directory.EnumerateFiles(filePkg, "*.dll", SearchOption.AllDirectories); }
+                catch { continue; }
+                foreach (var f in files)
+                {
+                    string norm = f.Replace('\\', '/');
+                    if (norm.Contains("WINARM64", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (norm.Contains("/x86_64/", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (norm.Contains("/Android/", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (norm.Contains("/iOS/", StringComparison.OrdinalIgnoreCase)) continue;
+                    string name = Path.GetFileName(f);
+                    if (!seen.Add(name)) continue;
+                    if (!IsManagedDll(f)) continue;
+                    try { refs.Add(MetadataReference.CreateFromFile(f)); } catch { }
+                }
+            }
 
-            string[] userDefines = ReadScriptingDefines(projSettingsAsset);
-            string[] builtinDefines = BuildBuiltinDefines(version);
+            // Defines: prefer Unity's authoritative `Assembly-CSharp.csproj` <DefineConstants>
+            // when present — Unity strips scriptingDefineSymbols entries for packages it
+            // no longer recognizes (e.g. `PHOTON_UNITY_NETWORKING` when Photon Pun is uninstalled
+            // but the user-written define lingers in ProjectSettings.asset). Reading the YAML
+            // directly causes false-positive errors on `#if PHOTON_UNITY_NETWORKING` blocks.
+            // Fallback: compute defines manually (older or non-IDE-projected projects).
+            string asmCSharpCsproj = Path.Combine(projectPath, "Assembly-CSharp.csproj");
+            string[] csprojDefines = ReadCsprojDefines(asmCSharpCsproj);
+            string[] userDefines;
+            string[] builtinDefines;
+            if (csprojDefines.Length > 0)
+            {
+                builtinDefines = csprojDefines;
+                userDefines = Array.Empty<string>();
+            }
+            else
+            {
+                userDefines = ReadScriptingDefines(projSettingsAsset);
+                string[] moduleDefines = BuildModuleDefines(Path.Combine(projectPath, "Packages", "manifest.json"));
+                builtinDefines = BuildBuiltinDefines(version).Concat(moduleDefines).ToArray();
+            }
+            bool allowUnsafe = ReadAllowUnsafeCode(projSettingsAsset);
 
             _cache = new Cache
             {
@@ -155,11 +263,114 @@ internal static class LintSemantic
                 References = refs,
                 BuiltinDefines = builtinDefines,
                 UserDefines = userDefines,
+                AllowUnsafeCode = allowUnsafe,
                 EditorRoot = editorRoot,
                 UnityVersion = version
             };
-            return (refs, builtinDefines, userDefines, editorRoot, version, null);
+            return (refs, builtinDefines, userDefines, allowUnsafe, editorRoot, version, null);
         }
+    }
+
+    /// <summary>Read `<DefineConstants>X;Y;Z</DefineConstants>` from a Unity-generated csproj.
+    /// Returns empty if the file is missing or unreadable. The csproj is regenerated by Unity
+    /// on every script reload — its contents are guaranteed to match the active build target's
+    /// effective defines (post version-define pruning).</summary>
+    static string[] ReadCsprojDefines(string csprojPath)
+    {
+        if (!File.Exists(csprojPath)) return Array.Empty<string>();
+        try
+        {
+            foreach (var raw in File.ReadLines(csprojPath))
+            {
+                string line = raw.Trim();
+                int o = line.IndexOf("<DefineConstants>", StringComparison.Ordinal);
+                if (o < 0) continue;
+                int s = o + "<DefineConstants>".Length;
+                int e = line.IndexOf("</DefineConstants>", s, StringComparison.Ordinal);
+                if (e < 0) continue;
+                string body = line.Substring(s, e - s);
+                var defs = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var t in body.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    string trimmed = t.Trim();
+                    if (trimmed.Length > 0 && IsValidIdentifier(trimmed)) defs.Add(trimmed);
+                }
+                return defs.ToArray();
+            }
+        }
+        catch { }
+        return Array.Empty<string>();
+    }
+
+    /// <summary>For each `com.unity.modules.<name>` listed in the project's manifest.json,
+    /// emit Unity's corresponding `ENABLE_<NAME>` symbol. Unity sets these automatically when
+    /// the module is present; third-party packages gate code with them
+    /// (UniTask's `#if ENABLE_UNITYWEBREQUEST`, etc.).</summary>
+    static string[] BuildModuleDefines(string manifestPath)
+    {
+        if (!File.Exists(manifestPath)) return Array.Empty<string>();
+        var defines = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(manifestPath));
+            if (!doc.RootElement.TryGetProperty("dependencies", out var deps)) return Array.Empty<string>();
+            foreach (var prop in deps.EnumerateObject())
+            {
+                if (!prop.Name.StartsWith("com.unity.modules.", StringComparison.Ordinal)) continue;
+                string modName = prop.Name.Substring("com.unity.modules.".Length);
+                // Convention: ENABLE_<UPPERCASE>. Unity has a few well-known special cases.
+                string enableSym = modName.ToUpperInvariant() switch
+                {
+                    "PHYSICS"          => "ENABLE_PHYSICS",
+                    "PHYSICS2D"        => "ENABLE_PHYSICS2D",
+                    "PARTICLESYSTEM"   => "ENABLE_PARTICLE_SYSTEM",
+                    "TEXTCORE"         => "ENABLE_TEXTCORE",
+                    "TEXTRENDERING"    => "ENABLE_TEXT_RENDERING",
+                    "UNITYWEBREQUEST"  => "ENABLE_UNITYWEBREQUEST",
+                    "UNITYWEBREQUESTASSETBUNDLE" => "ENABLE_UNITYWEBREQUEST_ASSETBUNDLE",
+                    "UNITYWEBREQUESTAUDIO"       => "ENABLE_UNITYWEBREQUEST_AUDIO",
+                    "UNITYWEBREQUESTTEXTURE"     => "ENABLE_UNITYWEBREQUEST_TEXTURE",
+                    "UNITYWEBREQUESTWWW"         => "ENABLE_UNITYWEBREQUEST_WWW",
+                    "AUDIO"            => "ENABLE_AUDIO",
+                    "ANIMATION"        => "ENABLE_ANIMATION",
+                    "VIDEO"            => "ENABLE_VIDEO",
+                    "TERRAIN"          => "ENABLE_TERRAIN",
+                    "TERRAINPHYSICS"   => "ENABLE_TERRAIN_PHYSICS",
+                    "CLOTH"            => "ENABLE_CLOTH",
+                    "AI"               => "ENABLE_NAVMESH",
+                    "VR"               => "ENABLE_VR",
+                    "XR"               => "ENABLE_XR",
+                    "AR"               => "ENABLE_AR",
+                    "TILEMAP"          => "ENABLE_TILEMAP",
+                    "UI"               => "ENABLE_UNET",  // legacy
+                    _                   => "ENABLE_" + modName.ToUpperInvariant(),
+                };
+                defines.Add(enableSym);
+            }
+        }
+        catch { }
+        return defines.ToArray();
+    }
+
+    /// <summary>Read `allowUnsafeCode: 1` from ProjectSettings.asset. Unity passes `-unsafe` to
+    /// the predefined Assembly-CSharp* assemblies when this is set.</summary>
+    static bool ReadAllowUnsafeCode(string projSettingsAsset)
+    {
+        if (!File.Exists(projSettingsAsset)) return false;
+        try
+        {
+            foreach (var line in File.ReadLines(projSettingsAsset))
+            {
+                int colon = line.IndexOf(':');
+                if (colon < 0) continue;
+                string key = line.Substring(0, colon).Trim();
+                if (!key.Equals("allowUnsafeCode", StringComparison.Ordinal)) continue;
+                string val = line.Substring(colon + 1).Trim();
+                return val == "1" || val.Equals("true", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        catch { }
+        return false;
     }
 
     static string ReadEditorVersion(string versionFile)
@@ -281,13 +492,16 @@ internal static class LintSemantic
         return true;
     }
 
-    /// <summary>Unity built-in defines (always-present): UNITY_*, version cumulative defines.</summary>
+    /// <summary>Unity built-in defines (always-present): UNITY_*, version cumulative defines.
+    /// Unity emits the FULL ladder of `UNITY_X_Y_OR_NEWER` symbols from 5.3 (oldest) up to current —
+    /// missing any rung causes false-positive errors on legacy code paths gated by `#if UNITY_5_5_OR_NEWER`.</summary>
     static string[] BuildBuiltinDefines(string version)
     {
         var d = new List<string>
         {
             "UNITY_64", "UNITY_STANDALONE_WIN", "UNITY_STANDALONE",
-            "ENABLE_MONO", "INCLUDE_DYNAMIC_GI", "ENABLE_PROFILER"
+            "ENABLE_MONO", "INCLUDE_DYNAMIC_GI", "ENABLE_PROFILER",
+            "CSHARP_7_3_OR_NEWER",
         };
         // Parse version into major.minor.patch (e.g. "6000.3.10f1" → 6000, 3, 10).
         int major = 0, minor = 0;
@@ -295,19 +509,54 @@ internal static class LintSemantic
         if (parts.Length > 0) int.TryParse(parts[0], out major);
         if (parts.Length > 1) int.TryParse(parts[1], out minor);
 
-        // Unity emits cumulative version defines: UNITY_<MAJOR>_<MINOR>_OR_NEWER for every (major, minor) ≤ current.
+        // Full historical ladder of UNITY_X_Y_OR_NEWER (Unity emits these cumulatively).
+        // 5.3 is the floor (when this scheme was introduced).
+        for (int m = 3; m <= 6; m++) d.Add($"UNITY_5_{m}_OR_NEWER");
+        // 2017 → 2023: each year's 1/2/3/4 minor.
+        for (int y = 2017; y <= 2023; y++)
+            for (int m = 1; m <= 4; m++) d.Add($"UNITY_{y}_{m}_OR_NEWER");
+        // 6000.x: cumulative through current minor.
         if (major >= 6000)
         {
-            d.Add("UNITY_6000_0_OR_NEWER");
-            for (int m = 0; m <= minor; m++) d.Add($"UNITY_6000_{m}_OR_NEWER");
-            // Backwards-compat: 6000.x is also "≥ all prior 2017–2023.x" — add a representative subset.
-            for (int y = 2017; y <= 2023; y++) d.Add($"UNITY_{y}_1_OR_NEWER");
-        }
-        else if (major >= 2017)
-        {
-            for (int y = 2017; y <= major; y++) d.Add($"UNITY_{y}_1_OR_NEWER");
+            for (int m = 0; m <= Math.Max(minor, 0); m++) d.Add($"UNITY_6000_{m}_OR_NEWER");
         }
         return d.ToArray();
+    }
+
+    /// <summary>Names of DLLs in `Library/ScriptAssemblies/` that LINT semantic must NOT load
+    /// because we're recompiling their source. Includes:
+    ///   - Every asmdef name found under Assets/ (user-authored asmdefs).
+    ///   - Predefined Assembly-CSharp / Assembly-CSharp-Editor / *-firstpass (catch-all asms
+    ///     for .cs files outside any asmdef).</summary>
+    static HashSet<string> CollectUserAsmdefDllNames(string projectPath)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Assembly-CSharp",
+            "Assembly-CSharp-Editor",
+            "Assembly-CSharp-firstpass",
+            "Assembly-CSharp-Editor-firstpass",
+        };
+        string assetsDir = Path.Combine(projectPath, "Assets");
+        if (!Directory.Exists(assetsDir)) return names;
+        try
+        {
+            foreach (var asmdefPath in Directory.EnumerateFiles(assetsDir, "*.asmdef", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(asmdefPath));
+                    if (doc.RootElement.TryGetProperty("name", out var n) && n.ValueKind == System.Text.Json.JsonValueKind.String)
+                    {
+                        var asmName = n.GetString();
+                        if (!string.IsNullOrEmpty(asmName)) names.Add(asmName);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return names;
     }
 
     /// <summary>Quick PE-header probe: returns false for native DLLs / .NET assemblies without CLI metadata.

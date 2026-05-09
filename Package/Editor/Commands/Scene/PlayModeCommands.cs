@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -13,38 +14,161 @@ namespace clibridge4unity
     /// </summary>
     public static class PlayModeCommands
     {
-        [BridgeCommand("PLAY", "Enter play mode (optionally load a scene first)",
+        // Persistent log capture spanning the whole PLAY → STOP window. Subscribed by PLAY,
+        // drained + unsubscribed by STOP. Lives outside the per-command capture in LogCommands
+        // because PLAY returns BEFORE STOP — a command-scoped buffer would clear between them.
+        // Persisted to SessionState so domain reload (entering play mode triggers one) doesn't
+        // wipe the in-memory list between PLAY and STOP.
+        const string PlayLogStateKey = "Bridge_PlayLogJson";
+        const string PlayActiveStateKey = "Bridge_PlayCaptureActive";
+        static readonly object PlayLogLock = new object();
+        static bool _playLogSubscribed;
+
+        [InitializeOnLoadMethod]
+        static void RestoreCaptureSubscription()
+        {
+            if (SessionState.GetBool(PlayActiveStateKey, false))
+            {
+                lock (PlayLogLock)
+                {
+                    if (!_playLogSubscribed)
+                    {
+                        Application.logMessageReceivedThreaded += OnPlayLog;
+                        _playLogSubscribed = true;
+                    }
+                }
+            }
+        }
+
+        static void StartPlayLogCapture()
+        {
+            lock (PlayLogLock)
+            {
+                SessionState.SetString(PlayLogStateKey, "");
+                SessionState.SetBool(PlayActiveStateKey, true);
+                try { System.IO.File.WriteAllText(PlayLogFilePath, ""); } catch { }
+                if (!_playLogSubscribed)
+                {
+                    Application.logMessageReceivedThreaded += OnPlayLog;
+                    _playLogSubscribed = true;
+                }
+            }
+        }
+
+        static List<(LogType type, string message, string stack, DateTime utc)> ReadPlayLog()
+        {
+            string raw = SessionState.GetString(PlayLogStateKey, "");
+            var list = new List<(LogType, string, string, DateTime)>();
+            if (string.IsNullOrEmpty(raw)) return list;
+            // One entry per line: <unixSec>|<type>|<message-base64>
+            foreach (var line in raw.Split('\n'))
+            {
+                if (string.IsNullOrEmpty(line)) continue;
+                var parts = line.Split(new[] { '|' }, 3);
+                if (parts.Length < 3) continue;
+                if (!long.TryParse(parts[0], out long ts)) continue;
+                if (!Enum.TryParse(parts[1], out LogType type)) type = LogType.Error;
+                string msg;
+                try { msg = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(parts[2])); }
+                catch { msg = parts[2]; }
+                list.Add((type, msg, "", DateTimeOffset.FromUnixTimeSeconds(ts).UtcDateTime));
+            }
+            return list;
+        }
+
+        static void StopPlayLogCapture(bool unsubscribe, out List<(LogType type, string message, string stack, DateTime utc)> snapshot)
+        {
+            lock (PlayLogLock)
+            {
+                if (unsubscribe && _playLogSubscribed)
+                {
+                    Application.logMessageReceivedThreaded -= OnPlayLog;
+                    _playLogSubscribed = false;
+                    SessionState.SetBool(PlayActiveStateKey, false);
+                }
+                snapshot = ReadPlayLog();
+                if (unsubscribe) SessionState.SetString(PlayLogStateKey, "");
+            }
+        }
+
+        // File-based mirror of the SessionState play log so the CLI wrapper can read it directly
+        // (without needing to chain a follow-up bridge command after the playmode domain reload).
+        // Path: <project>/.clibridge4unity/play_log.txt — cleared at PLAY start, drained at STOP.
+        static string PlayLogFilePath
+        {
+            get
+            {
+                string projectRoot = Application.dataPath.Replace("/Assets", "");
+                string dir = System.IO.Path.Combine(projectRoot, ".clibridge4unity");
+                try { System.IO.Directory.CreateDirectory(dir); } catch { }
+                return System.IO.Path.Combine(dir, "play_log.txt");
+            }
+        }
+
+        static void OnPlayLog(string message, string stack, LogType type)
+        {
+            // Only persist errors/exceptions — Debug.Log spam would balloon SessionState fast.
+            if (type != LogType.Error && type != LogType.Exception && type != LogType.Assert) return;
+            lock (PlayLogLock)
+            {
+                string current = SessionState.GetString(PlayLogStateKey, "");
+                if (current.Length > 200_000) return; // guardrail
+                long ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                string b64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(message ?? ""));
+                string line = $"{ts}|{type}|{b64}\n";
+                SessionState.SetString(PlayLogStateKey, current + line);
+                // Mirror to disk so the CLI can read without round-tripping through Unity (the
+                // bridge pipe is dead during the playmode domain-reload window).
+                try { System.IO.File.AppendAllText(PlayLogFilePath, $"[{type}] {(message ?? "").Split('\n')[0]}\n"); } catch { }
+            }
+        }
+
+
+        static string FormatPlayErrors(List<(LogType type, string message, string stack, DateTime utc)> entries, int maxLines)
+        {
+            var errs = entries.Where(e => e.type == LogType.Error || e.type == LogType.Exception || e.type == LogType.Assert).ToList();
+            if (errs.Count == 0) return null;
+            var sb = new StringBuilder();
+            sb.AppendLine($"errors: {errs.Count}");
+            foreach (var e in errs.Take(maxLines))
+            {
+                string firstLine = e.message?.Split('\n')[0] ?? "";
+                sb.AppendLine($"  [{e.type}] {firstLine}");
+            }
+            if (errs.Count > maxLines) sb.AppendLine($"  ... +{errs.Count - maxLines} more");
+            return sb.ToString().TrimEnd();
+        }
+
+        [BridgeCommand("PLAY", "Enter play mode and start capturing errors. STOP returns the captured errors when you exit",
             Category = "Scene",
             Usage = "PLAY  OR  PLAY Assets/Scenes/MyScene.unity",
             RequiresMainThread = true,
             RelatedCommands = new[] { "STOP", "PAUSE", "STEP", "PLAYMODE", "LOG" })]
         public static string Play(string data)
         {
+            // Note: a `--wait N` settle was tried but doesn't work — entering play mode triggers
+            // a domain reload that kills the bridge pipe mid-await, so the CLI sees an empty
+            // response. Capture is started instead; STOP drains it. To peek at errors during a
+            // live session, use `LOG errors`.
             try
             {
-                // Optionally load a scene before playing
-                if (!string.IsNullOrWhiteSpace(data))
+                string scenePath = string.IsNullOrWhiteSpace(data) ? null : data.Trim();
+                if (scenePath != null)
                 {
-                    string scenePath = data.Trim();
-                    if (!System.IO.File.Exists(System.IO.Path.Combine(
-                        Application.dataPath, "..", scenePath)))
-                    {
+                    if (!System.IO.File.Exists(System.IO.Path.Combine(Application.dataPath, "..", scenePath)))
                         return Response.Error($"Scene not found: {scenePath}");
-                    }
-
                     if (EditorApplication.isPlaying)
                         EditorApplication.isPlaying = false;
-
                     EditorSceneManager.OpenScene(scenePath);
                 }
 
                 if (EditorApplication.isPlaying)
                     return Response.Success("Already in play mode");
 
-                SessionState.SetString(SessionKeys.PlayModeStartTime,
-                    System.DateTime.Now.Ticks.ToString());
+                SessionState.SetString(SessionKeys.PlayModeStartTime, DateTime.Now.Ticks.ToString());
+                StartPlayLogCapture();
                 EditorApplication.isPlaying = true;
-                return Response.Success("Entering play mode");
+                return Response.Success("Entered play mode. Capturing errors — STOP returns the session log; `LOG errors` peeks live.");
             }
             catch (Exception ex)
             {
@@ -52,7 +176,7 @@ namespace clibridge4unity
             }
         }
 
-        [BridgeCommand("STOP", "Exit play mode",
+        [BridgeCommand("STOP", "Exit play mode and return any errors/exceptions that fired during the play session",
             Category = "Scene",
             Usage = "STOP",
             RequiresMainThread = true,
@@ -62,17 +186,22 @@ namespace clibridge4unity
             try
             {
                 if (!EditorApplication.isPlaying)
+                {
+                    // Unsubscribe defensively in case PLAY left a dangling capture (e.g. crash mid-session).
+                    StopPlayLogCapture(unsubscribe: true, out _);
                     return Response.Success("Not in play mode");
+                }
 
                 EditorApplication.isPlaying = false;
-                return Response.SuccessWithData(new
-                {
-                    message = "Exiting play mode.",
-                    note = "If scripts were edited before play mode, Unity auto-compiles after exit " +
-                           "cleanup. Do NOT call COMPILE immediately — it triggers a redundant reload " +
-                           "on top of the auto-compile, causing cascading domain reloads. " +
-                           "Wait for STATUS to show isCompiling=False and isUpdating=False first."
-                });
+                StopPlayLogCapture(unsubscribe: true, out var captured);
+                string errs = FormatPlayErrors(captured, maxLines: 50);
+                string note = "If scripts were edited before play mode, Unity auto-compiles after exit " +
+                              "cleanup. Do NOT call COMPILE immediately — it triggers a redundant reload " +
+                              "on top of the auto-compile, causing cascading domain reloads. " +
+                              "Wait for STATUS to show isCompiling=False and isUpdating=False first.";
+                if (errs == null)
+                    return Response.SuccessWithData(new { message = "Exiting play mode (no errors during session).", note });
+                return Response.SuccessWithData(new { message = "Exiting play mode.", playSessionErrors = errs, note });
             }
             catch (Exception ex)
             {

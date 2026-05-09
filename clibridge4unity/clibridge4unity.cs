@@ -647,6 +647,7 @@ class Program
             case "OPEN":
             case "CLOSE":
             case "VERSION":
+            case "LAST":
                 return true;
             default:
                 return false;
@@ -886,6 +887,25 @@ class Program
 
     // ───────────────────── Entry Point ─────────────────────
 
+    // Tees Console.Out to a memory buffer so we can persist the full response to disk
+    // for the `LAST` replay command (lets AIs slice prior output without re-running).
+    // When `Defer == true`, writes to console are SUPPRESSED — caller flushes a sliced
+    // version at end-of-command (powers --head/--tail/--grep without losing the full save).
+    sealed class TeeTextWriter : TextWriter
+    {
+        readonly TextWriter _inner;
+        public readonly StringBuilder Buffer = new();
+        public bool Defer;
+        public TeeTextWriter(TextWriter inner) { _inner = inner; }
+        public override System.Text.Encoding Encoding => _inner.Encoding;
+        public override void Write(char value) { Buffer.Append(value); if (!Defer) _inner.Write(value); }
+        public override void Write(string value) { if (value != null) Buffer.Append(value); if (!Defer && value != null) _inner.Write(value); }
+        public override void WriteLine(string value) { if (value != null) Buffer.Append(value); Buffer.Append('\n'); if (!Defer) _inner.WriteLine(value); }
+        public override void Flush() => _inner.Flush();
+        public void WritePassthrough(string s) => _inner.Write(s);
+    }
+    static TeeTextWriter _stdoutTee;
+
     static int Main(string[] args)
     {
         // Force UTF-8 stdout/stderr so unicode chars (em-dash, etc.) survive being piped
@@ -897,6 +917,8 @@ class Program
             Console.SetError(new StreamWriter(Console.OpenStandardError(), utf8NoBom) { AutoFlush = true });
         }
         catch { }
+        // Install stdout tee so we can save the whole response for `LAST` replays.
+        try { _stdoutTee = new TeeTextWriter(Console.Out); Console.SetOut(_stdoutTee); } catch { }
         CliTrace("Main", $"enter args={string.Join(" ", args.Select(a => a?.Length > 120 ? a.Substring(0, 120) + "..." : a ?? ""))}");
         bool versionOnly = args.Length == 1 && args[0] == "--version";
 
@@ -921,15 +943,195 @@ class Program
             // Remove the session ledger entry so other agents stop seeing us as active.
             try { if (_sessionFile != null) File.Delete(_sessionFile); } catch { }
 
+            // Save the full response so `LAST` can replay/slice without re-execution.
+            // Done before the update banner so the cached output stays focused on the command.
+            // Skip the noisy auto-poll commands (Unity's setup wizard / heartbeat scripts spam
+            // STATUS/PROBE/DIAG/PING every few seconds — caching them would push the user's
+            // real command out of the 10-entry history before they can `LAST` it).
+            string firstNonFlag = args.FirstOrDefault(a => a != null && !a.StartsWith("-"));
+            string firstUpper = firstNonFlag?.ToUpperInvariant();
+            bool isReplayCmd = firstUpper == "LAST";
+            bool isNoisyAutoPoll = firstUpper is "STATUS" or "PROBE" or "DIAG" or "PING"
+                                or "SESSIONS" or "VERSION" or "HOOK";
+            if (!versionOnly && !isReplayCmd && !isNoisyAutoPoll)
+                try { SaveLastResponse(args); } catch { }
+
             // Print the update banner last so it appears at the bottom of the output,
             // after the command's normal stdout/stderr. Uses cached JSON only — no delay.
             if (!versionOnly)
             {
                 try { ShowCachedUpdateNotice(); } catch { }
             }
+            // Replay hint — only for commands whose output is typically big enough that an AI
+            // would reach for `| head` / `| tail` (LINT, COMPILE, LOG, INSPECTOR, etc.). Skip
+            // for short ones (PING/PROBE/DIAG/STATUS/SETUP/etc.) so the hint isn't pure noise.
+            bool hintWorthy = firstUpper is "LINT" or "COMPILE" or "REFRESH" or "LOG" or "INSPECTOR"
+                              or "CODE_ANALYZE" or "CODE_EXEC" or "CODE_EXEC_RETURN" or "TEST"
+                              or "ASSET_SEARCH" or "ASSET_DISCOVER" or "UI_DISCOVER" or "FIND";
+            if (!versionOnly && !isReplayCmd && hintWorthy)
+                try { Console.Error.WriteLine("[hint] reuse: `LAST` (full) | `LAST -tail 50` | `LAST -grep ERROR` | `LAST -list` (last 10) | `LAST 3` (3rd most recent)"); } catch { }
             CliTrace("Main", "finally exit");
         }
     }
+
+    /// <summary>Replay one of the last N (default 10) cached responses. No daemon / Unity needed.
+    /// Args (any order):
+    ///   <index>          1-based offset; 1 = most recent. Default 1.
+    ///   list             show short summary table (timestamp, args, bytes) of all entries.
+    ///   head <N>         first N lines of the chosen entry
+    ///   tail <N>         last N lines of the chosen entry
+    ///   grep <PATTERN>   case-insensitive substring filter</summary>
+    static int HandleLastCommand(string projectPath, string data)
+    {
+        var entries = LoadHistoryEntries(projectPath);
+        if (entries.Count == 0)
+        {
+            Console.Error.WriteLine("No cached responses. Run a command first; LAST will replay it.");
+            return EXIT_COMMAND_ERROR;
+        }
+        // Flag parsing: -n N | -N (1-based, 1=newest) | -all | -list | -head N | -tail N | -grep PAT
+        var argv = (data ?? "").Trim().Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        int index = 1;
+        bool allMode = false, listMode = false;
+        int head = -1, tail = -1;
+        string grep = null;
+        for (int i = 0; i < argv.Length; i++)
+        {
+            string a = argv[i];
+            string al = a.ToLowerInvariant();
+            if (al == "-all" || al == "--all") { allMode = true; continue; }
+            if (al == "-list" || al == "--list") { listMode = true; continue; }
+            if ((al == "-n" || al == "--n") && i + 1 < argv.Length && int.TryParse(argv[i + 1], out var n1) && n1 >= 1)
+            { index = n1; i++; continue; }
+            if ((al == "-head" || al == "--head") && i + 1 < argv.Length && int.TryParse(argv[i + 1], out var nh))
+            { head = nh; i++; continue; }
+            if ((al == "-tail" || al == "--tail") && i + 1 < argv.Length && int.TryParse(argv[i + 1], out var nt))
+            { tail = nt; i++; continue; }
+            if ((al == "-grep" || al == "--grep") && i + 1 < argv.Length)
+            { grep = argv[++i]; continue; }
+            // Bare integer = -n shorthand (e.g. `LAST 3`).
+            if (int.TryParse(a, out var bn) && bn >= 1) { index = bn; continue; }
+            Console.Error.WriteLine($"Unknown LAST arg '{a}'. Usage: LAST [-n N | N] [-all] [-list] [-head N] [-tail N] [-grep PAT]");
+            return EXIT_USAGE_ERROR;
+        }
+
+        if (listMode)
+        {
+            Console.WriteLine($"# clibridge4unity LAST — {entries.Count} cached response(s) (newest first)");
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var e = entries[i];
+                Console.WriteLine($"  {i + 1,3}  {e.SavedAt:yyyy-MM-dd HH:mm:ss}  {e.Bytes,8}B  {e.ArgsLine}");
+            }
+            return EXIT_SUCCESS;
+        }
+
+        IEnumerable<HistoryEntry> targets;
+        if (allMode) targets = entries;
+        else
+        {
+            if (index > entries.Count)
+            { Console.Error.WriteLine($"Only {entries.Count} cached response(s); requested index {index}. Use `LAST -list`."); return EXIT_COMMAND_ERROR; }
+            targets = new[] { entries[index - 1] };
+        }
+
+        bool first = true;
+        foreach (var entry in targets)
+        {
+            if (allMode)
+            {
+                if (!first) Console.WriteLine();
+                Console.WriteLine($"# === entry {entries.IndexOf(entry) + 1} | {entry.SavedAt:yyyy-MM-dd HH:mm:ss} | args: {entry.ArgsLine} ===");
+                first = false;
+            }
+            string[] contentLines;
+            try { contentLines = File.ReadAllLines(entry.Path); }
+            catch (Exception ex) { Console.Error.WriteLine($"Error reading cache {entry.Path}: {ex.Message}"); continue; }
+            int contentStart = 0;
+            for (int i = 0; i < contentLines.Length; i++)
+            { if (contentLines[i].StartsWith("# ")) { contentStart = i + 1; continue; } break; }
+            var body = new ArraySegment<string>(contentLines, contentStart, contentLines.Length - contentStart).ToArray();
+
+            // Apply slicing in order: grep → head/tail (mutually exclusive — head wins if both set).
+            IEnumerable<string> sliced = body;
+            if (grep != null)
+                sliced = sliced.Where(l => l.IndexOf(grep, StringComparison.OrdinalIgnoreCase) >= 0);
+            var arr = sliced.ToArray();
+            if (head >= 0) arr = arr.Take(head).ToArray();
+            else if (tail >= 0) arr = arr.Skip(Math.Max(0, arr.Length - tail)).ToArray();
+
+            foreach (var line in arr) Console.WriteLine(line);
+            if (grep != null)
+                Console.Error.WriteLine($"[LAST grep] {arr.Length} match(es) for `{grep}` (entry {entries.IndexOf(entry) + 1}: {entry.ArgsLine})");
+        }
+        return EXIT_SUCCESS;
+    }
+
+    sealed class HistoryEntry
+    {
+        public string Path;
+        public DateTime SavedAt;
+        public string ArgsLine;
+        public long Bytes;
+    }
+
+    static List<HistoryEntry> LoadHistoryEntries(string projectPath)
+    {
+        var list = new List<HistoryEntry>();
+        string dir = Path.Combine(projectPath, ".clibridge4unity", "history");
+        if (!Directory.Exists(dir)) return list;
+        IEnumerable<string> files;
+        try { files = Directory.EnumerateFiles(dir, "*.txt"); }
+        catch { return list; }
+        foreach (var f in files)
+        {
+            DateTime mtime; long len;
+            try { mtime = File.GetLastWriteTime(f); len = new FileInfo(f).Length; }
+            catch { continue; }
+            string argsLine = "";
+            try
+            {
+                using var sr = new StreamReader(f);
+                for (int i = 0; i < 4; i++)
+                {
+                    string line = sr.ReadLine();
+                    if (line == null) break;
+                    if (line.StartsWith("# args: ")) { argsLine = line.Substring("# args: ".Length); break; }
+                }
+            }
+            catch { }
+            list.Add(new HistoryEntry { Path = f, SavedAt = mtime, ArgsLine = argsLine, Bytes = len });
+        }
+        list.Sort((a, b) => b.SavedAt.CompareTo(a.SavedAt));
+        return list;
+    }
+
+    /// <summary>Persist captured stdout into a rotating ring of the last 10 responses
+    /// under <projectPath>/.clibridge4unity/history/. `LAST [N]` replays the Nth (1=newest).</summary>
+    static void SaveLastResponse(string[] args)
+    {
+        if (_stdoutTee == null) return;
+        string projectPath = _resolvedProjectPath ?? AutoDetectProjectPath();
+        if (projectPath == null) return;
+        string dir = Path.Combine(projectPath, ".clibridge4unity", "history");
+        try { Directory.CreateDirectory(dir); } catch { return; }
+        string body = _stdoutTee.Buffer.ToString();
+        if (body.Length > 10_000_000) body = body.Substring(body.Length - 10_000_000);
+        string argLine = string.Join(" ", args ?? Array.Empty<string>());
+        string header = $"# clibridge4unity LAST — saved {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}\n# args: {argLine}\n# bytes: {body.Length}\n";
+        // Filename: `<unix-ms>.txt` so newest is lexicographically last AND has a valid mtime.
+        string fname = $"{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds():D013}.txt";
+        try { File.WriteAllText(Path.Combine(dir, fname), header + body); } catch { return; }
+
+        // Trim to most recent 10 entries.
+        try
+        {
+            var files = Directory.EnumerateFiles(dir, "*.txt").OrderByDescending(p => p).Skip(10).ToList();
+            foreach (var stale in files) { try { File.Delete(stale); } catch { } }
+        }
+        catch { }
+    }
+    static string _resolvedProjectPath;
 
     static int MainImpl(string[] args)
     {
@@ -1072,6 +1274,12 @@ class Program
             Console.Error.WriteLine("       Run from a Unity project directory or use -d <path>.");
             return EXIT_USAGE_ERROR;
         }
+        _resolvedProjectPath = projectPath;
+
+        // LAST: replay (or filter) the previous response without re-executing the command.
+        // Modes: bare = full | head N | tail N | grep PATTERN
+        if (cmdUpper == "LAST")
+            return HandleLastCommand(projectPath, data);
 
         // Initialize path shortening for Editor.log parsing and error output
         StackTraceMinimizer.SetPaths(Path.GetFullPath(projectPath));
@@ -1345,7 +1553,7 @@ class Program
             }
             if (daemonPipe != null)
             {
-                string lintResult = QueryDaemonWithIndexingHeartbeat(daemonPipe, "lint", data ?? "");
+                string lintResult = QueryDaemonWithIndexingHeartbeat(daemonPipe, "lint", data ?? "", projectPath);
                 if (lintResult != null)
                 {
                     Console.WriteLine(lintResult);
@@ -1353,10 +1561,10 @@ class Program
                 }
             }
 
-            // Fallback: parse all Assets/*.cs in-process. 20s budget — fail fast on big projects.
-            Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass lint (20s budget)");
+            // Fallback: parse all Assets/*.cs in-process. 60s budget — covers per-asmdef on big projects.
+            Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass lint (60s budget)");
             var lintBudget = System.Diagnostics.Stopwatch.StartNew();
-            const int lintBudgetMs = 20_000;
+            const int lintBudgetMs = 60_000;
             string assetsDir = Path.Combine(projectPath, "Assets");
             if (!Directory.Exists(assetsDir))
             {
@@ -1366,76 +1574,17 @@ class Program
             var files = Directory.EnumerateFiles(assetsDir, "*.cs", SearchOption.AllDirectories).ToArray();
             string lintQ = (data ?? "").Trim().ToLowerInvariant();
             bool incWarn = lintQ.Contains("warning");
-            bool semantic = lintQ.Contains("semantic") || lintQ.Contains("full");
-            // Default = syntax-only. `LINT semantic` opts into type-binding (slower but deeper).
+            bool unityMode = lintQ.Contains("unity");
 
-            // Semantic path: build refs + per-file parse options + full compilation.
-            if (semantic)
+            // Unity mode: per-asmdef compile (asmdef-aware, accurate on multi-asmdef projects).
+            // Replaced the old `semantic` lump-compile mode which false-positived on plugin-heavy projects.
+            if (unityMode)
             {
-                var (refs, builtin, user, _, version, error) = LintSemantic.Resolve(projectPath);
-                if (error != null)
-                {
-                    Console.Error.WriteLine($"[lint] Cannot run semantic — {error}");
-                    Console.Error.WriteLine("[lint] Falling back to syntax-only.");
-                    semantic = false;
-                }
-                else
-                {
-                    var trees = new System.Collections.Concurrent.ConcurrentBag<Microsoft.CodeAnalysis.SyntaxTree>();
-                    using var semCts = new System.Threading.CancellationTokenSource(
-                        Math.Max(100, lintBudgetMs - (int)lintBudget.ElapsedMilliseconds));
-                    try
-                    {
-                        System.Threading.Tasks.Parallel.ForEach(files,
-                            new System.Threading.Tasks.ParallelOptions { CancellationToken = semCts.Token },
-                            file =>
-                        {
-                            try
-                            {
-                                var text = File.ReadAllText(file);
-                                var opts = LintSemantic.BuildParseOptions(file, builtin, user);
-                                trees.Add(Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, opts, file));
-                            }
-                            catch { }
-                        });
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        Console.Error.WriteLine($"Error: LINT semantic timed out during parse ({files.Length} files, {lintBudgetMs}ms budget). Run plain LINT instead.");
-                        return EXIT_COMMAND_ERROR;
-                    }
-                    var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
-                        "LintSemantic", trees, refs,
-                        new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(
-                            Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary,
-                            allowUnsafe: true, concurrentBuild: true));
-                    var ignored = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
-                    { "CS1701", "CS1702", "CS1705", "CS8019", "CS1591", "CS0436" };
-                    int e = 0, w = 0;
-                    var lns = new System.Collections.Generic.List<string>();
-                    foreach (var d in compilation.GetDiagnostics())
-                    {
-                        if (ignored.Contains(d.Id)) continue;
-                        bool isErr = d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error;
-                        bool isWarn = d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Warning;
-                        if (!isErr && !isWarn) continue;
-                        if (isErr) e++; else w++;
-                        if (isWarn && !incWarn) continue;
-                        var pos = d.Location.GetLineSpan().StartLinePosition;
-                        string fp = d.Location.SourceTree?.FilePath ?? "(no file)";
-                        string rel = fp.Replace(projectPath + "\\", "").Replace(projectPath + "/", "");
-                        lns.Add($"{rel}:{pos.Line + 1}:{pos.Character + 1}: {(isErr ? "ERROR" : "WARN")} {d.Id}: {d.GetMessage()}");
-                    }
-                    Console.WriteLine($"Files: {files.Length}  Errors: {e}{(incWarn ? $"  Warnings: {w}" : "")}  Mode: semantic ({version}, {refs.Count} refs)");
-                    if (e == 0 && (!incWarn || w == 0))
-                        Console.WriteLine("OK — no errors.\nFull type-binding pass — would compile under Unity.");
-                    else
-                    {
-                        lns.Sort(StringComparer.Ordinal);
-                        foreach (var l in lns) Console.WriteLine(l);
-                    }
-                    return e > 0 ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
-                }
+                Console.Error.WriteLine("[lint] Running unity per-asmdef compile (60s budget)...");
+                var unityRun = LintUnity.Run(projectPath, fileTexts: null);
+                Console.WriteLine(LintUnity.Format(unityRun, projectPath, incWarn));
+                return unityRun.PerAsmdef.Any(r => r.Diagnostics.Any(d => d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error))
+                    ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
             }
 
             // Syntax-only single-pass + UI lint (UXML/USS). Honor 20s budget.
@@ -1478,7 +1627,7 @@ class Program
             }
             Console.WriteLine($"Files: {files.Length}  Errors: {errors}{(incWarn ? $"  Warnings: {warnings}" : "")}  Mode: syntax-only (no semantic check)");
             if (errors == 0 && (!incWarn || warnings == 0))
-                Console.WriteLine("OK — no syntax errors.\nNote: this catches missing braces, bad keywords, unclosed strings.\nMisses: type errors, missing usings, wrong arg counts. Use `LINT semantic` or COMPILE for full check.");
+                Console.WriteLine("OK — no syntax errors.\nNote: this catches missing braces, bad keywords, unclosed strings.\nMisses: type errors, missing usings, wrong arg counts. Use `LINT unity` (per-asmdef compile) or COMPILE for full check.");
             else
             {
                 lines.Sort(StringComparer.Ordinal);
@@ -1652,6 +1801,48 @@ class Program
             return HandleAssetSearch(pipeName, projectPath, data);
         }
 
+        // PLAY: send PLAY → sleep settle window → read errors directly from the play_log.txt
+        // file the Unity-side capture writes. No follow-up bridge call needed (the playmode
+        // domain reload kills the pipe; reconnecting just to query a SessionState would race
+        // the reload). Settle defaults to 3s; override with `--wait <seconds>` (0..60).
+        if (command.Equals("PLAY", StringComparison.OrdinalIgnoreCase))
+        {
+            int settleSec = 3;
+            string playData = data ?? "";
+            int waitIdx = playData.IndexOf("--wait", StringComparison.OrdinalIgnoreCase);
+            if (waitIdx >= 0)
+            {
+                var rest = playData.Substring(waitIdx + "--wait".Length).Trim();
+                var tokens = rest.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (tokens.Length > 0 && int.TryParse(tokens[0], out int s)) settleSec = Math.Clamp(s, 0, 60);
+                playData = playData.Substring(0, waitIdx).Trim();
+            }
+            int playRc = SendCommand(pipeName, projectPath, "PLAY", playData);
+            if (playRc != EXIT_SUCCESS) return playRc;
+            if (settleSec > 0)
+            {
+                Console.Error.WriteLine($"[PLAY] settling {settleSec}s before reading play_log.txt...");
+                Thread.Sleep(settleSec * 1000);
+            }
+            string playLogPath = Path.Combine(projectPath, ".clibridge4unity", "play_log.txt");
+            if (File.Exists(playLogPath))
+            {
+                try
+                {
+                    string body = File.ReadAllText(playLogPath).TrimEnd();
+                    if (body.Length > 0)
+                    {
+                        Console.WriteLine($"errors during {settleSec}s settle:");
+                        foreach (var line in body.Split('\n').Take(50)) Console.WriteLine($"  {line.TrimEnd()}");
+                    }
+                    else Console.WriteLine($"No errors captured during {settleSec}s settle.");
+                }
+                catch (Exception ex) { Console.Error.WriteLine($"  (could not read play_log.txt: {ex.Message})"); }
+            }
+            else Console.WriteLine($"No errors captured during {settleSec}s settle.");
+            return EXIT_SUCCESS;
+        }
+
         int result = SendCommand(pipeName, projectPath, command, data);
 
         // Auto-retry once on main thread timeout — Unity may have just been momentarily busy
@@ -1695,15 +1886,15 @@ class Program
         Console.Error.WriteLine("CLI-side commands (no Unity pipe needed):");
         Console.Error.WriteLine("  SETUP                      Install UPM package + generate CLAUDE.md and AGENTS.md");
         Console.Error.WriteLine("  UPDATE                     Self-update CLI + UPM package");
-        Console.Error.WriteLine("  SERVE [--port N] [--ttl M] Start local file server (port 8420)");
+        Console.Error.WriteLine("  SERVE [--port N] [--ttl M] [--public] [--cors] Start local file server (localhost:8420)");
         Console.Error.WriteLine("  CODE_ANALYZE <query>       Offline Roslyn/source analysis");
         Console.Error.WriteLine("  LINT [warnings]            Syntax-only fast check (default, ~1s, catches braces/strings/typos/new files)");
-        Console.Error.WriteLine("  LINT semantic [warnings]   Lump-compile semantic (~1-15s, type-binding, may false-positive on plugin-heavy projects)");
+        Console.Error.WriteLine("  LINT unity [warnings]      Per-asmdef Unity-faithful compile (~5-60s, asmdef-aware, type-binding)");
         Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");
         Console.Error.WriteLine("  WAKEUP refresh             Bring to foreground + force recompile (Ctrl+R)");
         Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");
         Console.Error.WriteLine("  SCREENSHOT [view]          Capture Unity window screenshot");
-        Console.Error.WriteLine("  LAST [command|index]       Retrieve previous command result from history");
+        Console.Error.WriteLine("  LAST [N|-n N|-all|-list] [-head N|-tail N|-grep PAT]  Replay one of the last 10 responses (no re-run)");
         Console.Error.WriteLine("  OPEN                       Launch Unity (or restart if in Safe Mode)");
         Console.Error.WriteLine("  KILL                       Force-terminate Unity for this project (loses unsaved work)");
         Console.Error.WriteLine();
@@ -2165,6 +2356,9 @@ class Program
 
     static string TryGetCurrentUserSid()
     {
+        if (!OperatingSystem.IsWindows())
+            return null;
+
         try
         {
             using var identity = WindowsIdentity.GetCurrent();
@@ -4154,7 +4348,7 @@ class Program
         md.AppendLine("**Always prefer `LINT` over `COMPILE` first.** Works when Unity is busy/closed. Three modes:");
         md.AppendLine();
         md.AppendLine("- `LINT` (default) — syntax-only. Sub-second. Catches missing braces, unclosed strings, bad keywords, malformed declarations, errors in NEW .cs Unity hasn't seen. No type binding.");
-        md.AppendLine("- `LINT semantic` — lump-compile with type binding. ~1-15s depending on project size. Catches missing methods, wrong arg counts, type errors, missing usings. **May false-positive on plugin-heavy projects** with precompiled DLLs that overlap source types — fall back to default `LINT` or `COMPILE` if so.");
+        md.AppendLine("- `LINT unity` — Unity-faithful **per-asmdef** compile. ~5-60s depending on project size. Parses every asmdef, builds the dependency DAG, compiles each user asmdef separately with correct refs + defines + `UNITY_EDITOR` scoping. Catches missing methods, wrong arg counts, type errors, missing usings. Asmdef-aware so no cross-asmdef type collision false-positives. Caps at 60s — falls back to `COMPILE` if exceeded.");
         md.AppendLine("- Append `warnings` to any mode to include warnings.");
         md.AppendLine();
         md.AppendLine("Backed by the Roslyn daemon's FileSystemWatcher → catches errors in `.cs` files Unity hasn't seen yet.");
@@ -4194,7 +4388,7 @@ class Program
         md.AppendLine();
         md.AppendLine("## Other workflows");
         md.AppendLine();
-        md.AppendLine("- Build / state: `LINT` (offline syntax — try first) | `LINT semantic` (deeper type-binding) | `COMPILE` (Unity-side, triggers domain reload) | `REFRESH` | `STATUS` | `LOG errors` | `DIAG` (always works — no main thread needed) | `PROBE` (quick main-thread health)");
+        md.AppendLine("- Build / state: `LINT` (offline syntax — try first) | `LINT unity` (per-asmdef compile, deeper type-binding) | `COMPILE` (Unity-side, triggers domain reload) | `REFRESH` | `STATUS` | `LOG errors` | `DIAG` (always works — no main thread needed) | `PROBE` (quick main-thread health)");
         md.AppendLine("- Scene: `PLAY` | `STOP` | `PAUSE` | `STEP` | `CREATE` | `FIND` | `DELETE` | `SAVE` | `LOAD` | `SCENEVIEW frame|2d|3d` | `WINDOWS` | `GAMEVIEW WxH`");
         md.AppendLine("- Components: `COMPONENT_SET obj comp field value` | `COMPONENT_ADD obj comp` | `COMPONENT_REMOVE obj comp`");
         md.AppendLine("- Prefabs: `PREFAB_CREATE name path` | `PREFAB_INSTANTIATE path [parent]`");
@@ -4206,6 +4400,22 @@ class Program
         md.AppendLine("## Diagnosing a stuck command");
         md.AppendLine();
         md.AppendLine("If a command hangs or returns a main-thread timeout: run `DIAG` first (always responds, no main thread). It tells you whether Unity is compiling, importing, has open dialogs, or is just slow. `LOG errors` shows what's broken. `WAKEUP` brings Unity forward if it's been backgrounded.");
+        md.AppendLine();
+        md.AppendLine("## Slicing big responses — use LAST, NEVER `| head` / `| tail`");
+        md.AppendLine();
+        md.AppendLine("Every command's full stdout is cached. The last **10** responses are kept; `LAST` replays/slices any of them without re-running the command (no Unity round-trip, no compile/lint cycles burned just to peek).");
+        md.AppendLine();
+        md.AppendLine("- `clibridge4unity LAST` — full text of most recent response");
+        md.AppendLine("- `clibridge4unity LAST 3` — full text of the 3rd most recent (`-n 3` works too)");
+        md.AppendLine("- `clibridge4unity LAST -list` — table of all 10 (timestamp, args, byte size)");
+        md.AppendLine("- `clibridge4unity LAST -all` — dump every cached response in order, separator-delimited");
+        md.AppendLine("- Slice flags combine with any of the above:");
+        md.AppendLine("  - `LAST -head 50` — first 50 lines of the most recent");
+        md.AppendLine("  - `LAST 2 -tail 30` — last 30 lines of the 2nd most recent");
+        md.AppendLine("  - `LAST -grep ERROR` — case-insensitive substring filter on the most recent");
+        md.AppendLine("  - `LAST -all -grep CS0246` — same filter across every cached response");
+        md.AppendLine();
+        md.AppendLine("**Always prefer `LAST` over piping a fresh command through `head` / `tail` / `grep`.** Re-running `LINT` / `LOG` / `INSPECTOR` costs Unity time, can invalidate caches, and can race with ongoing imports.");
 
         // Determine target path
         string targetPath;
@@ -4308,13 +4518,21 @@ class Program
     /// catches up. Returns early if progress stalls (no heartbeat for 5s) — better to
     /// fall back to single-pass than block on a wedged indexer.
     /// </summary>
-    static string QueryDaemonWithIndexingHeartbeat(string pipeName, string endpoint, string query)
+    static string QueryDaemonWithIndexingHeartbeat(string pipeName, string endpoint, string query, string projectPath = null)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(120);
+        // First call returns null on stall after these per-endpoint thresholds. Caller falls
+        // back to single-pass OR — if `projectPath` was supplied — we kill + restart the daemon
+        // and retry once with a longer threshold (helps when prior daemon hung mid-index).
+        // `lint` is heaviest endpoint (per-asmdef compile + index 10k+ files).
+        int stallSeconds = endpoint == "lint" ? 30 : 5;
+        int totalDeadlineSec = endpoint == "lint" ? 180 : 120;
+        bool retried = false;
+
+        retry:
+        var deadline = DateTime.UtcNow.AddSeconds(totalDeadlineSec);
         bool printedHeartbeat = false;
         string lastProgress = null;
         DateTime lastProgressChange = DateTime.UtcNow;
-        const int STALL_SECONDS = 5;
 
         while (DateTime.UtcNow < deadline)
         {
@@ -4332,11 +4550,22 @@ class Program
                     lastProgress = progress;
                     lastProgressChange = DateTime.UtcNow;
                 }
-                else if ((DateTime.UtcNow - lastProgressChange).TotalSeconds >= STALL_SECONDS)
+                else if ((DateTime.UtcNow - lastProgressChange).TotalSeconds >= stallSeconds)
                 {
                     if (printedHeartbeat) Console.Error.WriteLine();
-                    Console.Error.WriteLine($"[roslyn] daemon stalled at {progress} for {STALL_SECONDS}s — falling back");
-                    return null; // Caller falls back to single-pass.
+                    if (!retried && !string.IsNullOrEmpty(projectPath))
+                    {
+                        Console.Error.WriteLine($"[roslyn] daemon stalled at {progress} for {stallSeconds}s — killing + restarting");
+                        RoslynDaemon.KillAndCleanup(projectPath);
+                        string newPipe = RoslynDaemon.StartBackground(projectPath);
+                        if (newPipe == null) return null;
+                        pipeName = newPipe;
+                        retried = true;
+                        stallSeconds *= 2; // be more patient on retry
+                        goto retry;
+                    }
+                    Console.Error.WriteLine($"[roslyn] daemon stalled at {progress} for {stallSeconds}s — falling back");
+                    return null;
                 }
                 Console.Error.Write($"\r[roslyn] indexing {progress}        ");
                 printedHeartbeat = true;
@@ -4347,7 +4576,7 @@ class Program
             return r;
         }
         if (printedHeartbeat) Console.Error.WriteLine();
-        return "Error: Daemon indexing exceeded 120s. Retry shortly or run `clibridge4unity DAEMON status`.";
+        return $"Error: Daemon indexing exceeded {totalDeadlineSec}s. Retry shortly or run `clibridge4unity DAEMON status`.";
     }
 
     static int HandleWakeup(string projectPath, bool sendRefresh = false)
@@ -5433,6 +5662,9 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
 
     static string ResolveWindowsAccountSid(string user)
     {
+        if (!OperatingSystem.IsWindows())
+            return null;
+
         try
         {
             var account = new System.Security.Principal.NTAccount(user);

@@ -2,15 +2,17 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 
 namespace clibridge4unity;
 
 static class ReportServer
 {
-    static readonly string BaseDir = Path.Combine(
+    static readonly string BaseDir = Path.GetFullPath(Path.Combine(
         Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(),
-        "clibridge4unity");
+        "clibridge4unity"));
 
     static readonly Dictionary<string, string> MimeTypes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -37,6 +39,8 @@ static class ReportServer
     {
         int port = 8420;
         int ttlMinutes = 60;
+        bool publicBind = false;
+        bool enableCors = false;
 
         // Parse args
         if (!string.IsNullOrWhiteSpace(args))
@@ -48,6 +52,10 @@ static class ReportServer
                     int.TryParse(parts[++i], out port);
                 else if (parts[i] == "--ttl" && i + 1 < parts.Length)
                     int.TryParse(parts[++i], out ttlMinutes);
+                else if (parts[i] == "--public")
+                    publicBind = true;
+                else if (parts[i] == "--cors")
+                    enableCors = true;
             }
         }
 
@@ -55,27 +63,15 @@ static class ReportServer
         Directory.CreateDirectory(Path.Combine(BaseDir, "screenshots"));
         Directory.CreateDirectory(Path.Combine(BaseDir, "sessions"));
 
-        var listener = new HttpListener();
-        bool wildcard = false;
+        var listener = new TcpListener(publicBind ? IPAddress.Any : IPAddress.Loopback, port);
+        listener.Start();
 
-        // Try wildcard binding first, fall back to localhost
-        try
-        {
-            listener.Prefixes.Add($"http://+:{port}/");
-            listener.Start();
-            wildcard = true;
-        }
-        catch
-        {
-            listener = new HttpListener();
-            listener.Prefixes.Add($"http://localhost:{port}/");
-            listener.Start();
-        }
-
-        string url = wildcard ? $"http://+:{port}/" : $"http://localhost:{port}/";
+        string url = publicBind ? $"http://0.0.0.0:{port}/" : $"http://localhost:{port}/";
         Console.WriteLine($"[SERVE] Listening on {url}");
         Console.WriteLine($"[SERVE] Serving files from: {BaseDir}");
         Console.WriteLine($"[SERVE] TTL: {ttlMinutes} min (files older are cleaned up)");
+        if (publicBind) Console.WriteLine("[SERVE] Public bind enabled. Only use this on trusted networks.");
+        if (enableCors) Console.WriteLine("[SERVE] CORS enabled.");
         Console.WriteLine($"[SERVE] Press Ctrl+C to stop");
 
         // Graceful shutdown
@@ -97,29 +93,32 @@ static class ReportServer
         // Request loop
         while (!cts.IsCancellationRequested)
         {
-            HttpListenerContext ctx;
+            TcpClient client;
             try
             {
-                ctx = listener.GetContext();
+                client = listener.AcceptTcpClient();
             }
-            catch
+            catch (SocketException) when (cts.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (ObjectDisposedException) when (cts.IsCancellationRequested)
             {
                 break;
             }
 
             try
             {
-                HandleRequest(ctx);
+                using (client)
+                {
+                    client.ReceiveTimeout = 15000;
+                    client.SendTimeout = 15000;
+                    HandleRequest(client, enableCors);
+                }
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[SERVE] Error: {ex.Message}");
-                try
-                {
-                    ctx.Response.StatusCode = 500;
-                    ctx.Response.Close();
-                }
-                catch { }
             }
         }
 
@@ -127,33 +126,55 @@ static class ReportServer
         return 0;
     }
 
-    static void HandleRequest(HttpListenerContext ctx)
+    static void HandleRequest(TcpClient client, bool enableCors)
     {
-        var req = ctx.Request;
-        var resp = ctx.Response;
+        using var stream = client.GetStream();
+        using var reader = new StreamReader(stream, Encoding.ASCII, false, 8192, leaveOpen: true);
 
-        // CORS headers
-        resp.Headers.Set("Access-Control-Allow-Origin", "*");
-        resp.Headers.Set("Access-Control-Allow-Methods", "GET, OPTIONS");
-        resp.Headers.Set("Access-Control-Allow-Headers", "*");
-        resp.Headers.Set("Cache-Control", "no-cache, no-store, must-revalidate");
+        string requestLine = reader.ReadLine();
+        if (string.IsNullOrWhiteSpace(requestLine))
+            return;
 
-        if (req.HttpMethod == "OPTIONS")
+        string line;
+        while (!string.IsNullOrEmpty(line = reader.ReadLine()))
         {
-            resp.StatusCode = 204;
-            resp.Close();
+            // Drain request headers. The server only supports simple GET/OPTIONS requests.
+        }
+
+        var parts = requestLine.Split(' ');
+        if (parts.Length < 2)
+        {
+            WriteText(stream, 400, "Bad Request", "Bad Request", enableCors);
             return;
         }
 
+        string method = parts[0].ToUpperInvariant();
+        string target = parts[1];
+        if (method == "OPTIONS")
+        {
+            WriteBytes(stream, 204, "No Content", "text/plain", Array.Empty<byte>(), enableCors);
+            return;
+        }
+        if (method != "GET")
+        {
+            WriteText(stream, 405, "Method Not Allowed", "Method Not Allowed", enableCors);
+            return;
+        }
+
+        string absolutePath;
+        if (Uri.TryCreate(target, UriKind.Absolute, out var absoluteUri))
+            absolutePath = absoluteUri.AbsolutePath;
+        else
+            absolutePath = target.Split('?')[0];
+
         // Decode and sanitize path
-        string urlPath = Uri.UnescapeDataString(req.Url!.AbsolutePath).TrimStart('/');
+        string urlPath = Uri.UnescapeDataString(absolutePath).TrimStart('/');
         string fsPath = Path.GetFullPath(Path.Combine(BaseDir, urlPath));
 
         // Security: ensure resolved path is under BaseDir
-        if (!fsPath.StartsWith(BaseDir, StringComparison.OrdinalIgnoreCase))
+        if (!IsUnderBaseDir(fsPath))
         {
-            resp.StatusCode = 403;
-            resp.Close();
+            WriteText(stream, 403, "Forbidden", "Forbidden", enableCors);
             return;
         }
 
@@ -164,43 +185,47 @@ static class ReportServer
             string indexPath = Path.Combine(fsPath, "index.html");
             if (File.Exists(indexPath))
             {
-                ServeFile(resp, indexPath);
+                ServeFile(stream, indexPath, enableCors);
                 return;
             }
 
-            ServeDirectoryListing(resp, fsPath, urlPath);
+            ServeDirectoryListing(stream, fsPath, urlPath, enableCors);
             return;
         }
 
         // File
         if (File.Exists(fsPath))
         {
-            ServeFile(resp, fsPath);
+            ServeFile(stream, fsPath, enableCors);
             return;
         }
 
-        resp.StatusCode = 404;
-        byte[] msg = System.Text.Encoding.UTF8.GetBytes("Not Found");
-        resp.ContentType = "text/plain";
-        resp.ContentLength64 = msg.Length;
-        resp.OutputStream.Write(msg, 0, msg.Length);
-        resp.Close();
+        WriteText(stream, 404, "Not Found", "Not Found", enableCors);
     }
 
-    static void ServeFile(HttpListenerResponse resp, string filePath)
+    static bool IsUnderBaseDir(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        string root = BaseDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (string.Equals(fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                root, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        string rootWithSeparator = root + Path.DirectorySeparatorChar;
+        return fullPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase);
+    }
+
+    static void ServeFile(Stream stream, string filePath, bool enableCors)
     {
         string ext = Path.GetExtension(filePath);
-        resp.ContentType = MimeTypes.GetValueOrDefault(ext, "application/octet-stream");
-
         var fi = new FileInfo(filePath);
-        resp.ContentLength64 = fi.Length;
+        WriteHeaders(stream, 200, "OK", MimeTypes.GetValueOrDefault(ext, "application/octet-stream"), fi.Length, enableCors);
 
         using var fs = fi.OpenRead();
-        fs.CopyTo(resp.OutputStream);
-        resp.Close();
+        fs.CopyTo(stream);
     }
 
-    static void ServeDirectoryListing(HttpListenerResponse resp, string dirPath, string urlPath)
+    static void ServeDirectoryListing(Stream stream, string dirPath, string urlPath, bool enableCors)
     {
         string displayPath = "/" + urlPath.TrimEnd('/');
         if (displayPath == "/") displayPath = "/";
@@ -272,11 +297,40 @@ static class ReportServer
 
         sb.Append("</table>\n</body>\n</html>");
 
-        resp.ContentType = "text/html; charset=utf-8";
-        byte[] data = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
-        resp.ContentLength64 = data.Length;
-        resp.OutputStream.Write(data, 0, data.Length);
-        resp.Close();
+        byte[] data = Encoding.UTF8.GetBytes(sb.ToString());
+        WriteBytes(stream, 200, "OK", "text/html; charset=utf-8", data, enableCors);
+    }
+
+    static void WriteText(Stream stream, int statusCode, string reason, string body, bool enableCors)
+    {
+        WriteBytes(stream, statusCode, reason, "text/plain; charset=utf-8", Encoding.UTF8.GetBytes(body), enableCors);
+    }
+
+    static void WriteBytes(Stream stream, int statusCode, string reason, string contentType, byte[] body, bool enableCors)
+    {
+        WriteHeaders(stream, statusCode, reason, contentType, body.Length, enableCors);
+        if (body.Length > 0)
+            stream.Write(body, 0, body.Length);
+    }
+
+    static void WriteHeaders(Stream stream, int statusCode, string reason, string contentType, long contentLength, bool enableCors)
+    {
+        var sb = new StringBuilder();
+        sb.Append($"HTTP/1.1 {statusCode} {reason}\r\n");
+        sb.Append("Connection: close\r\n");
+        sb.Append("Cache-Control: no-cache, no-store, must-revalidate\r\n");
+        if (!string.IsNullOrEmpty(contentType))
+            sb.Append($"Content-Type: {contentType}\r\n");
+        sb.Append($"Content-Length: {contentLength}\r\n");
+        if (enableCors)
+        {
+            sb.Append("Access-Control-Allow-Origin: *\r\n");
+            sb.Append("Access-Control-Allow-Methods: GET, OPTIONS\r\n");
+            sb.Append("Access-Control-Allow-Headers: *\r\n");
+        }
+        sb.Append("\r\n");
+        byte[] headerBytes = Encoding.ASCII.GetBytes(sb.ToString());
+        stream.Write(headerBytes, 0, headerBytes.Length);
     }
 
     static string FormatSize(long bytes)

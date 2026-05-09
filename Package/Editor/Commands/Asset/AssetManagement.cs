@@ -66,7 +66,7 @@ namespace clibridge4unity
             if (string.IsNullOrWhiteSpace(data))
                 return Response.Error("Usage: ASSET_DELETE <path> [path2 ...]");
 
-            var paths = data.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var paths = ArgParser.Split(data);
             var failed = new StringBuilder();
             int deleted = 0;
 
@@ -100,7 +100,7 @@ namespace clibridge4unity
             if (string.IsNullOrWhiteSpace(data))
                 return Response.Error("Usage: ASSET_MKDIR <path> [path2 ...]");
 
-            var paths = data.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var paths = ArgParser.Split(data);
             var sb = new StringBuilder();
             int created = 0;
 
@@ -141,7 +141,7 @@ namespace clibridge4unity
             if (string.IsNullOrWhiteSpace(data))
                 return Response.Error("Usage: ASSET_LABEL <path> [+add -remove ...]");
 
-            var parts = data.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var parts = ArgParser.Split(data);
             string path = parts[0];
 
             var obj = AssetDatabase.LoadMainAssetAtPath(path);
@@ -200,7 +200,7 @@ namespace clibridge4unity
                     return Response.Success("Reserialized entire project");
                 }
 
-                var paths = data.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                var paths = ArgParser.Split(data);
                 foreach (var p in paths)
                     if (!AssetDatabase.AssetPathExists(p) && !AssetDatabase.IsValidFolder(p))
                         return Response.ErrorAssetNotFound(p);
@@ -494,7 +494,7 @@ namespace clibridge4unity
             if (string.IsNullOrWhiteSpace(data))
                 return null;
 
-            var parts = data.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var parts = ArgParser.Split(data);
             return parts.Length >= expected ? parts : null;
         }
 
