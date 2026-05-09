@@ -190,10 +190,9 @@ namespace clibridge4unity
 
             if (path.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase))
             {
-                // Default a bit bigger when targeting a sub-element so we have room to crop.
-                int defaultW = elSelector != null ? 1280 : 800;
-                int defaultH = elSelector != null ? 720 : 450;
-                return await RenderUxmlAsync(path, width > 0 ? width : defaultW, height > 0 ? height : defaultH, elSelector);
+                // Pass 0,0 to let RenderUxmlAsync infer viewport from UXML root's declared
+                // pixel size, falling back to 1920x1080.
+                return await RenderUxmlAsync(path, width, height, elSelector);
             }
 
             // Auto-detect asset type
@@ -255,6 +254,32 @@ namespace clibridge4unity
             EditorWindow window = null;
             VisualElement instantiatedRoot = null;
 
+            // Infer viewport from UXML root child's declared pixel size if caller did not specify.
+            // UXML authors usually set width/height on the top-level VisualElement (e.g. 1920x1080
+            // for a full-screen panel, or 400x300 for a card). Use that so the layout matches
+            // the author's intent instead of a hard-coded default.
+            if (width <= 0 || height <= 0)
+            {
+                var inferred = await CommandRegistry.RunOnMainThreadAsync(() =>
+                {
+                    var probe = uxml.Instantiate();
+                    int iw = 0, ih = 0;
+                    foreach (var child in probe.Children())
+                    {
+                        var sw = child.style.width;
+                        var sh = child.style.height;
+                        if (sw.keyword == StyleKeyword.Undefined && sw.value.unit == LengthUnit.Pixel && sw.value.value > 0)
+                            iw = Mathf.RoundToInt(sw.value.value);
+                        if (sh.keyword == StyleKeyword.Undefined && sh.value.unit == LengthUnit.Pixel && sh.value.value > 0)
+                            ih = Mathf.RoundToInt(sh.value.value);
+                        if (iw > 0 || ih > 0) break;
+                    }
+                    return new Vector2Int(iw, ih);
+                });
+                if (width <= 0) width = inferred.x > 0 ? inferred.x : 1920;
+                if (height <= 0) height = inferred.y > 0 ? inferred.y : 1080;
+            }
+
             try
             {
                 // Create a utility window hosting the UXML
@@ -281,23 +306,58 @@ namespace clibridge4unity
                 // Multi-pass settle: dynamic font atlas, TMP text, and image-after-load layout
                 // need several paint cycles before text positions stabilize. Pump RepaintImmediately
                 // across multiple frames so each pass picks up sizes from the previous one.
-                for (int i = 0; i < 6; i++)
+                async Task Pump(int passes)
                 {
-                    await CommandRegistry.RunOnMainThreadAsync<int>(() =>
+                    for (int i = 0; i < passes; i++)
                     {
-                        var pField = typeof(EditorWindow).GetField("m_Parent",
-                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                        var p = pField?.GetValue(window);
-                        if (p != null)
+                        await CommandRegistry.RunOnMainThreadAsync<int>(() =>
                         {
-                            var rImm = p.GetType().GetMethod("RepaintImmediately",
-                                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                            rImm?.Invoke(p, null);
-                        }
-                        instantiatedRoot?.MarkDirtyRepaint();
-                        return 0;
+                            var pField = typeof(EditorWindow).GetField("m_Parent",
+                                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                            var p = pField?.GetValue(window);
+                            if (p != null)
+                            {
+                                var rImm = p.GetType().GetMethod("RepaintImmediately",
+                                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                                rImm?.Invoke(p, null);
+                            }
+                            instantiatedRoot?.MarkDirtyRepaint();
+                            return 0;
+                        });
+                        await Task.Delay(50);
+                    }
+                }
+
+                await Pump(6);
+
+                // If targeting a sub-element and it laid out small, supersample by scaling the
+                // root visual tree. Renders the same layout into more pixels so the cropped
+                // output stays sharp instead of being a tiny blurry thumbnail.
+                if (!string.IsNullOrEmpty(elSelector))
+                {
+                    var elBound = await CommandRegistry.RunOnMainThreadAsync(() =>
+                    {
+                        var el = ResolveSelector(instantiatedRoot, elSelector);
+                        return el?.worldBound ?? Rect.zero;
                     });
-                    await Task.Delay(50);
+
+                    if (elBound.width > 0 && elBound.height > 0)
+                    {
+                        const float targetMin = 600f;
+                        float zoom = Mathf.Clamp(targetMin / Mathf.Max(elBound.width, elBound.height), 1f, 8f);
+                        if (zoom > 1.05f)
+                        {
+                            await CommandRegistry.RunOnMainThreadAsync<int>(() =>
+                            {
+                                instantiatedRoot.style.transformOrigin = new TransformOrigin(0, 0, 0);
+                                instantiatedRoot.style.scale = new StyleScale(new Scale(new Vector3(zoom, zoom, 1)));
+                                window.Repaint();
+                                return 0;
+                            });
+                            await Task.Delay(100);
+                            await Pump(4);
+                        }
+                    }
                 }
 
                 // Use GrabPixels via reflection to capture the internal backing buffer
