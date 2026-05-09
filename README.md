@@ -123,7 +123,7 @@ The generated docs tell AI assistants which commands are available, when to use 
 | Category | Commands |
 |----------|----------|
 | **Core** | `PING` `PROBE` `DIAG` `STATUS` `HELP` `COMPILE` `REFRESH` `LOG` `STACK_MINIMIZE` `MENU` `PROFILE` |
-| **Lint (offline, no Unity needed)** | `LINT` — syntax check + UXML well-formedness + USS brace/quote balance. Sub-second, fails fast at 20s on huge projects. `LINT semantic` — type-binding compile against Unity DLLs. **Prefer over `COMPILE` first.** Daemon FileSystemWatcher catches errors in new files Unity hasn't seen. |
+| **Lint (offline, no Unity needed)** | `LINT` — syntax check + UXML well-formedness + USS brace/quote balance. Sub-second, fails fast at 20s. `LINT unity` — per-asmdef compile (asmdef-aware, type-binding, 60s budget). **Prefer over `COMPILE` first.** Daemon FileSystemWatcher catches errors in new files Unity hasn't seen. |
 | **Code** | `CODE_EXEC` `CODE_EXEC_RETURN` `TEST` `DEBUG` |
 | **Scene** | `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `PLAYMODE` `SCENEVIEW` `GAMEVIEW` `WINDOWS` `MENU` |
 | **Prefab** | `PREFAB_CREATE` `PREFAB_INSTANTIATE` `PREFAB_SAVE` |
@@ -165,13 +165,12 @@ Key design decisions:
 
 ```
 ├── clibridge4unity/           # CLI tool (.NET 8, single-file publish)
-├── clibridge4unity.Tests/     # Integration tests (require running Unity)
 ├── Package/                   # Unity Editor package (UPM)
 │   ├── Editor/Core/           # Pipe server, command registry
 │   ├── Editor/Commands/       # Command implementations (8 asmdefs)
-│   └── Tools/                 # Pre-built CLI binaries (win/osx/linux)
-├── ConsoleUnityBridge/        # Interactive REPL console
-└── UnityTestProject/          # Test Unity project
+│   └── Tools/                 # Pre-built Windows CLI binary
+├── tests/                     # pytest integration tests
+└── UnityTestProject/          # Local Unity fixture used by tests (not release content)
 ```
 
 ### Building
@@ -190,11 +189,10 @@ cp bin/Release/net8.0/win-x64/publish/clibridge4unity.exe Package/Tools/win-x64/
 ### Running Tests
 
 ```bash
-cd clibridge4unity.Tests
-dotnet test
+pytest
 ```
 
-Tests require Unity Editor running with `UnityTestProject` open and the bridge package compiled.
+Tests require Unity Editor running with `UnityTestProject` open, the bridge package compiled, and the CLI installed at `~/.clibridge4unity/clibridge4unity.exe`.
 
 ### Releasing
 

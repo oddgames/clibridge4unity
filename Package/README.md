@@ -1,7 +1,7 @@
 # CLI Bridge for Unity
 
 ![Unity Version](https://img.shields.io/badge/Unity-2021.3%2B-blue)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 A lightweight CLI tool for automating Unity Editor via Named Pipes. Send commands from your terminal, scripts, or AI tools (like Claude) to control Unity without touching the GUI.
@@ -25,7 +25,7 @@ Download `clibridge4unity` from [Releases](https://github.com/oddgames/clibridge
 The Unity package is installed automatically by `clibridge4unity SETUP`. To install manually via Unity Package Manager, use this git URL:
 
 ```
-https://github.com/oddgames/clibridge4unity.git?path=Package#v1.1.10
+https://github.com/oddgames/clibridge4unity.git?path=Package#v1.1.29
 ```
 
 **Important:** The `?path=Package` suffix is required — the `package.json` lives in the `Package/` subdirectory, not the repo root. Without it, Unity will report "Repository does not contain a package manifest."
@@ -168,6 +168,7 @@ Place in `Package/Editor/Commands/` within an asmdef that references `clibridge4
 ## Requirements
 
 - Unity 2021.3+ (LTS)
+- Windows
 - .NET 8 SDK (only for building CLI from source)
 
 ## Troubleshooting
