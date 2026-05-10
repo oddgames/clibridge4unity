@@ -642,6 +642,17 @@ namespace clibridge4unity
             {
                 response = await InvokeCommand(cmd, data, pipe, ct);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Caller's token cancelled (server shutdown or BridgeServer's timeoutCts).
+                // End log capture before re-throwing so BridgeServer's catch can classify
+                // shutdown vs timeout and emit the proper response.
+                if (captureLogs && EndCommandLogCapture != null)
+                {
+                    try { EndCommandLogCapture(maxLogs, errorsOnly); } catch { }
+                }
+                throw;
+            }
             catch (Exception ex)
             {
                 if (ex is TimeoutException)

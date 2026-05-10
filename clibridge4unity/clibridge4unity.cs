@@ -3337,8 +3337,12 @@ class Program
             return sb.ToString();
         }
 
-        // Stuck domain reload detection (reads stale heartbeat — works even mid-reload)
-        string stuckMsg = CheckStuckDomainReload(projectPath, thresholdSec: 60);
+        // Stuck domain reload detection (reads stale heartbeat — works even mid-reload).
+        // Pass everything we already detected so it can sample CPU, check log mtime, read Win32
+        // progress bars in dialogs, and adapt the threshold to this project's typical compile time.
+        string stuckMsg = CheckStuckDomainReload(projectPath, thresholdSec: 60,
+            knownPids: info.Pids, knownEditorLogPath: info.EditorLogPath,
+            knownDialogs: info.Dialogs, compileTimeAvgSec: info.HeartbeatCompileTimeAvg);
         if (stuckMsg != null)
         {
             sb.AppendLine(stuckMsg);
@@ -3880,9 +3884,14 @@ class Program
         catch (Exception ex) { CliTrace("ReadStaleHeartbeat", $"exception: {ex.Message}"); return null; }
     }
 
-    // Returns a KILL+OPEN suggestion string if heartbeat shows Unity stuck in reload/compile >thresholdSec.
-    // Returns null if not stuck (or can't tell).
-    static string CheckStuckDomainReload(string projectPath, int thresholdSec = 60)
+    // Returns a diagnostic string if heartbeat shows Unity in reload/compile/import >thresholdSec.
+    // Returns null if state is normal or under threshold.
+    // Gathers progress evidence (Editor.log activity, Unity CPU usage, Win32 progress bar
+    // movement in any dialog) BEFORE recommending kill — long compiles/imports on big projects
+    // are normal and shouldn't trigger nuke advice.
+    static string CheckStuckDomainReload(string projectPath, int thresholdSec = 60,
+        IEnumerable<uint> knownPids = null, string knownEditorLogPath = null,
+        IList<DialogInfo> knownDialogs = null, int compileTimeAvgSec = 0)
     {
         var stale = ReadStaleHeartbeat(projectPath);
         if (stale == null) return null;
@@ -3894,12 +3903,186 @@ class Program
         }
         long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         int elapsedSec = enteredAt > 0 ? (int)(nowUnix - enteredAt) : (int)fileAgeSec;
-        CliTrace("CheckStuckDomainReload", $"state={state} elapsedSec={elapsedSec} fileAgeSec={fileAgeSec:F1} thresholdSec={thresholdSec}");
-        if (fileAgeSec < thresholdSec || elapsedSec < thresholdSec) return null;
 
-        CliTrace("CheckStuckDomainReload", $"STUCK state={state} elapsedSec={elapsedSec}");
-        return $"Error: Unity stuck in '{state}' for {elapsedSec}s (heartbeat last updated {(int)fileAgeSec}s ago — domain reload frozen).\n" +
-               $"action: clibridge4unity KILL && clibridge4unity OPEN";
+        // Adaptive threshold: 'compiling' and 'reloading' on big projects can legitimately take
+        // 90-180s. Bump to max(threshold, max(180, compileAvg * 3)) for those states so we don't
+        // cry stuck during a normal long compile. 'importing' keeps the lower threshold because
+        // imports stream progress and a stalled import is more often a real hang.
+        int effectiveThreshold = thresholdSec;
+        if (state == "compiling" || state == "reloading")
+            effectiveThreshold = Math.Max(thresholdSec, Math.Max(180, compileTimeAvgSec * 3));
+
+        CliTrace("CheckStuckDomainReload", $"state={state} elapsedSec={elapsedSec} fileAgeSec={fileAgeSec:F1} threshold={effectiveThreshold} (base={thresholdSec} compileAvg={compileTimeAvgSec})");
+        if (fileAgeSec < effectiveThreshold || elapsedSec < effectiveThreshold) return null;
+
+        // ── Gather progress evidence ──
+        // 1) Editor.log mtime — Unity writes import lines while working, so a recent write means progress.
+        string editorLog = knownEditorLogPath ?? FindEditorLogForProject(projectPath);
+        double logAgeSec = double.PositiveInfinity;
+        long logSize = -1;
+        if (editorLog != null && File.Exists(editorLog))
+        {
+            try
+            {
+                var fi = new FileInfo(editorLog);
+                logAgeSec = (DateTime.UtcNow - fi.LastWriteTimeUtc).TotalSeconds;
+                logSize = fi.Length;
+            }
+            catch { }
+        }
+
+        // 2) CPU sampling + 3) progress-bar movement (PBM_GETPOS sent to msctls_progress32 children
+        //    of any open dialog). Both share the same 1.2s sleep window for efficiency.
+        var sample = SampleUnityActivity(knownPids, knownDialogs, sampleMs: 1200);
+
+        bool logActive = logAgeSec < 30;
+        bool cpuActive = sample.CpuPct > 2.0;
+        bool progressActive = sample.ProgressMoved;
+        bool likelyWorking = logActive || cpuActive || progressActive;
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Unity in '{state}' for {elapsedSec}s (heartbeat last updated {(int)fileAgeSec}s ago, threshold {effectiveThreshold}s).");
+        sb.AppendLine($"  Editor.log: {(double.IsInfinity(logAgeSec) ? "not found" : $"last write {(int)logAgeSec}s ago" + (logSize >= 0 ? $", {logSize / 1024}KB" : ""))}");
+        sb.AppendLine($"  Unity CPU: {sample.CpuPct:F1}% avg over 1.2s sample");
+        if (!string.IsNullOrEmpty(sample.ProgressNote))
+            sb.AppendLine($"  Progress bars: {sample.ProgressNote}");
+
+        if (likelyWorking)
+        {
+            var reasons = new List<string>();
+            if (progressActive) reasons.Add("progress bar advancing");
+            if (logActive) reasons.Add("log writing");
+            if (cpuActive) reasons.Add("cpu busy");
+            sb.AppendLine($"verdict: still working ({string.Join(" + ", reasons)}). Wait it out.");
+            sb.Append($"action: tail '{editorLog ?? "Editor.log"}' to watch progress, or retry the command in 60s.");
+        }
+        else
+        {
+            sb.AppendLine("verdict: appears frozen (no log activity, no cpu, no progress bar movement).");
+            sb.AppendLine("action: in order, try");
+            sb.AppendLine("  1. clibridge4unity DIAG          (look for modal dialogs blocking the main thread)");
+            sb.AppendLine("  2. clibridge4unity WAKEUP        (foreground Unity — sometimes unsticks the message pump)");
+            sb.Append("  3. clibridge4unity KILL && clibridge4unity OPEN   (last resort)");
+        }
+
+        CliTrace("CheckStuckDomainReload", $"VERDICT working={likelyWorking} logAge={logAgeSec:F1} cpu={sample.CpuPct:F1} progressMoved={progressActive}");
+        return "Error: " + sb.ToString();
+    }
+
+    struct UnityActivitySample
+    {
+        public double CpuPct;
+        public bool ProgressMoved;
+        public string ProgressNote;
+    }
+
+    // Sample Unity activity over a short window:
+    //   - CPU% across known PIDs (avg across cores; 100% = one core fully busy)
+    //   - Win32 progress bar movement: send PBM_GETPOS to every msctls_progress32 child of any dialog
+    //     before/after the sleep, compare values. Catches "Hold on..." import dialog progress.
+    static UnityActivitySample SampleUnityActivity(IEnumerable<uint> knownPids, IList<DialogInfo> dialogs, int sampleMs)
+    {
+        var result = new UnityActivitySample();
+        try
+        {
+            var pidList = new List<int>();
+            if (knownPids != null)
+            {
+                foreach (var p in knownPids) pidList.Add((int)p);
+            }
+            else
+            {
+                foreach (var p in Process.GetProcessesByName("Unity"))
+                {
+                    pidList.Add(p.Id);
+                    p.Dispose();
+                }
+            }
+
+            // Snapshot CPU times.
+            var t0 = new Dictionary<int, TimeSpan>();
+            foreach (var pid in pidList)
+            {
+                try { using var p = Process.GetProcessById(pid); t0[pid] = p.TotalProcessorTime; }
+                catch { }
+            }
+
+            // Snapshot progress bar values.
+            int[] p0 = CaptureProgressValues(dialogs);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            Thread.Sleep(sampleMs);
+            sw.Stop();
+            double elapsedMs = sw.Elapsed.TotalMilliseconds;
+
+            // Re-snapshot.
+            int[] p1 = CaptureProgressValues(dialogs);
+
+            // CPU
+            if (elapsedMs > 0 && t0.Count > 0)
+            {
+                double totalCpuMs = 0;
+                foreach (var kv in t0)
+                {
+                    try
+                    {
+                        using var p = Process.GetProcessById(kv.Key);
+                        totalCpuMs += (p.TotalProcessorTime - kv.Value).TotalMilliseconds;
+                    }
+                    catch { }
+                }
+                int cores = Math.Max(1, Environment.ProcessorCount);
+                result.CpuPct = (totalCpuMs / elapsedMs) * 100.0 / cores;
+            }
+
+            // Progress
+            if (p0.Length > 0 && p0.Length == p1.Length)
+            {
+                var deltas = new List<string>();
+                bool moved = false;
+                for (int i = 0; i < p0.Length; i++)
+                {
+                    if (p0[i] != p1[i])
+                    {
+                        deltas.Add($"{p0[i]}->{p1[i]}");
+                        moved = true;
+                    }
+                }
+                result.ProgressMoved = moved;
+                result.ProgressNote = moved
+                    ? string.Join(", ", deltas)
+                    : $"{p0.Length} bar(s) frozen at [{string.Join(",", p0)}]";
+            }
+        }
+        catch (Exception ex) { CliTrace("SampleUnityActivity", $"exception: {ex.Message}"); }
+        return result;
+    }
+
+    const uint PBM_GETPOS = 0x0408;
+
+    // Send PBM_GETPOS to every msctls_progress32 child of every dialog. Values 0-100 (or wider
+    // if the bar's range was customized). Cross-process SendMessage is supported for built-in
+    // common controls.
+    static int[] CaptureProgressValues(IList<DialogInfo> dialogs)
+    {
+        if (dialogs == null || dialogs.Count == 0) return Array.Empty<int>();
+        var values = new List<int>();
+        foreach (var dlg in dialogs)
+        {
+            if (dlg?.Controls == null) continue;
+            foreach (var ctrl in dlg.Controls)
+            {
+                if (ctrl?.ClassName == null) continue;
+                if (ctrl.ClassName.IndexOf("progress", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                try
+                {
+                    var r = SendMessage(ctrl.Hwnd, PBM_GETPOS, IntPtr.Zero, null);
+                    values.Add(r.ToInt32());
+                }
+                catch { }
+            }
+        }
+        return values.ToArray();
     }
 
     static UnityProcessInfo DetectUnityProcess(string projectPath)

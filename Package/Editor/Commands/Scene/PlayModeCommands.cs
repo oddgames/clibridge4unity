@@ -297,12 +297,20 @@ namespace clibridge4unity
                 if (gv == null)
                     return Response.Error("Game view not found");
 
-                // Resize the game view window
+                // Prefer the GameViewSizes API: adds/selects a custom resolution from the
+                // size dropdown. The Game tab renders at this resolution while the actual
+                // window stays docked (no annoying undock).
+                if (TrySetGameViewSize(gv, width, height, out string sizeErr))
+                {
+                    gv.Repaint();
+                    return Response.Success($"Game view set to {width}x{height} (via size dropdown, no undock)");
+                }
+
+                // Fallback: resize the window directly. This undocks a docked Game tab.
                 var rect = gv.position;
                 gv.position = new Rect(rect.x, rect.y, width, height);
                 gv.Repaint();
-
-                return Response.Success($"Game view resized to {width}x{height}");
+                return Response.Success($"Game view resized to {width}x{height} (window resized — may undock; reason: {sizeErr})");
             }
             catch (Exception ex)
             {
@@ -530,8 +538,9 @@ namespace clibridge4unity
             if (gameView == null)
                 return Response.Error("GameView window not available");
 
-            // Force focus + repaint so GameView shows current frame even if Unity is backgrounded
-            gameView.Focus();
+            // Repaint so GameView shows current frame even if Unity is backgrounded.
+            // Don't call Focus() — it steals the user's docked tab focus and is annoying.
+            // RepaintImmediately below forces the actual frame into the backing buffer.
             gameView.Repaint();
 
             var parentField = typeof(EditorWindow).GetField("m_Parent",
@@ -589,6 +598,95 @@ namespace clibridge4unity
             {
                 rt.Release();
                 UnityEngine.Object.DestroyImmediate(rt);
+            }
+        }
+
+        // Sets the Game view's resolution via the internal GameViewSizes API so the docked
+        // window doesn't undock. Adds a custom "clibridge_WxH" entry under the current
+        // platform group if missing, then selects it on the GameView instance.
+        // All calls go through reflection — Unity's GameView/GameViewSizes are internal.
+        // Returns false (with reason) if any reflection step fails so caller can fall back.
+        private static bool TrySetGameViewSize(EditorWindow gameView, int width, int height, out string error)
+        {
+            error = null;
+            try
+            {
+                var asm = typeof(EditorWindow).Assembly;
+                var gameViewType = gameView.GetType();
+                var gameViewSizesType = asm.GetType("UnityEditor.GameViewSizes");
+                var gameViewSizeType = asm.GetType("UnityEditor.GameViewSize");
+                var gameViewSizeTypeEnum = asm.GetType("UnityEditor.GameViewSizeType");
+                var sizeGroupTypeEnum = asm.GetType("UnityEditor.GameViewSizeGroupType");
+                if (gameViewSizesType == null || gameViewSizeType == null || gameViewSizeTypeEnum == null || sizeGroupTypeEnum == null)
+                { error = "internal types missing"; return false; }
+
+                // GameViewSizes : ScriptableSingleton<GameViewSizes> — the static `instance`
+                // property is declared on the base. Walk up to find it.
+                object instance = null;
+                for (var t = gameViewSizesType; t != null && instance == null; t = t.BaseType)
+                {
+                    var prop = t.GetProperty("instance",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                    if (prop != null) instance = prop.GetValue(null);
+                }
+                if (instance == null) { error = "GameViewSizes.instance null"; return false; }
+
+                var currentGroupType = gameViewSizesType.GetProperty("currentGroupType")?.GetValue(instance);
+                if (currentGroupType == null) { error = "currentGroupType null"; return false; }
+                var currentGroupEnum = Enum.ToObject(sizeGroupTypeEnum, (int)currentGroupType);
+                var group = gameViewSizesType.GetMethod("GetGroup")?.Invoke(instance, new[] { currentGroupEnum });
+                if (group == null) { error = "GetGroup null"; return false; }
+
+                string label = $"clibridge_{width}x{height}";
+                var groupType = group.GetType();
+                var displayTexts = (string[])groupType.GetMethod("GetDisplayTexts")?.Invoke(group, null);
+                int idx = -1;
+                if (displayTexts != null)
+                {
+                    for (int i = 0; i < displayTexts.Length; i++)
+                        if (displayTexts[i] != null && displayTexts[i].Contains(label)) { idx = i; break; }
+                }
+
+                if (idx < 0)
+                {
+                    var fixedRes = Enum.Parse(gameViewSizeTypeEnum, "FixedResolution");
+                    var ctor = gameViewSizeType.GetConstructor(new[] { gameViewSizeTypeEnum, typeof(int), typeof(int), typeof(string) });
+                    if (ctor == null) { error = "GameViewSize ctor not found"; return false; }
+                    var newSize = ctor.Invoke(new object[] { fixedRes, width, height, label });
+                    groupType.GetMethod("AddCustomSize")?.Invoke(group, new[] { newSize });
+                    displayTexts = (string[])groupType.GetMethod("GetDisplayTexts")?.Invoke(group, null);
+                    if (displayTexts != null)
+                    {
+                        for (int i = 0; i < displayTexts.Length; i++)
+                            if (displayTexts[i] != null && displayTexts[i].Contains(label)) { idx = i; break; }
+                    }
+                    if (idx < 0) { error = "added size but not found in dropdown"; return false; }
+                }
+
+                // Select the size on this GameView (sizeIndex / SizeSelectionCallback).
+                var sizeSelectionCallback = gameViewType.GetMethod("SizeSelectionCallback",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (sizeSelectionCallback != null)
+                {
+                    sizeSelectionCallback.Invoke(gameView, new object[] { idx, null });
+                    return true;
+                }
+
+                var selectedSizeIndexProp = gameViewType.GetProperty("selectedSizeIndex",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (selectedSizeIndexProp != null)
+                {
+                    selectedSizeIndexProp.SetValue(gameView, idx);
+                    return true;
+                }
+
+                error = "no SizeSelectionCallback / selectedSizeIndex on GameView";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
             }
         }
 

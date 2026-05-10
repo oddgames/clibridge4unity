@@ -229,16 +229,55 @@ namespace clibridge4unity
         /// <summary>
         /// Saves the current scene.
         /// </summary>
-        [BridgeCommand("SAVE", "Save the current scene",
+        [BridgeCommand("SAVE", "Save the current scene (optional path saves Untitled scenes without opening native dialog)",
             Category = "Scene",
-            Usage = "SAVE",
+            Usage = "SAVE                                  - Save all open scenes to their existing paths\n" +
+                    "  SAVE Assets/Scenes/Foo.unity         - Save active scene to a path (works for Untitled)",
             RequiresMainThread = true)]
-        public static string Save()
+        public static string Save(string data)
         {
             try
             {
-                bool saved = EditorSceneManager.SaveOpenScenes();
-                return saved ? Response.Success("Scene saved") : Response.Error("Failed to save scene");
+                string path = string.IsNullOrWhiteSpace(data) ? null : data.Trim();
+
+                // Explicit path → write directly via SaveScene. Bypasses the native "Save As"
+                // dialog that SaveOpenScenes would otherwise open for an Untitled scene.
+                if (!string.IsNullOrEmpty(path))
+                {
+                    if (!path.StartsWith("Assets/", StringComparison.Ordinal) &&
+                        !path.StartsWith("Assets\\", StringComparison.Ordinal))
+                        return Response.Error($"Scene path must start with 'Assets/': {path}");
+                    if (!path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
+                        return Response.Error($"Scene path must end with '.unity': {path}");
+
+                    var dir = System.IO.Path.GetDirectoryName(path);
+                    if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
+                        System.IO.Directory.CreateDirectory(dir);
+
+                    var active = EditorSceneManager.GetActiveScene();
+                    bool saved = EditorSceneManager.SaveScene(active, path);
+                    if (saved) AssetDatabase.Refresh();
+                    return saved ? Response.Success($"Scene saved to {path}") : Response.Error($"Failed to save scene to {path}");
+                }
+
+                // No path: refuse if any open scene is Untitled — SaveOpenScenes would open the
+                // native "Save Scene As..." file dialog and block the main thread until the user
+                // clicks. CLI/automation can't dismiss native file dialogs cleanly, so the bridge
+                // wedges and every subsequent command times out.
+                var unsaved = new List<string>();
+                for (int i = 0; i < EditorSceneManager.sceneCount; i++)
+                {
+                    var s = EditorSceneManager.GetSceneAt(i);
+                    if (string.IsNullOrEmpty(s.path))
+                        unsaved.Add(string.IsNullOrEmpty(s.name) ? "Untitled" : s.name);
+                }
+                if (unsaved.Count > 0)
+                    return Response.Error($"Cannot SAVE: {unsaved.Count} scene(s) have no path on disk ({string.Join(", ", unsaved)}). " +
+                        "Unity would open a native Save Scene As dialog and block the main thread. " +
+                        "Pass an explicit path: SAVE Assets/Scenes/Foo.unity");
+
+                bool ok = EditorSceneManager.SaveOpenScenes();
+                return ok ? Response.Success("Scene saved") : Response.Error("Failed to save scene");
             }
             catch (Exception ex)
             {

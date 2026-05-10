@@ -282,12 +282,17 @@ namespace clibridge4unity
 
             try
             {
-                // Create a utility window hosting the UXML
+                // Create a utility window hosting the UXML.
+                // Set position BEFORE ShowPopup so the window appears offscreen on first frame
+                // instead of flashing at the default location for one frame. ShowPopup takes no
+                // focus by design, so this never steals focus from the user's foreground app.
                 await CommandRegistry.RunOnMainThreadAsync<int>(() =>
                 {
                     window = ScriptableObject.CreateInstance<EditorWindow>();
-                    window.ShowPopup();
+                    window.minSize = new Vector2(width, height);
                     window.position = new Rect(-4000, -4000, width, height); // offscreen, borderless
+                    window.ShowPopup();
+                    window.position = new Rect(-4000, -4000, width, height); // re-assert after Show
 
                     var root = uxml.Instantiate();
                     root.style.flexGrow = 1;
