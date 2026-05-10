@@ -22,6 +22,12 @@ namespace clibridge4unity
         static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
         [DllImport("user32.dll")]
         static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+        [DllImport("user32.dll")]
+        static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+        const uint SWP_NOSIZE = 0x0001;
+        const uint SWP_NOZORDER = 0x0004;
+        const uint SWP_NOACTIVATE = 0x0010;
+        const uint SWP_NOREDRAW = 0x0008;
         [DllImport("gdi32.dll")]
         static extern IntPtr CreateCompatibleDC(IntPtr hdc);
         [DllImport("gdi32.dll")]
@@ -111,6 +117,35 @@ namespace clibridge4unity
             tex.SetPixels32(colors);
             tex.Apply();
             return tex;
+        }
+
+        // Walks EditorWindow → m_Parent (HostView) → window (ContainerWindow) → windowPtr/m_WindowPtr
+        // (IntPtr HWND on Windows). Internal Unity API; returns IntPtr.Zero if the chain breaks.
+        static IntPtr GetEditorWindowHwnd(EditorWindow w)
+        {
+            try
+            {
+                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                var parent = typeof(EditorWindow).GetField("m_Parent", bf)?.GetValue(w);
+                if (parent == null) return IntPtr.Zero;
+                var window = parent.GetType().GetField("window", bf)?.GetValue(parent)
+                          ?? parent.GetType().GetProperty("window", bf)?.GetValue(parent);
+                if (window == null) return IntPtr.Zero;
+                var t = window.GetType();
+                var ptrProp = t.GetProperty("windowPtr", bf);
+                if (ptrProp != null) return (IntPtr)ptrProp.GetValue(window);
+                var ptrField = t.GetField("m_WindowPtr", bf);
+                if (ptrField != null)
+                {
+                    var v = ptrField.GetValue(window);
+                    if (v is IntPtr p) return p;
+                    // m_WindowPtr is sometimes a wrapper struct (MonoOrJobHandle) — try .m_IntPtr
+                    var inner = v?.GetType().GetField("m_IntPtr", bf);
+                    if (inner != null) return (IntPtr)inner.GetValue(v);
+                }
+            }
+            catch { }
+            return IntPtr.Zero;
         }
 
         static readonly string OutputDir = Path.Combine(
@@ -283,16 +318,31 @@ namespace clibridge4unity
             try
             {
                 // Create a utility window hosting the UXML.
-                // Set position BEFORE ShowPopup so the window appears offscreen on first frame
-                // instead of flashing at the default location for one frame. ShowPopup takes no
-                // focus by design, so this never steals focus from the user's foreground app.
+                //
+                // Two visibility traps to dodge:
+                //  1. Unity's ContainerWindow clamps EditorWindow.position to the nearest
+                //     monitor — so setting position to (-4000,-4000) does not actually park
+                //     the popup offscreen; it ends up onscreen.
+                //  2. ShowPopup on a backgrounded Unity wakes the message pump and brings
+                //     Unity to the foreground.
+                //
+                // Solution: ShowPopup at minimal size, then immediately call Win32 SetWindowPos
+                // to coords Unity does not clamp. SWP_NOACTIVATE keeps Unity in the background.
                 await CommandRegistry.RunOnMainThreadAsync<int>(() =>
                 {
                     window = ScriptableObject.CreateInstance<EditorWindow>();
                     window.minSize = new Vector2(width, height);
-                    window.position = new Rect(-4000, -4000, width, height); // offscreen, borderless
+                    window.position = new Rect(-4000, -4000, width, height);
                     window.ShowPopup();
-                    window.position = new Rect(-4000, -4000, width, height); // re-assert after Show
+
+                    // Force the popup truly offscreen via Win32 (Unity's clamping does not apply
+                    // to direct SetWindowPos calls). -30000 is well past any conceivable monitor.
+                    var hwnd = GetEditorWindowHwnd(window);
+                    if (hwnd != IntPtr.Zero)
+                    {
+                        SetWindowPos(hwnd, IntPtr.Zero, -30000, -30000, 0, 0,
+                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
 
                     var root = uxml.Instantiate();
                     root.style.flexGrow = 1;
