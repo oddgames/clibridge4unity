@@ -240,10 +240,12 @@ namespace clibridge4unity
                 {
                     // Unwrap TargetInvocationException — the outer layer is just a reflection
                     // abstraction leak from MethodInfo.Invoke; callers care about the real cause.
+                    // Don't Debug.LogError — caller awaits the task and surfaces the exception
+                    // as a normal command response. Logging here would duplicate the failure
+                    // into Unity's console (and into the per-command log capture).
                     var inner = (ex is System.Reflection.TargetInvocationException tie && tie.InnerException != null)
                         ? tie.InnerException : ex;
                     BridgeDiagnostics.LogException($"CommandRegistry main-thread work failed: {work.Description}", inner);
-                    Debug.LogError($"[Bridge] Main thread action failed: {inner}");
                     work.CompletionSource.TrySetException(inner);
                 }
             }

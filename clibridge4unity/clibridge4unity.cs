@@ -85,6 +85,10 @@ class Program
     private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
+    // SetErrorMode: returns previous mode. We OR-in flags to suppress the WER popup
+    // (SEM_FAILCRITICALERRORS=0x1, SEM_NOGPFAULTERRORBOX=0x2, SEM_NOOPENFILEERRORBOX=0x8000).
+    [DllImport("kernel32.dll")]
+    private static extern uint SetErrorMode(uint uMode);
 
     // Version from assembly (set in .csproj <Version>)
     private static readonly string CLI_VERSION =
@@ -908,6 +912,34 @@ class Program
 
     static int Main(string[] args)
     {
+        // ── Crash protection ────────────────────────────────────────────────────
+        // Background threads (daemon, RoslynDaemon, FileSystemWatcher callbacks,
+        // update-check tasks) without try/catch otherwise terminate the process
+        // and pop the Win32 "Application Error 0xe0434352" dialog. Catch unhandled
+        // exceptions on every thread, log them, and exit cleanly with code 99.
+        try
+        {
+            AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+            {
+                var ex = e.ExceptionObject as Exception;
+                try { CliTrace("UnhandledException", $"{ex?.GetType().Name}: {ex?.Message}\n{ex?.StackTrace}"); } catch { }
+                try { Console.Error.WriteLine($"[clibridge4unity] unhandled exception: {ex?.GetType().Name}: {ex?.Message}"); } catch { }
+                try { Environment.Exit(99); } catch { }
+            };
+            TaskScheduler.UnobservedTaskException += (sender, e) =>
+            {
+                try { CliTrace("UnobservedTaskException", $"{e.Exception?.GetType().Name}: {e.Exception?.Message}\n{e.Exception?.StackTrace}"); } catch { }
+                e.SetObserved(); // prevent process termination on background Task faults
+            };
+            // Suppress the Windows Error Reporting dialog on crash (SetErrorMode
+            // SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX).
+            if (OperatingSystem.IsWindows())
+            {
+                try { SetErrorMode(SetErrorMode(0) | 0x0001 | 0x0002 | 0x8000); } catch { }
+            }
+        }
+        catch { }
+
         // Force UTF-8 stdout/stderr so unicode chars (em-dash, etc.) survive being piped
         // through bash/cmd with non-UTF8 codepages instead of throwing EncoderFallbackException.
         try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
@@ -935,8 +967,11 @@ class Program
         }
         catch (Exception ex)
         {
-            CliTrace("Main", $"unhandled {ex.GetType().Name}: {ex.Message}");
-            throw;
+            // Don't rethrow — that triggers the Win32 "Application Error" dialog.
+            // Log + return non-zero so the parent script sees a normal exit failure.
+            CliTrace("Main", $"unhandled {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+            try { Console.Error.WriteLine($"[clibridge4unity] {ex.GetType().Name}: {ex.Message}"); } catch { }
+            return 99;
         }
         finally
         {
