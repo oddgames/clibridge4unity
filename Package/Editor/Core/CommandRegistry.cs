@@ -231,12 +231,10 @@ namespace clibridge4unity
                     continue;
 
                 work.IsExecuting = true;
-                BridgeDiagnostics.Log("CommandRegistry", $"main-thread work begin: {work.Description}");
                 try
                 {
                     var result = work.Action();
                     work.CompletionSource.TrySetResult(result);
-                    BridgeDiagnostics.Log("CommandRegistry", $"main-thread work end: {work.Description}");
                 }
                 catch (Exception ex)
                 {
@@ -1063,7 +1061,6 @@ namespace clibridge4unity
             };
 
             _mainThreadQueue.Enqueue(work);
-            BridgeDiagnostics.Log("CommandRegistry", $"main-thread work queued: {work.Description}");
             _mainThreadContext?.Post(_ =>
             {
                 EnsureEditorUpdateSubscribed();

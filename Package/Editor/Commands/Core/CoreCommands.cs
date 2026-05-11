@@ -133,44 +133,13 @@ namespace clibridge4unity
                 // Daemon log unreadable — fall through to mtime scan
             }
 
-            // Step 2: mtime scan — covers cases the daemon missed (started after a change,
-            // or external file modifications that bypassed the FSW).
-            var roots = new List<string> { Path.Combine(projectRoot, "Assets"), Path.Combine(projectRoot, "Packages") };
-            // UPM `file:` deps (e.g. `file:../../MyPackage`) resolve outside Packages/ — scan their actual locations too.
-            roots.AddRange(GetLocalFilePackageRoots(projectRoot));
-            var patterns = new[] { "*.cs", "*.asmdef", "*.asmref" };
-
-            try
-            {
-                foreach (var root in roots)
-                {
-                    if (!Directory.Exists(root)) continue;
-                    foreach (var pattern in patterns)
-                    {
-                        foreach (var f in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories))
-                        {
-                            if (seenPaths.Contains(f)) continue;
-                            var mtime = File.GetLastWriteTime(f);
-                            if (mtime <= result.lastCompile) continue;
-
-                            result.changedCount++;
-                            if (result.changed.Count < maxList)
-                            {
-                                result.changed.Add(new ChangedScript
-                                {
-                                    path = MakeRelativePath(projectRoot, f),
-                                    mtime = mtime.ToString("yyyy-MM-dd HH:mm:ss"),
-                                    kind = "S" // scan-detected
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            catch
-            {
+            // No fallback mtime scan — daemon is authoritative for change detection.
+            // If the daemon log is absent (daemon never ran for this project), result.daemonAvailable
+            // stays false and callers treat scriptsModified as "unknown / assume modified" so
+            // they err on the side of recompiling. CLI auto-starts the daemon on every command,
+            // so this only happens for the very first invocation against a fresh project.
+            if (!result.daemonAvailable)
                 result.scanFailed = true;
-            }
 
             // Sort displayed list by most recent first for readability
             result.changed.Sort((a, b) => string.CompareOrdinal(b.mtime, a.mtime));
@@ -184,31 +153,6 @@ namespace clibridge4unity
             return path.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase)
                 || path.EndsWith(".asmdef", System.StringComparison.OrdinalIgnoreCase)
                 || path.EndsWith(".asmref", System.StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static IEnumerable<string> GetLocalFilePackageRoots(string projectRoot)
-        {
-            var result = new List<string>();
-            string manifestPath = Path.Combine(projectRoot, "Packages", "manifest.json");
-            if (!File.Exists(manifestPath)) return result;
-
-            string manifestDir = Path.GetDirectoryName(manifestPath);
-            try
-            {
-                string text = File.ReadAllText(manifestPath);
-                // Match every `"file:..."` value in the JSON. Sufficient for manifest.json's flat schema.
-                var matches = System.Text.RegularExpressions.Regex.Matches(
-                    text, "\"file:([^\"]+)\"");
-                foreach (System.Text.RegularExpressions.Match m in matches)
-                {
-                    string rel = m.Groups[1].Value.Trim();
-                    if (string.IsNullOrEmpty(rel)) continue;
-                    string full = Path.GetFullPath(Path.Combine(manifestDir, rel));
-                    if (Directory.Exists(full)) result.Add(full);
-                }
-            }
-            catch { }
-            return result;
         }
 
         private static string MakeRelativePath(string root, string full)
@@ -273,7 +217,10 @@ namespace clibridge4unity
             }
         }
 
-        private static bool ScriptsModifiedSinceCompileCached(double maxAgeSeconds = 1.0)
+        // 10s TTL — daemon catches changes in real time, so a slightly stale STATUS reading
+        // is fine. Was 1s, which forced a full mtime fallback scan on every STATUS call when
+        // the cache expired.
+        private static bool ScriptsModifiedSinceCompileCached(double maxAgeSeconds = 10.0)
         {
             double now = EditorApplication.timeSinceStartup;
             if (now - _lastScriptModifiedCheckTime < maxAgeSeconds)
@@ -415,12 +362,15 @@ namespace clibridge4unity
             string compileTimeAvg = compileStats.HasValue ? $"{compileStats.Value.avg}s" : "unknown";
             string compileTimeLast = compileStats.HasValue ? $"{compileStats.Value.last}s" : "unknown";
 
-            // Get Unity Console counts + compile errors (always included)
+            // Get Unity Console counts. If the console has zero errors AND zero warnings,
+            // skip the LogEntries reflection sweeps entirely — they iterate every console
+            // entry, which is the slow part on big projects.
             int consoleErrors = 0, consoleWarnings = 0;
             LogCommands.GetConsoleCounts(out consoleErrors, out consoleWarnings);
 
-            // Always read compile errors from console — they're critical diagnostics
-            var compileErrorMessages = LogCommands.GetCompileErrorsFromConsole();
+            List<string> compileErrorMessages = consoleErrors > 0
+                ? LogCommands.GetCompileErrorsFromConsole()
+                : new List<string>();
             if (compileErrorMessages.Count > 0)
             {
                 hasCompileErrors = true;
@@ -453,11 +403,16 @@ namespace clibridge4unity
             string currentScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
             string currentScenePath = UnityEngine.SceneManagement.SceneManager.GetActiveScene().path;
 
+            // Compute once and reuse — was called 3× in the response object, each going through
+            // the cached helper but still adding work and risking TTL boundary issues.
+            bool scriptsModified = ScriptsModifiedSinceCompileCached();
+            bool isCompiling = EditorApplication.isCompiling;
+
             return Response.SuccessWithData(new
             {
                 bridgeVersion = BridgeServer.Version,
                 diagnosticLog = BridgeDiagnostics.LogPath,
-                isCompiling = EditorApplication.isCompiling,
+                isCompiling,
                 hasCompileErrors,
                 compileErrorCount,
                 compileErrors = compileErrorMessages.Count > 0 ? compileErrorMessages.ToArray() : null,
@@ -471,11 +426,11 @@ namespace clibridge4unity
                 playModeDuration,
                 currentScene,
                 currentScenePath,
-                scriptsModified = ScriptsModifiedSinceCompileCached(),
-                compileRecommended = ScriptsModifiedSinceCompileCached() && !EditorApplication.isCompiling,
-                compileRecommendation = ScriptsModifiedSinceCompileCached() && !EditorApplication.isCompiling
+                scriptsModified,
+                compileRecommended = scriptsModified && !isCompiling,
+                compileRecommendation = scriptsModified && !isCompiling
                     ? "Run COMPILE — script changes detected since last compile."
-                    : (EditorApplication.isCompiling ? "Compilation in progress." : "Up to date."),
+                    : (isCompiling ? "Compilation in progress." : "Up to date."),
                 lastCompileRequest = lastCompileRequestStr,
                 lastCompileFinished = lastCompileStr,
                 compileTimeAvg,
