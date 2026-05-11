@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.37 — 2026-05-11
+
+## v1.1.37
+
+### Internal
+- More granular Profiler markers inside STATUS to find why a single STATUS tick can spike to ~880ms with 8.8MB GC alloc on big projects. New sub-markers nested under `Bridge.Core.Status`:
+  - `Bridge.Core.Status.OpenEditorWindows` — only fires on cache miss (`Resources.FindObjectsOfTypeAll<EditorWindow>()`)
+  - `Bridge.Core.Status.ScriptsModifiedSinceCompile` — only on cache miss (file mtime walk)
+  - `Bridge.Core.Status.GetCompileTimeStats` — `BridgeServer.GetCompileTimeStats()`
+  - `Bridge.Core.Status.GetCompileErrors` — `CommandRegistry.GetCompileErrors()` callback + Regex match
+- New markers in `LogCommands` for the Unity-internal `LogEntries` reflection helpers that STATUS funnels through:
+  - `Bridge.Core.GetConsoleCounts`
+  - `Bridge.Core.GetCompileErrorsFromConsole` — full console iteration
+  - `Bridge.Core.GetUiToolkitDiagnosticsFromConsole` — full console iteration + per-asset import-error fetch
+- After this release, run STATUS once with the Unity Profiler open and the slow sub-call inside STATUS will be self-evident in the hierarchy.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.36 — 2026-05-11
 
 ## v1.1.36

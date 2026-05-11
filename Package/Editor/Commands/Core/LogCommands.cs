@@ -19,13 +19,16 @@ namespace clibridge4unity
     [UnityEditor.InitializeOnLoad]
     public static class LogCommands
     {
-        // Profiler markers for the LOG-side helpers. GetLogs reflects into Unity's internal
-        // LogEntries; GetCompileErrorsSummary calls CompilationPipeline; UI-toolkit diagnostics
-        // walk import errors per asset.
+        // Profiler markers for the LOG-side helpers. Most of these reflect into Unity's
+        // internal LogEntries which iterates the entire console buffer — slow when the
+        // console has thousands of entries.
         static readonly ProfilerMarker _markerGetLogs = new ProfilerMarker("Bridge.Core.GetLogs");
         static readonly ProfilerMarker _markerCompileErrorsSummary = new ProfilerMarker("Bridge.Core.GetCompileErrorsSummary");
         static readonly ProfilerMarker _markerUiToolkitDiagnostics = new ProfilerMarker("Bridge.Core.GetUiToolkitDiagnosticsForCommand");
         static readonly ProfilerMarker _markerEndCommandCapture = new ProfilerMarker("Bridge.Core.EndCommandCapture");
+        static readonly ProfilerMarker _markerGetConsoleCounts = new ProfilerMarker("Bridge.Core.GetConsoleCounts");
+        static readonly ProfilerMarker _markerGetCompileErrorsFromConsole = new ProfilerMarker("Bridge.Core.GetCompileErrorsFromConsole");
+        static readonly ProfilerMarker _markerGetUiToolkitDiagnosticsFromConsole = new ProfilerMarker("Bridge.Core.GetUiToolkitDiagnosticsFromConsole");
 
         // Lazy log capture: `Application.logMessageReceived` is subscribed only WHILE a command
         // is executing — ExecuteCommand wraps each command in BeginCommandCapture/EndCommandCapture.
@@ -198,6 +201,7 @@ namespace clibridge4unity
         /// </summary>
         public static void GetConsoleCounts(out int errors, out int warnings)
         {
+            using var _profile = _markerGetConsoleCounts.Auto();
             errors = 0;
             warnings = 0;
             try
@@ -223,6 +227,7 @@ namespace clibridge4unity
         /// </summary>
         public static List<string> GetCompileErrorsFromConsole()
         {
+            using var _profile = _markerGetCompileErrorsFromConsole.Auto();
             // Primary: use CompilationPipeline events (cleared on each compile start)
             lock (_compileErrorLock)
             {
@@ -376,6 +381,7 @@ namespace clibridge4unity
         /// </summary>
         public static List<UiToolkitDiagnostic> GetUiToolkitDiagnosticsFromConsole(int maxCount = 50)
         {
+            using var _profile = _markerGetUiToolkitDiagnosticsFromConsole.Auto();
             var diagnostics = new List<UiToolkitDiagnostic>();
             var seen = new HashSet<string>(StringComparer.Ordinal);
 

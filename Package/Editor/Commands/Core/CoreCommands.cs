@@ -26,6 +26,11 @@ namespace clibridge4unity
         static readonly ProfilerMarker _markerMenu = new ProfilerMarker("Bridge.Core.Menu");
         static readonly ProfilerMarker _markerProfile = new ProfilerMarker("Bridge.Core.Profile");
         static readonly ProfilerMarker _markerDiag = new ProfilerMarker("Bridge.Core.Diag");
+        // Sub-markers inside STATUS to find which sub-call dominates a slow tick.
+        static readonly ProfilerMarker _markerStatusWindowList = new ProfilerMarker("Bridge.Core.Status.OpenEditorWindows");
+        static readonly ProfilerMarker _markerStatusScriptsModified = new ProfilerMarker("Bridge.Core.Status.ScriptsModifiedSinceCompile");
+        static readonly ProfilerMarker _markerStatusCompileStats = new ProfilerMarker("Bridge.Core.Status.GetCompileTimeStats");
+        static readonly ProfilerMarker _markerStatusGetCompileErrors = new ProfilerMarker("Bridge.Core.Status.GetCompileErrors");
 
         private static double _lastScriptModifiedCheckTime = -10;
         private static bool _lastScriptsModified;
@@ -274,6 +279,7 @@ namespace clibridge4unity
             if (now - _lastScriptModifiedCheckTime < maxAgeSeconds)
                 return _lastScriptsModified;
 
+            using var _profile = _markerStatusScriptsModified.Auto();
             _lastScriptsModified = ScriptsModifiedSinceCompile();
             _lastScriptModifiedCheckTime = now;
             return _lastScriptsModified;
@@ -285,6 +291,7 @@ namespace clibridge4unity
             if (now - _lastWindowListTime < maxAgeSeconds)
                 return _cachedWindowList;
 
+            using var _profile = _markerStatusWindowList.Auto();
             var editorWindows = Resources.FindObjectsOfTypeAll<EditorWindow>();
             var windowList = new List<string>(editorWindows.Length);
             foreach (var win in editorWindows)
@@ -391,6 +398,7 @@ namespace clibridge4unity
             var getErrors = CommandRegistry.GetCompileErrors;
             if (getErrors != null)
             {
+                using var _p1 = _markerStatusGetCompileErrors.Auto();
                 string compileErrors = getErrors();
                 if (compileErrors != null)
                 {
@@ -401,7 +409,9 @@ namespace clibridge4unity
             }
 
             // Compile time stats
+            _markerStatusCompileStats.Begin();
             var compileStats = BridgeServer.GetCompileTimeStats();
+            _markerStatusCompileStats.End();
             string compileTimeAvg = compileStats.HasValue ? $"{compileStats.Value.avg}s" : "unknown";
             string compileTimeLast = compileStats.HasValue ? $"{compileStats.Value.last}s" : "unknown";
 
