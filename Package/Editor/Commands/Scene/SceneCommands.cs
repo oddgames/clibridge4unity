@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Unity.Profiling;
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -16,6 +17,15 @@ namespace clibridge4unity
     /// </summary>
     public static class SceneCommands
     {
+        // Profiler markers for the scene-walk and scene I/O operations. FIND scans every
+        // GameObject in the scene; LOAD/SAVE write disk + reload assemblies.
+        static readonly ProfilerMarker _markerCreate = new ProfilerMarker("Bridge.Scene.Create");
+        static readonly ProfilerMarker _markerFind = new ProfilerMarker("Bridge.Scene.Find");
+        static readonly ProfilerMarker _markerDelete = new ProfilerMarker("Bridge.Scene.Delete");
+        static readonly ProfilerMarker _markerSave = new ProfilerMarker("Bridge.Scene.Save");
+        static readonly ProfilerMarker _markerLoad = new ProfilerMarker("Bridge.Scene.Load");
+        static readonly ProfilerMarker _markerSceneView = new ProfilerMarker("Bridge.Scene.SceneView");
+
         /// <summary>
         /// Creates a GameObject with optional components.
         /// JSON: {"name":"Name", "parent":"ParentPath", "components":["BoxCollider","Rigidbody"]}
@@ -27,6 +37,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "INSPECTOR", "COMPONENT_ADD", "SCREENSHOT" })]
         public static string Create(string jsonData)
         {
+            using var _profile = _markerCreate.Auto();
             try
             {
                 string name;
@@ -95,6 +106,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "INSPECTOR", "SCREENSHOT" })]
         public static string Find(string query)
         {
+            using var _profile = _markerFind.Auto();
             try
             {
                 if (string.IsNullOrWhiteSpace(query))
@@ -211,6 +223,7 @@ namespace clibridge4unity
             RequiresMainThread = true)]
         public static string Delete(string path)
         {
+            using var _profile = _markerDelete.Auto();
             try
             {
                 var go = GameObject.Find(path);
@@ -236,6 +249,7 @@ namespace clibridge4unity
             RequiresMainThread = true)]
         public static string Save(string data)
         {
+            using var _profile = _markerSave.Auto();
             try
             {
                 string path = string.IsNullOrWhiteSpace(data) ? null : data.Trim();
@@ -298,6 +312,7 @@ namespace clibridge4unity
             RequiresMainThread = false)]
         public static async Task<string> Load(string data)
         {
+            using var _profile = _markerLoad.Auto();
             try
             {
                 if (string.IsNullOrEmpty(data))
@@ -343,6 +358,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "SCREENSHOT" })]
         public static string SceneView(string data)
         {
+            using var _profile = _markerSceneView.Auto();
             try
             {
                 var sceneView = UnityEditor.SceneView.lastActiveSceneView;

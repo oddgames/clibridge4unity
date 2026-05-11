@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Unity.Profiling;
 using UnityEditor;
 using UnityEditor.Search;
 using UnityEngine;
@@ -15,6 +16,17 @@ namespace clibridge4unity
     /// </summary>
     public static class AssetSearch
     {
+        // Profiler markers for the heavy SearchService.Request / AssetDatabase.FindAssets
+        // sweeps. ASSET_SEARCH on a large project can scan 100k+ assets per call.
+        static readonly ProfilerMarker _markerSearch = new ProfilerMarker("Bridge.Asset.Search");
+        static readonly ProfilerMarker _markerFindPrefabsWithComponent = new ProfilerMarker("Bridge.Asset.FindPrefabsWithComponent");
+        static readonly ProfilerMarker _markerFindMaterialsWithShader = new ProfilerMarker("Bridge.Asset.FindMaterialsWithShader");
+        static readonly ProfilerMarker _markerFindAssetsWithLabel = new ProfilerMarker("Bridge.Asset.FindAssetsWithLabel");
+        static readonly ProfilerMarker _markerFindScriptsInheriting = new ProfilerMarker("Bridge.Asset.FindScriptsInheriting");
+        static readonly ProfilerMarker _markerFindAssetsOfType = new ProfilerMarker("Bridge.Asset.FindAssetsOfType");
+        static readonly ProfilerMarker _markerGetDependencies = new ProfilerMarker("Bridge.Asset.GetDependencies");
+        static readonly ProfilerMarker _markerFindReferences = new ProfilerMarker("Bridge.Asset.FindReferences");
+
         /// <summary>
         /// Search assets using Unity Search syntax.
         /// Examples:
@@ -31,6 +43,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "ASSET_DISCOVER", "ASSET_LABEL", "ASSET_MOVE" })]
         public static string Search(string data)
         {
+            using var _profile = _markerSearch.Auto();
             if (string.IsNullOrWhiteSpace(data))
                 return "Error: Empty search query";
 
@@ -116,6 +129,7 @@ namespace clibridge4unity
         /// </summary>
         public static string FindPrefabsWithComponent(string componentName, int maxResults = 50)
         {
+            using var _profile = _markerFindPrefabsWithComponent.Auto();
             // Unity Search syntax for finding prefabs with a component reference
             return Search($"t:prefab ref:{componentName}");
         }
@@ -125,6 +139,7 @@ namespace clibridge4unity
         /// </summary>
         public static string FindMaterialsWithShader(string shaderName, int maxResults = 50)
         {
+            using var _profile = _markerFindMaterialsWithShader.Auto();
             // Search for materials, then filter by shader
             try
             {
@@ -169,6 +184,7 @@ namespace clibridge4unity
         /// </summary>
         public static string FindAssetsWithLabel(string label, int maxResults = 50)
         {
+            using var _profile = _markerFindAssetsWithLabel.Auto();
             return Search($"l:{label}");
         }
 
@@ -177,6 +193,7 @@ namespace clibridge4unity
         /// </summary>
         public static string FindScriptsInheriting(string baseTypeName, int maxResults = 50)
         {
+            using var _profile = _markerFindScriptsInheriting.Auto();
             try
             {
                 var results = new List<string>();
@@ -222,6 +239,7 @@ namespace clibridge4unity
         /// </summary>
         public static string FindAssetsOfType(string typeName, string folder = "Assets", int maxResults = 50)
         {
+            using var _profile = _markerFindAssetsOfType.Auto();
             try
             {
                 var guids = AssetDatabase.FindAssets($"t:{typeName}", new[] { folder });
@@ -255,6 +273,7 @@ namespace clibridge4unity
         /// </summary>
         public static string GetDependencies(string assetPath, bool recursive = false)
         {
+            using var _profile = _markerGetDependencies.Auto();
             try
             {
                 if (!AssetDatabase.AssetPathExists(assetPath))
@@ -296,6 +315,7 @@ namespace clibridge4unity
         /// </summary>
         public static string FindReferences(string assetPath, int maxResults = 50)
         {
+            using var _profile = _markerFindReferences.Auto();
             try
             {
                 if (!AssetDatabase.AssetPathExists(assetPath))

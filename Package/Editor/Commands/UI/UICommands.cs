@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.Rendering;
@@ -13,6 +14,20 @@ namespace clibridge4unity
 {
     public static class UICommands
     {
+        // Profiler markers for the heavy AssetDatabase / type-scan helpers below. Each one wraps
+        // a method that does at least one full-project FindAssets sweep — without these markers
+        // a slow ASSET_DISCOVER call shows up as a single opaque block in the Unity Profiler.
+        static readonly ProfilerMarker _markerDiscoverSummary = new ProfilerMarker("Bridge.UI.DiscoverSummary");
+        static readonly ProfilerMarker _markerDiscoverUI = new ProfilerMarker("Bridge.UI.DiscoverUI");
+        static readonly ProfilerMarker _markerDiscoverShaders = new ProfilerMarker("Bridge.UI.DiscoverShaders");
+        static readonly ProfilerMarker _markerDiscoverMaterials = new ProfilerMarker("Bridge.UI.DiscoverMaterials");
+        static readonly ProfilerMarker _markerDiscoverSprites = new ProfilerMarker("Bridge.UI.DiscoverSprites");
+        static readonly ProfilerMarker _markerDiscoverUIPrefabs = new ProfilerMarker("Bridge.UI.DiscoverUIPrefabs");
+        static readonly ProfilerMarker _markerDiscoverScenes = new ProfilerMarker("Bridge.UI.DiscoverScenes");
+        static readonly ProfilerMarker _markerDiscoverFonts = new ProfilerMarker("Bridge.UI.DiscoverFonts");
+        static readonly ProfilerMarker _markerDiscoverModels = new ProfilerMarker("Bridge.UI.DiscoverModels");
+        static readonly ProfilerMarker _markerDiscoverVariants = new ProfilerMarker("Bridge.UI.DiscoverVariants");
+
         private static readonly string[] DiscoverFlags = { "sprites", "prefabs", "scenes", "fonts", "shaders", "materials", "models", "variants", "ui" };
         private static readonly string[] DiscoverOptions = { "sprites", "materials", "shaders" };
 
@@ -97,6 +112,7 @@ namespace clibridge4unity
 
         private static string DiscoverSummary()
         {
+            using var _profile = _markerDiscoverSummary.Auto();
             var sb = new StringBuilder();
             sb.AppendLine("=== Asset Discovery ===");
             sb.AppendLine();
@@ -161,6 +177,7 @@ namespace clibridge4unity
 
         private static string DiscoverUI()
         {
+            using var _profile = _markerDiscoverUI.Auto();
             var sb = new StringBuilder();
             sb.AppendLine("=== UI Asset Discovery ===");
             sb.AppendLine();
@@ -306,6 +323,7 @@ namespace clibridge4unity
 
         private static string DiscoverShaders(string filter)
         {
+            using var _profile = _markerDiscoverShaders.Auto();
             var sb = new StringBuilder();
 
             // Project shaders
@@ -384,6 +402,7 @@ namespace clibridge4unity
 
         private static string DiscoverMaterials(string filter)
         {
+            using var _profile = _markerDiscoverMaterials.Auto();
             var sb = new StringBuilder();
             var guids = AssetDatabase.FindAssets("t:Material", new[] { "Assets" });
 
@@ -457,6 +476,7 @@ namespace clibridge4unity
 
         private static string DiscoverSprites(string subfolder)
         {
+            using var _profile = _markerDiscoverSprites.Auto();
             var sb = new StringBuilder();
             string[] searchFolders = { "Assets" };
 
@@ -524,6 +544,7 @@ namespace clibridge4unity
 
         private static string DiscoverUIPrefabs()
         {
+            using var _profile = _markerDiscoverUIPrefabs.Auto();
             var sb = new StringBuilder();
 
             var prefabGuids = AssetDatabase.FindAssets("t:Prefab", new[] { "Assets" });
@@ -625,6 +646,7 @@ namespace clibridge4unity
 
         private static string DiscoverScenes()
         {
+            using var _profile = _markerDiscoverScenes.Auto();
             var sb = new StringBuilder();
             sb.AppendLine("Scenes:");
             sb.AppendLine();
@@ -693,6 +715,7 @@ namespace clibridge4unity
 
         private static string DiscoverFonts()
         {
+            using var _profile = _markerDiscoverFonts.Auto();
             var sb = new StringBuilder();
             sb.AppendLine("Available Fonts:");
             sb.AppendLine();
@@ -732,6 +755,7 @@ namespace clibridge4unity
 
         private static string DiscoverModels()
         {
+            using var _profile = _markerDiscoverModels.Auto();
             var sb = new StringBuilder();
             var modelGuids = AssetDatabase.FindAssets("t:Model", new[] { "Assets" });
 
@@ -823,6 +847,7 @@ namespace clibridge4unity
 
         private static string DiscoverVariants()
         {
+            using var _profile = _markerDiscoverVariants.Auto();
             var sb = new StringBuilder();
             var prefabGuids = AssetDatabase.FindAssets("t:Prefab", new[] { "Assets" });
 

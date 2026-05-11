@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
+using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEditor;
@@ -17,6 +18,19 @@ namespace clibridge4unity
 {
     public static class RenderCommand
     {
+        // Profiler markers for the heavy render paths. Render* methods do GrabPixels,
+        // RenderTexture creation, multi-pass repaint settle, prefab instantiation, asset
+        // re-import — all expensive. Multi-pass UXML settle is the worst when fonts load.
+        static readonly ProfilerMarker _markerRender = new ProfilerMarker("Bridge.UI.Render");
+        static readonly ProfilerMarker _markerRenderUxml = new ProfilerMarker("Bridge.UI.RenderUxml");
+        static readonly ProfilerMarker _markerRenderUxmlSettle = new ProfilerMarker("Bridge.UI.RenderUxmlSettlePump");
+        static readonly ProfilerMarker _markerRenderUxmlGrab = new ProfilerMarker("Bridge.UI.RenderUxmlGrab");
+        static readonly ProfilerMarker _markerRenderGrid = new ProfilerMarker("Bridge.UI.RenderGrid");
+        static readonly ProfilerMarker _markerRenderPrefab = new ProfilerMarker("Bridge.UI.RenderPrefab");
+        static readonly ProfilerMarker _markerRenderUIPrefab = new ProfilerMarker("Bridge.UI.RenderUIPrefab");
+        static readonly ProfilerMarker _markerRender3DPrefab = new ProfilerMarker("Bridge.UI.Render3DPrefab");
+        static readonly ProfilerMarker _markerRenderGameObject = new ProfilerMarker("Bridge.UI.RenderGameObject");
+
         // Win32 APIs for capturing popup window content via PrintWindow (no TOPMOST needed)
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
@@ -155,6 +169,7 @@ namespace clibridge4unity
         // Called inline by SCREENSHOT for asset paths (.prefab / .uxml). No separate command.
         public static async Task<string> Render(string data)
         {
+            using var _profile = _markerRender.Auto();
             try
             {
                 Directory.CreateDirectory(OutputDir);
@@ -251,6 +266,7 @@ namespace clibridge4unity
         /// </summary>
         static async Task<string> RenderUxmlAsync(string uxmlPath, int width, int height, string elSelector = null)
         {
+            using var _profile = _markerRenderUxml.Auto();
             // Force-reimport the UXML and its USS/TSS dependencies so on-disk edits show up
             // immediately — without this, AssetDatabase serves the previously imported version.
             // Skip when Unity is mid-compile/import: import on top of an in-progress operation
@@ -363,6 +379,7 @@ namespace clibridge4unity
                 // across multiple frames so each pass picks up sizes from the previous one.
                 async Task Pump(int passes)
                 {
+                    using var _pumpProfile = _markerRenderUxmlSettle.Auto();
                     for (int i = 0; i < passes; i++)
                     {
                         await CommandRegistry.RunOnMainThreadAsync<int>(() =>
@@ -578,6 +595,7 @@ namespace clibridge4unity
 
         static async Task<string> RenderGridAsync(List<string> items, int cols, int cellWidth, int cellHeight)
         {
+            using var _profile = _markerRenderGrid.Auto();
             int labelHeight = 28;
             if (cols <= 0)
                 cols = Math.Min(items.Count, (int)Math.Ceiling(Math.Sqrt(items.Count)));
@@ -789,6 +807,7 @@ namespace clibridge4unity
 
         static string RenderPrefab(string prefabPath, int width, int height)
         {
+            using var _profile = _markerRenderPrefab.Auto();
             // Ensure on-disk edits to the prefab (or any pending tracked change) are reflected
             // in AssetDatabase before rendering. No-op if daemon isn't running.
             if (!EditorApplication.isCompiling && !EditorApplication.isUpdating)
@@ -857,6 +876,7 @@ namespace clibridge4unity
 
         static string RenderUIPrefab(GameObject prefab, string prefabPath, int width, int height)
         {
+            using var _profile = _markerRenderUIPrefab.Auto();
             var instance = UnityEngine.Object.Instantiate(prefab);
             instance.hideFlags = HideFlags.HideAndDontSave;
 
@@ -964,6 +984,7 @@ namespace clibridge4unity
 
         static string Render3DPrefab(GameObject prefab, string prefabPath, int width, int height)
         {
+            using var _profile = _markerRender3DPrefab.Auto();
             var instance = UnityEngine.Object.Instantiate(prefab);
             instance.hideFlags = HideFlags.HideAndDontSave;
 
@@ -1070,6 +1091,7 @@ namespace clibridge4unity
         // ───────────────────── Scene GameObject Rendering ─────────────────────
         static async Task<string> RenderGameObjectAsync(string targetPath, int width, int height)
         {
+            using var _profile = _markerRenderGameObject.Auto();
             // Auto-size: resolve dimensions on main thread first
             if (width <= 0 || height <= 0)
             {

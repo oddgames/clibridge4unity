@@ -9,6 +9,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.CSharp;
+using Unity.Profiling;
 using UnityEngine;
 
 namespace clibridge4unity
@@ -31,6 +32,16 @@ namespace clibridge4unity
         private static string[] mcsReferences;
         private static string monoLibDir;
         private static string mcsResponseFilePath;
+
+        // Profiler markers for the heavy compile + reference-collection paths. Roslyn compile
+        // of even small snippets can take 200ms on first call (loading reference assemblies);
+        // mcs is slower. CollectMcsReferences sweeps the entire AppDomain.
+        static readonly ProfilerMarker _markerExecute = new ProfilerMarker("Bridge.Code.Execute");
+        static readonly ProfilerMarker _markerExecuteReturn = new ProfilerMarker("Bridge.Code.ExecuteReturn");
+        static readonly ProfilerMarker _markerCompile = new ProfilerMarker("Bridge.Code.Compile");
+        static readonly ProfilerMarker _markerCompileRoslyn = new ProfilerMarker("Bridge.Code.CompileRoslyn");
+        static readonly ProfilerMarker _markerCompileMcs = new ProfilerMarker("Bridge.Code.CompileMcs");
+        static readonly ProfilerMarker _markerCollectMcsReferences = new ProfilerMarker("Bridge.Code.CollectMcsReferences");
 
         // Roslyn state (reflection-based, no compile-time dependency on Microsoft.CodeAnalysis)
         private static string[] roslynReferencePaths;
@@ -73,6 +84,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "CODE_EXEC_RETURN", "LOG" })]
         public static async Task<string> Execute(string code)
         {
+            using var _profile = _markerExecute.Auto();
             try
             {
                 code = ResolveCode(code);
@@ -164,6 +176,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "CODE_EXEC", "LOG" })]
         public static async Task<string> ExecuteReturn(string code)
         {
+            using var _profile = _markerExecuteReturn.Auto();
             try
             {
                 if (string.IsNullOrEmpty(code))
@@ -681,6 +694,7 @@ namespace clibridge4unity
 
         internal static CompileResult Compile(string fullCode)
         {
+            using var _profile = _markerCompile.Auto();
             if (useRoslyn)
             {
                 try
@@ -701,6 +715,7 @@ namespace clibridge4unity
 
         private static CompileResult CompileWithRoslyn(string fullCode)
         {
+            using var _profile = _markerCompileRoslyn.Auto();
             // Parse source code — fill all optional params with defaults, but give the
             // syntax tree a synthetic path so stack traces from exceptions in user code
             // read "at Runner.Run () in Script.cs:line 42" instead of a bare IL offset.
@@ -772,6 +787,7 @@ namespace clibridge4unity
 
         private static CompileResult CompileWithMcs(string fullCode)
         {
+            using var _profile = _markerCompileMcs.Auto();
             // Write assembly references to a response file to avoid command-line length limits.
             // Windows has a ~32KB command line limit and Unity 6 can load 200+ assemblies,
             // each with a long absolute path, easily exceeding this limit.
@@ -1228,6 +1244,7 @@ namespace clibridge4unity
 
         private static void CollectMcsReferences(string editorPath)
         {
+            using var _profile = _markerCollectMcsReferences.Auto();
             var refs = new List<string>();
             var added = new HashSet<string>();
 

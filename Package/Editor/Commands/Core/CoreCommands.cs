@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using Unity.Profiling;
 using UnityEditor;
 using UnityEditor.Compilation;
 using UnityEditor.Profiling;
@@ -16,6 +17,16 @@ namespace clibridge4unity
     /// </summary>
     public static class CoreCommands
     {
+        // Profiler markers for the heavier core ops. STATUS reflects on EditorWindow + reads
+        // log error counts; LOG (via LogCommand) reflects into Unity's internal LogEntries;
+        // MENU executes editor menu items (can trigger arbitrary work); PROFILE samples profiler.
+        static readonly ProfilerMarker _markerStatus = new ProfilerMarker("Bridge.Core.Status");
+        static readonly ProfilerMarker _markerCompile = new ProfilerMarker("Bridge.Core.Compile");
+        static readonly ProfilerMarker _markerRefresh = new ProfilerMarker("Bridge.Core.Refresh");
+        static readonly ProfilerMarker _markerMenu = new ProfilerMarker("Bridge.Core.Menu");
+        static readonly ProfilerMarker _markerProfile = new ProfilerMarker("Bridge.Core.Profile");
+        static readonly ProfilerMarker _markerDiag = new ProfilerMarker("Bridge.Core.Diag");
+
         private static double _lastScriptModifiedCheckTime = -10;
         private static bool _lastScriptsModified;
         private static double _lastWindowListTime = -10;
@@ -325,6 +336,7 @@ namespace clibridge4unity
             Usage = "DIAG")]
         public static string Diag()
         {
+            using var _profile = _markerDiag.Auto();
             var sb = new System.Text.StringBuilder();
             sb.AppendLine($"bridgeVersion: {BridgeServer.Version}");
             sb.AppendLine($"diagnosticLog: {BridgeDiagnostics.LogPath}");
@@ -362,6 +374,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "DIAG", "LOG", "PROBE" })]
         public static string GetStatus()
         {
+            using var _profile = _markerStatus.Auto();
             var windowList = GetOpenEditorWindowsCached();
 
             // Get last compile time from SessionState (survives domain reloads)
@@ -475,6 +488,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "LINT", "LOG", "STATUS", "REFRESH" })]
         public static string Compile(string data)
         {
+            using var _profile = _markerCompile.Auto();
             if (EditorApplication.isPlaying)
                 return Response.Error("Cannot compile during play mode. Use STOP first.");
 
@@ -622,6 +636,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "COMPILE", "STATUS", "LOG" })]
         public static string Refresh()
         {
+            using var _profile = _markerRefresh.Auto();
             if (EditorApplication.isPlaying)
                 return Response.Error("Cannot refresh during play mode. Use STOP first.");
 
@@ -661,6 +676,7 @@ namespace clibridge4unity
             RequiresMainThread = true)]
         public static string Menu(string data)
         {
+            using var _profile = _markerMenu.Auto();
             if (string.IsNullOrWhiteSpace(data))
                 return Response.Error("Usage: MENU <menu/path>");
 
@@ -688,6 +704,7 @@ namespace clibridge4unity
             RequiresMainThread = true)]
         public static string Profile(string data)
         {
+            using var _profile = _markerProfile.Auto();
             try
             {
                 string action = string.IsNullOrWhiteSpace(data) ? "status" : data.Trim().Split(' ')[0].ToLower();

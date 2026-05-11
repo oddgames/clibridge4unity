@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.Compilation;
 using UnityEngine;
+using UnityEngine.Profiling;
 using Debug = UnityEngine.Debug;
 
 namespace clibridge4unity
@@ -827,40 +828,58 @@ namespace clibridge4unity
 
         private static async Task<string> InvokeCommand(CommandInfo cmd, string data, NamedPipeServerStream pipe, CancellationToken ct)
         {
-            var parameters = cmd.Method.GetParameters();
-
-            if (cmd.IsStreaming)
+            // Profiler marker per command — shows up in Unity Profiler as "Bridge.{NAME}".
+            // BeginSample only wraps the synchronous portion (Invoke + main-thread dispatch);
+            // for async commands the awaited Task work runs after EndSample. That's the right
+            // scope for the marker — Profiler can't span thread boundaries anyway.
+            Profiler.BeginSample("Bridge." + cmd.Name);
+            try
             {
-                var streamingTask = (Task)cmd.Method.Invoke(cmd.Instance, new object[] { data, pipe, ct });
-                await streamingTask;
-                return null;
+                var parameters = cmd.Method.GetParameters();
+
+                if (cmd.IsStreaming)
+                {
+                    var streamingTask = (Task)cmd.Method.Invoke(cmd.Instance, new object[] { data, pipe, ct });
+                    Profiler.EndSample();
+                    await streamingTask;
+                    return null;
+                }
+
+                object[] args;
+                if (parameters.Length == 0)
+                    args = Array.Empty<object>();
+                else
+                    args = new object[] { data };
+
+                object result;
+                if (cmd.RequiresMainThread)
+                {
+                    string desc = data?.Length > 80 ? $"{cmd.Name}|{data.Substring(0, 80)}..." : $"{cmd.Name}|{data}";
+                    result = await InvokeOnMainThread(
+                        () => cmd.Method.Invoke(cmd.Instance, args),
+                        desc,
+                        Math.Max(1000, cmd.TimeoutSeconds * 1000),
+                        ct);
+                }
+                else
+                {
+                    result = cmd.Method.Invoke(cmd.Instance, args);
+                }
+
+                if (result is Task<string> task)
+                {
+                    Profiler.EndSample();
+                    return await task;
+                }
+
+                Profiler.EndSample();
+                return (string)result;
             }
-
-            object[] args;
-            if (parameters.Length == 0)
-                args = Array.Empty<object>();
-            else
-                args = new object[] { data };
-
-            object result;
-            if (cmd.RequiresMainThread)
+            catch
             {
-                string desc = data?.Length > 80 ? $"{cmd.Name}|{data.Substring(0, 80)}..." : $"{cmd.Name}|{data}";
-                result = await InvokeOnMainThread(
-                    () => cmd.Method.Invoke(cmd.Instance, args),
-                    desc,
-                    Math.Max(1000, cmd.TimeoutSeconds * 1000),
-                    ct);
+                Profiler.EndSample();
+                throw;
             }
-            else
-            {
-                result = cmd.Method.Invoke(cmd.Instance, args);
-            }
-
-            if (result is Task<string> task)
-                return await task;
-
-            return (string)result;
         }
 
         /// <summary>

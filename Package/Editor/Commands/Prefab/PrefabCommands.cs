@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Unity.Profiling;
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -16,6 +17,15 @@ namespace clibridge4unity
     /// </summary>
     public static class PrefabCommands
     {
+        // Profiler markers for the prefab ops. Create + Save touch the asset database;
+        // List sweeps a folder for prefabs; FindType enumerates AppDomain assemblies.
+        static readonly ProfilerMarker _markerCreate = new ProfilerMarker("Bridge.Prefab.Create");
+        static readonly ProfilerMarker _markerSave = new ProfilerMarker("Bridge.Prefab.Save");
+        static readonly ProfilerMarker _markerInstantiate = new ProfilerMarker("Bridge.Prefab.Instantiate");
+        static readonly ProfilerMarker _markerApply = new ProfilerMarker("Bridge.Prefab.Apply");
+        static readonly ProfilerMarker _markerUnpack = new ProfilerMarker("Bridge.Prefab.Unpack");
+        static readonly ProfilerMarker _markerList = new ProfilerMarker("Bridge.Prefab.List");
+
         /// <summary>
         /// Creates a prefab from scratch or from scene object.
         /// JSON: {"name":"Name", "path":"Assets/Prefabs", "source":"SceneObjectPath", "components":["BoxCollider"]}
@@ -28,6 +38,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "SCREENSHOT", "PREFAB_INSTANTIATE", "PREFAB_HIERARCHY" })]
         public static async Task<string> Create(string jsonData)
         {
+            using var _profile = _markerCreate.Auto();
             try
             {
                 string name;
@@ -120,6 +131,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "SCREENSHOT", "PREFAB_INSTANTIATE", "PREFAB_HIERARCHY" })]
         public static string Save(string data)
         {
+            using var _profile = _markerSave.Auto();
             try
             {
                 if (string.IsNullOrEmpty(data))
@@ -211,6 +223,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "SCREENSHOT", "INSPECTOR", "PREFAB_HIERARCHY" })]
         public static string Instantiate(string jsonData)
         {
+            using var _profile = _markerInstantiate.Auto();
             try
             {
                 string prefabPath;
@@ -291,6 +304,7 @@ namespace clibridge4unity
         /// </summary>
         public static string Apply(string instancePath)
         {
+            using var _profile = _markerApply.Auto();
             try
             {
                 var instance = GameObject.Find(instancePath);
@@ -317,6 +331,7 @@ namespace clibridge4unity
         /// </summary>
         public static string Unpack(string instancePath, bool completely = false)
         {
+            using var _profile = _markerUnpack.Auto();
             try
             {
                 var instance = GameObject.Find(instancePath);
@@ -339,6 +354,7 @@ namespace clibridge4unity
         /// </summary>
         public static string List(string folder = "Assets")
         {
+            using var _profile = _markerList.Auto();
             try
             {
                 var guids = AssetDatabase.FindAssets("t:Prefab", new[] { folder });

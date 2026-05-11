@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using Unity.Profiling;
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -11,6 +12,15 @@ namespace clibridge4unity
 {
     public static class AssetManagement
     {
+        // Profiler markers for asset I/O — Move/Copy/Delete touch the asset database and trigger
+        // imports; Reserialize forces re-validate of N assets which can hammer disk + reload.
+        static readonly ProfilerMarker _markerMove = new ProfilerMarker("Bridge.Asset.Move");
+        static readonly ProfilerMarker _markerCopy = new ProfilerMarker("Bridge.Asset.Copy");
+        static readonly ProfilerMarker _markerDelete = new ProfilerMarker("Bridge.Asset.Delete");
+        static readonly ProfilerMarker _markerMkdir = new ProfilerMarker("Bridge.Asset.Mkdir");
+        static readonly ProfilerMarker _markerLabel = new ProfilerMarker("Bridge.Asset.Label");
+        static readonly ProfilerMarker _markerReserialize = new ProfilerMarker("Bridge.Asset.Reserialize");
+
         [BridgeCommand("ASSET_MOVE", "Move/rename assets (preserves GUID references)",
             Category = "Asset",
             Usage = "ASSET_MOVE Assets/Old.prefab Assets/New.prefab           (single)\n" +
@@ -19,6 +29,7 @@ namespace clibridge4unity
             RequiresMainThread = true)]
         public static string Move(string data)
         {
+            using var _profile = _markerMove.Auto();
             var args = ParseArgs(data, 2);
             if (args == null)
                 return Response.Error("Usage: ASSET_MOVE <source...> <destination>");
@@ -38,6 +49,7 @@ namespace clibridge4unity
             RequiresMainThread = true)]
         public static string Copy(string data)
         {
+            using var _profile = _markerCopy.Auto();
             var args = ParseArgs(data, 2);
             if (args == null)
                 return Response.Error("Usage: ASSET_COPY <source> <destination>");
@@ -63,6 +75,7 @@ namespace clibridge4unity
             RequiresMainThread = true)]
         public static string Delete(string data)
         {
+            using var _profile = _markerDelete.Auto();
             if (string.IsNullOrWhiteSpace(data))
                 return Response.Error("Usage: ASSET_DELETE <path> [path2 ...]");
 
@@ -97,6 +110,7 @@ namespace clibridge4unity
             RequiresMainThread = true)]
         public static string Mkdir(string data)
         {
+            using var _profile = _markerMkdir.Auto();
             if (string.IsNullOrWhiteSpace(data))
                 return Response.Error("Usage: ASSET_MKDIR <path> [path2 ...]");
 
@@ -138,6 +152,7 @@ namespace clibridge4unity
             RequiresMainThread = true)]
         public static string Label(string data)
         {
+            using var _profile = _markerLabel.Auto();
             if (string.IsNullOrWhiteSpace(data))
                 return Response.Error("Usage: ASSET_LABEL <path> [+add -remove ...]");
 
@@ -192,6 +207,7 @@ namespace clibridge4unity
             RequiresMainThread = true)]
         public static string Reserialize(string data)
         {
+            using var _profile = _markerReserialize.Auto();
             try
             {
                 if (string.IsNullOrWhiteSpace(data))

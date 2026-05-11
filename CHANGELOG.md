@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.1.36 — 2026-05-11
+
+## v1.1.36
+
+### Internal
+- Profiler markers added across all bridge commands and heavy helper methods. Open Unity Profiler → Hierarchy and search "Bridge." to see exactly where time goes during a slow command.
+  - Central wrap in `CommandRegistry.InvokeCommand` emits `Bridge.{COMMAND_NAME}` for every dispatched command. No per-command opt-in needed.
+  - Per-method `ProfilerMarker.Auto()` scopes added to the heaviest paths:
+    - `RenderCommand`: Render, RenderUxml, RenderUxmlSettlePump, RenderGrid, RenderPrefab, RenderUIPrefab, Render3DPrefab, RenderGameObject
+    - `UICommands` (ASSET_DISCOVER): DiscoverSummary, DiscoverUI, DiscoverShaders, DiscoverMaterials, DiscoverSprites, DiscoverUIPrefabs, DiscoverScenes, DiscoverFonts, DiscoverModels, DiscoverVariants
+    - `AssetSearch`: Search, FindPrefabsWithComponent, FindMaterialsWithShader, FindAssetsWithLabel, FindScriptsInheriting, FindAssetsOfType, GetDependencies, FindReferences
+    - `AssetManagement`: Move, Copy, Delete, Mkdir, Label, Reserialize
+    - `ComponentCommands`: Inspector, FindType (full AppDomain type sweep), Set, Add, Remove
+    - `CodeExecutor`: Execute, ExecuteReturn, Compile, CompileRoslyn, CompileMcs, CollectMcsReferences
+    - `PrefabCommands`: Create, Save, Instantiate, Apply, Unpack, List
+    - `SceneCommands`: Create, Find, Delete, Save, Load, SceneView
+    - `CoreCommands`: Status, Compile, Refresh, Menu, Profile, Diag
+    - `LogCommands`: GetLogs, GetCompileErrorsSummary, GetUiToolkitDiagnosticsForCommand, EndCommandCapture
+- Markers use struct-based `Unity.Profiling.ProfilerMarker` (zero allocation) and only register the scope when Unity's deep profiler / `Bridge.*` filter is active, so there is no measurable overhead in normal use.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.35 — 2026-05-10
 
 ## v1.1.35

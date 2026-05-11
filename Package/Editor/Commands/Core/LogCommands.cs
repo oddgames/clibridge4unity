@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using Unity.Profiling;
 using UnityEditor;
 using UnityEditor.Compilation;
 using UnityEngine;
@@ -18,6 +19,14 @@ namespace clibridge4unity
     [UnityEditor.InitializeOnLoad]
     public static class LogCommands
     {
+        // Profiler markers for the LOG-side helpers. GetLogs reflects into Unity's internal
+        // LogEntries; GetCompileErrorsSummary calls CompilationPipeline; UI-toolkit diagnostics
+        // walk import errors per asset.
+        static readonly ProfilerMarker _markerGetLogs = new ProfilerMarker("Bridge.Core.GetLogs");
+        static readonly ProfilerMarker _markerCompileErrorsSummary = new ProfilerMarker("Bridge.Core.GetCompileErrorsSummary");
+        static readonly ProfilerMarker _markerUiToolkitDiagnostics = new ProfilerMarker("Bridge.Core.GetUiToolkitDiagnosticsForCommand");
+        static readonly ProfilerMarker _markerEndCommandCapture = new ProfilerMarker("Bridge.Core.EndCommandCapture");
+
         // Lazy log capture: `Application.logMessageReceived` is subscribed only WHILE a command
         // is executing — ExecuteCommand wraps each command in BeginCommandCapture/EndCommandCapture.
         // Logs from before/between commands aren't buffered (use Unity's Console via LOG instead).
@@ -105,6 +114,7 @@ namespace clibridge4unity
         /// Returns null if nothing to surface.</summary>
         public static string EndCommandCapture(int maxLines = 5, bool errorsOnly = true)
         {
+            using var _profile = _markerEndCommandCapture.Auto();
             if (_captureSubscribed)
             {
                 Application.logMessageReceived -= OnLogMessage;
@@ -282,6 +292,7 @@ namespace clibridge4unity
         /// </summary>
         public static string GetCompileErrorsSummary()
         {
+            using var _profile = _markerCompileErrorsSummary.Auto();
             // Check our tracked errors first
             lock (_compileErrorLock)
             {
@@ -490,6 +501,7 @@ namespace clibridge4unity
 
         public static string GetUiToolkitDiagnosticsForCommand(string commandName, string data, string response)
         {
+            using var _profile = _markerUiToolkitDiagnostics.Auto();
             if (string.IsNullOrEmpty(commandName)) return null;
             if (commandName.Equals("LOG", StringComparison.OrdinalIgnoreCase)
                 || commandName.Equals("STATUS", StringComparison.OrdinalIgnoreCase)
@@ -579,6 +591,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "STACK_MINIMIZE", "STATUS" })]
         public static string GetLogs(string data)
         {
+            using var _profile = _markerGetLogs.Auto();
             var args = CommandArgs.Parse(data, LogFlags, LogOptions);
 
             if (args.Has("clear"))

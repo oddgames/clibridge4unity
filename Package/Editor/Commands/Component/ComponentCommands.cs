@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Reflection;
+using Unity.Profiling;
 using UnityEngine;
 using UnityEditor;
 using UnityEngine.Events;
@@ -13,6 +14,15 @@ namespace clibridge4unity
     /// </summary>
     public static class ComponentCommands
     {
+        // INSPECTOR walks GameObject hierarchies recursively (potentially thousands of nodes)
+        // and reflects every component's serialized fields. FindType enumerates ALL loaded
+        // assemblies + all their types — expensive on big projects with many packages.
+        static readonly ProfilerMarker _markerInspector = new ProfilerMarker("Bridge.Component.Inspector");
+        static readonly ProfilerMarker _markerFindType = new ProfilerMarker("Bridge.Component.FindType");
+        static readonly ProfilerMarker _markerComponentSet = new ProfilerMarker("Bridge.Component.Set");
+        static readonly ProfilerMarker _markerComponentAdd = new ProfilerMarker("Bridge.Component.Add");
+        static readonly ProfilerMarker _markerComponentRemove = new ProfilerMarker("Bridge.Component.Remove");
+
         /// <summary>
         /// Set a field or property on a component by finding the target GameObject and component.
         /// JSON: {"gameObject":"Path/To/Object", "component":"ComponentName", "field":"fieldName", "value":"Path/To/Target" or value}
@@ -25,6 +35,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "INSPECTOR" })]
         public static string Set(string jsonData)
         {
+            using var _profile = _markerComponentSet.Auto();
             try
             {
                 string gameObjectPath;
@@ -141,6 +152,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "INSPECTOR", "COMPONENT_SET" })]
         public static string AddComponent(string jsonData)
         {
+            using var _profile = _markerComponentAdd.Auto();
             try
             {
                 string gameObjectPath, componentName;
@@ -214,6 +226,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "INSPECTOR" })]
         public static string RemoveComponent(string jsonData)
         {
+            using var _profile = _markerComponentRemove.Auto();
             try
             {
                 string gameObjectPath, componentName;
@@ -294,6 +307,7 @@ namespace clibridge4unity
             RelatedCommands = new[] { "COMPONENT_SET", "COMPONENT_ADD", "SCREENSHOT", "FIND" })]
         public static string Inspector(string data)
         {
+            using var _profile = _markerInspector.Auto();
             try
             {
                 var opts = ParseInspectorOptions(data);
@@ -628,6 +642,7 @@ namespace clibridge4unity
 
         private static Type FindType(string name)
         {
+            using var _profile = _markerFindType.Auto();
             // Try common Unity namespaces first
             var type = Type.GetType($"UnityEngine.{name}, UnityEngine")
                     ?? Type.GetType($"UnityEngine.UI.{name}, UnityEngine.UI")
