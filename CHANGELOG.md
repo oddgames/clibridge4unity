@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.41 — 2026-05-12
+
+## v1.1.41
+
+### New
+- `CODE_EXEC --bg` and `CODE_EXEC_RETURN --bg` — run user code on the threadpool instead of Unity's main thread, with a 25s hard timeout. Use for blocking work (CDP / Chrome DevTools, HTTP requests, large file IO, JSON parsing) so the Editor stays responsive while the call is in flight. On timeout the task is abandoned (still consumes the threadpool slot until it returns) and the bridge returns a clear error — the bridge command slot is no longer held hostage by a stuck blocking call.
+- Caveat: Unity API calls from `--bg` code throw "main thread only" exceptions, as expected. Keep Unity API touches on the default (main-thread) path and use `--bg` for pure C# blocking work.
+
+### Why
+- Headless-Chrome / CDP scripts run synchronously inside `CODE_EXEC_RETURN` wedge Unity's main thread for seconds-to-minutes, blocking every subsequent bridge command (STATUS, PING, DIAG falling back to busy reports) until the user kills Unity. No safe way to abort code already running on Unity's main thread, so the fix is to keep that work off the main thread entirely.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.40 — 2026-05-12
 
 ## v1.1.40

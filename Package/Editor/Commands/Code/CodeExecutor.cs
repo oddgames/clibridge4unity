@@ -78,6 +78,9 @@ namespace clibridge4unity
             Category = "Code",
             Usage = "CODE_EXEC <c# code>\n" +
                     "  CODE_EXEC @/path/to/tempfile.cs  (read code from file — preferred for multi-line / $\"…\")\n" +
+                    "  CODE_EXEC <code> --bg            run on threadpool, NOT Unity main thread.\n" +
+                    "                                    Use for blocking work (CDP, HTTP, large file IO).\n" +
+                    "                                    Unity API calls from --bg code will throw.\n" +
                     "  NOTE: put the temp .cs file OUTSIDE the Unity project (e.g. $TEMP, /tmp, ~/.cache) —\n" +
                     "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
             RequiresMainThread = false,
@@ -87,6 +90,7 @@ namespace clibridge4unity
             using var _profile = _markerExecute.Auto();
             try
             {
+                code = ExtractFlag(code, "--bg", out bool background);
                 code = ResolveCode(code);
                 if (string.IsNullOrEmpty(code))
                     return Response.Error("Code required.\nExample: CODE_EXEC GameObject.CreatePrimitive(PrimitiveType.Cube)");
@@ -109,17 +113,36 @@ namespace clibridge4unity
                     cachedAssemblies[codeHash] = assembly;
                 }
 
-                // Execute on main thread and wait for completion
                 var asm = assembly;
                 string desc = code.Length > 80 ? $"CODE_EXEC|{code.Substring(0, 80)}..." : $"CODE_EXEC|{code}";
                 try
                 {
-                    var result = await CommandRegistry.RunOnMainThreadAsync<object>(() =>
+                    if (background)
                     {
-                        var r = RunAssembly(asm);
-                        Debug.Log($"[Bridge] CODE_EXEC completed -> {r ?? "null"}");
-                        return null;
-                    }, desc);
+                        // Threadpool path. 25s hard timeout so the bridge command slot does not
+                        // sit on a stuck blocking call (CDP / HTTP / file IO). Task keeps running
+                        // after timeout; result is abandoned.
+                        var execTask = Task.Run<object>(() => RunAssembly(asm));
+                        var completed = await Task.WhenAny(execTask, Task.Delay(25000));
+                        if (completed != execTask)
+                        {
+                            Debug.LogError("[Bridge] CODE_EXEC --bg timed out after 25s (task abandoned on threadpool).");
+                        }
+                        else
+                        {
+                            var r = await execTask;
+                            Debug.Log($"[Bridge] CODE_EXEC completed -> {r ?? "null"}");
+                        }
+                    }
+                    else
+                    {
+                        await CommandRegistry.RunOnMainThreadAsync<object>(() =>
+                        {
+                            var r = RunAssembly(asm);
+                            Debug.Log($"[Bridge] CODE_EXEC completed -> {r ?? "null"}");
+                            return null;
+                        }, desc);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -169,6 +192,10 @@ namespace clibridge4unity
                     "  CODE_EXEC_RETURN <code> --trace [--maxlines N] [--from N]\n" +
                     "  CODE_EXEC_RETURN <code> --trace --only varName\n" +
                     "  CODE_EXEC_RETURN <code> --trace --vars x,y --skip print\n" +
+                    "  CODE_EXEC_RETURN <code> --bg               run on threadpool, NOT Unity main thread.\n" +
+                    "                                              Use for blocking work (CDP, HTTP, large file IO) so\n" +
+                    "                                              the Editor stays responsive. Calls to Unity API from\n" +
+                    "                                              --bg code will throw — keep Unity work on main thread.\n" +
                     "  NOTE: put the temp .cs file OUTSIDE the Unity project (e.g. $TEMP, /tmp, ~/.cache) —\n" +
                     "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
             RequiresMainThread = false,
@@ -183,7 +210,7 @@ namespace clibridge4unity
                     return Response.Error("Code required.\nExample: CODE_EXEC_RETURN 1+1");
 
                 // Parse flags BEFORE resolving file paths (flags come after @path)
-                bool inspect = false, includePrivate = false, trace = false;
+                bool inspect = false, includePrivate = false, trace = false, background = false;
                 int inspectDepth = 1, maxTraceLines = 500;
 
                 code = ExtractFlag(code, "--private", out includePrivate);
@@ -194,6 +221,7 @@ namespace clibridge4unity
                 code = ExtractStringFlag(code, "--vars", out string traceVars);
                 code = ExtractStringFlag(code, "--skip", out string traceSkip);
                 code = ExtractFlag(code, "--trace", out trace);
+                code = ExtractFlag(code, "--bg", out background);
                 code = code.Trim();
 
                 code = ResolveCode(code);
@@ -222,7 +250,24 @@ namespace clibridge4unity
 
                 var asm = assembly;
                 string desc = code.Length > 80 ? $"CODE_EXEC_RETURN|{code.Substring(0, 80)}..." : $"CODE_EXEC_RETURN|{code}";
-                var result = await CommandRegistry.RunOnMainThreadAsync<object>(() => RunAssembly(asm), desc);
+
+                object result;
+                if (background)
+                {
+                    // Run on threadpool — caller opted out of main thread. Hard timeout via
+                    // WaitAny so blocking user code (CDP, HTTP, etc) doesn't tie up the bridge
+                    // command slot. Task keeps running after timeout but result is abandoned.
+                    var execTask = Task.Run<object>(() => RunAssembly(asm));
+                    var timeoutMs = 25000;
+                    var completed = await Task.WhenAny(execTask, Task.Delay(timeoutMs));
+                    if (completed != execTask)
+                        return Response.Error($"--bg code timed out after {timeoutMs / 1000}s (task abandoned on threadpool; remove blocking calls or split work).");
+                    result = await execTask;
+                }
+                else
+                {
+                    result = await CommandRegistry.RunOnMainThreadAsync<object>(() => RunAssembly(asm), desc);
+                }
 
                 string baseResponse;
                 if (inspect)
