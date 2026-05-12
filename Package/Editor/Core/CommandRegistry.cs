@@ -492,9 +492,16 @@ namespace clibridge4unity
             {
                 if (assembly.IsDynamic) continue;
                 string assemblyName = assembly.GetName().Name;
-                // Scan our own assemblies + any assembly that references clibridge4unity.Core
-                // This allows external packages to register [BridgeCommand] methods
+                // Scan:
+                //   - our own assemblies (clibridge4unity.*)
+                //   - any external assembly that references clibridge4unity.Core
+                //   - Unity's default editor catch-all (Assembly-CSharp-Editor[-firstpass])
+                //     so users can drop a [BridgeCommand] under Assets/Editor/ with no asmdef
+                //     and still have it picked up.
+                bool isDefaultEditor = assemblyName == "Assembly-CSharp-Editor"
+                                    || assemblyName == "Assembly-CSharp-Editor-firstpass";
                 if (!assemblyName.StartsWith("clibridge4unity") &&
+                    !isDefaultEditor &&
                     !ReferencesCore(assembly)) continue;
 
                 try

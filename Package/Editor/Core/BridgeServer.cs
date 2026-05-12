@@ -27,7 +27,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.39";
+        public const string Version = "1.1.40";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
