@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.1.44 — 2026-05-13
+
+## v1.1.44
+
+### Fixed
+- Unity-process detection now uses the Windows **Restart Manager** to ask the OS which PIDs hold `<project>/Temp/UnityLockfile` open. Authoritative — works even when multiple projects share the same folder name (e.g. several `test/` projects), or when window titles / command-line paths would otherwise match the wrong instance. The previous window-title and `-projectPath` substring passes are kept as fallbacks for projects that haven't fully booted yet (no lockfile yet).
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.43 — 2026-05-13
 
 ## v1.1.43

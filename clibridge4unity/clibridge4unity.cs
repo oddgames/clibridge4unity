@@ -90,6 +90,91 @@ class Program
     [DllImport("kernel32.dll")]
     private static extern uint SetErrorMode(uint uMode);
 
+    // Restart Manager — authoritative way to find which PIDs hold a file open. Used to map
+    // Unity's Temp/UnityLockfile back to the owning Unity.exe PID even when window titles
+    // or command-line paths collide (e.g. several projects all named "test").
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    private static extern int RmStartSession(out uint pSessionHandle, int dwSessionFlags, string strSessionKey);
+
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    private static extern int RmRegisterResources(uint pSessionHandle, uint nFiles, string[] rgsFilenames,
+        uint nApplications, [In] RM_UNIQUE_PROCESS[] rgApplications, uint nServices, string[] rgsServiceNames);
+
+    [DllImport("rstrtmgr.dll")]
+    private static extern int RmGetList(uint dwSessionHandle, out uint pnProcInfoNeeded, ref uint pnProcInfo,
+        [In, Out] RM_PROCESS_INFO[] rgAffectedApps, ref uint lpdwRebootReasons);
+
+    [DllImport("rstrtmgr.dll")]
+    private static extern int RmEndSession(uint pSessionHandle);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RM_UNIQUE_PROCESS
+    {
+        public int dwProcessId;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime;
+    }
+
+    private const int CCH_RM_MAX_APP_NAME = 255;
+    private const int CCH_RM_MAX_SVC_NAME = 63;
+    private const int RmRebootReasonNone = 0;
+    private const int ERROR_MORE_DATA = 234;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct RM_PROCESS_INFO
+    {
+        public RM_UNIQUE_PROCESS Process;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = CCH_RM_MAX_APP_NAME + 1)] public string strAppName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = CCH_RM_MAX_SVC_NAME + 1)] public string strServiceShortName;
+        public uint ApplicationType;
+        public uint AppStatus;
+        public uint TSSessionId;
+        [MarshalAs(UnmanagedType.Bool)] public bool bRestartable;
+    }
+
+    /// <summary>
+    /// Return the PIDs of every process currently holding the given file open (Windows Restart Manager).
+    /// Authoritative — works regardless of process name, window title, or command line. Empty list on failure.
+    /// </summary>
+    static List<uint> GetPidsHoldingFile(string path)
+    {
+        var pids = new List<uint>();
+        if (string.IsNullOrEmpty(path)) return pids;
+        if (!File.Exists(path)) return pids;
+
+        uint handle;
+        string key = Guid.NewGuid().ToString();
+        int res = RmStartSession(out handle, 0, key);
+        if (res != 0) return pids;
+        try
+        {
+            res = RmRegisterResources(handle, 1, new[] { path }, 0, null, 0, null);
+            if (res != 0) return pids;
+
+            uint pnProcInfoNeeded = 0;
+            uint pnProcInfo = 0;
+            uint lpdwRebootReasons = RmRebootReasonNone;
+
+            res = RmGetList(handle, out pnProcInfoNeeded, ref pnProcInfo, null, ref lpdwRebootReasons);
+            if (res == ERROR_MORE_DATA && pnProcInfoNeeded > 0)
+            {
+                var procInfo = new RM_PROCESS_INFO[pnProcInfoNeeded];
+                pnProcInfo = pnProcInfoNeeded;
+                res = RmGetList(handle, out pnProcInfoNeeded, ref pnProcInfo, procInfo, ref lpdwRebootReasons);
+                if (res == 0)
+                {
+                    for (int i = 0; i < pnProcInfo; i++)
+                        pids.Add((uint)procInfo[i].Process.dwProcessId);
+                }
+            }
+        }
+        catch { }
+        finally
+        {
+            try { RmEndSession(handle); } catch { }
+        }
+        return pids;
+    }
+
     // Version from assembly (set in .csproj <Version>)
     private static readonly string CLI_VERSION =
         typeof(Program).Assembly.GetName().Version is { } v ? $"{v.Major}.{v.Minor}.{v.Build}" : "0.0.0";
@@ -4178,6 +4263,27 @@ class Program
         var unityPids = new HashSet<uint>(); // filtered: only this project's PIDs
         bool foundProject = false;
         string fullProjectPath = Path.GetFullPath(projectPath).TrimEnd('\\', '/');
+
+        // AUTHORITATIVE: ask Windows Restart Manager which PIDs hold Temp/UnityLockfile.
+        // Works regardless of project-name collisions, path casing, or command-line quirks.
+        // Done first so subsequent passes can skip if RM already nailed it.
+        var lockfileOwners = lockfileExists ? GetPidsHoldingFile(lockfilePath) : new List<uint>();
+        foreach (uint pid in lockfileOwners)
+        {
+            try
+            {
+                var proc = Process.GetProcessById((int)pid);
+                if (proc.ProcessName.Equals("Unity", StringComparison.OrdinalIgnoreCase))
+                {
+                    allUnityPids.Add(pid);
+                    unityPids.Add(pid);
+                    foundProject = true;
+                    if (proc.MainWindowHandle != IntPtr.Zero && !string.IsNullOrEmpty(proc.MainWindowTitle))
+                        info.TargetedWindowTitle = proc.MainWindowTitle;
+                }
+            }
+            catch { }
+        }
 
         try
         {
