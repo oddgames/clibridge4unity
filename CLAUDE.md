@@ -102,7 +102,7 @@ tool_claude_unity_bridge/
 │   │   │   ├── SessionKeys.cs     # SessionState key constants
 │   │   │   └── SetupWizard.cs     # CLI installer & PATH setup
 │   │   └── Commands/          # Command implementations (one asmdef per category)
-│   │       ├── Core/          # PING, STATUS, HELP, DIAG, PROBE, COMPILE, REFRESH, LOG, MENU, PROFILE, STACK_MINIMIZE
+│   │       ├── Core/          # PING, STATUS, HELP, DIAG, PROBE, COMPILE, REFRESH, LOG, MENU, PROFILE, BUILD
 │   │       ├── Scene/         # Scene manipulation, play mode, windows
 │   │       ├── Prefab/        # Prefab creation/instantiation
 │   │       ├── Component/     # Component inspection & modification
@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (CODE_ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.41)
+│   └── package.json           # UPM manifest (v1.1.42)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -232,17 +232,17 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `REFRESH` - Force asset database refresh
 - `LOG [filter]` - Get bridge-captured Unity logs; use `LOG ui errors` for current USS/UXML/TSS import errors
   - Commands that reference `.uss`, `.uxml`, or `.tss` assets append matching UI Toolkit import errors automatically
-- `STACK_MINIMIZE` - Minimize a stack trace for AI
 - `MENU path` - Execute a Unity menu item (e.g. `MENU Window/General/Console`)
 - `PROFILE [enable|disable|clear|hierarchy]` - Control profiler and read performance data
+- `BUILD [--run] [--dev] [--output <path>]` - Build the Unity Player (active target). Streams progress + errors. `--run` launches Standalone after success. Default output: `Builds/<Target>/<ProductName>`. Other commands auto-block during the build.
 
 ### Code
 - `CODE_ANALYZE query` - Unified code analysis (works offline via Roslyn daemon):
   - `CODE_ANALYZE ClassName` → deep view (definition, usages, derived types, GetComponent sites, own members)
   - `CODE_ANALYZE ClassName.Member` → zoom into one member
   - `CODE_ANALYZE method:Name` | `field:Name` | `property:Name` | `inherits:Type` | `attribute:Name` → kind-prefixed listing across the codebase
-- `CODE_EXEC code` - Compile and execute C# code (fire-and-forget)
-- `CODE_EXEC_RETURN code` - Compile and execute C# code (waits for result, returns type)
+- `CODE_EXEC code` - Compile and execute C# code (fire-and-forget). Alias: `EXEC`
+- `CODE_EXEC_RETURN code` - Compile and execute C# code (waits for result, returns type). Alias: `EVAL`
 - `CODE_EXEC_RETURN code --inspect [depth] [--private]` - Execute and dump result object tree
 - `CODE_EXEC_RETURN code --trace [--maxlines N] [--from N] [--only var] [--vars x,y] [--skip pattern]` - Execute with line-by-line trace
 - `TEST [mode] [groups...] [--category X,Y] [--tests Full.Name,Other.Name]` - Run Unity tests (streaming)
@@ -296,7 +296,7 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `ASSET_DELETE path [path2...]` - Delete assets (batch)
 - `ASSET_MKDIR path [path2...]` - Create folders (nested, batch)
 - `ASSET_LABEL path [+add -remove]` - Get/set asset labels
-- `ASSET_RESERIALIZE [paths...]` - Force re-validate and re-import assets (fixes corrupted YAML)
+- `ASSET_RESERIALIZE [paths...]` - Force re-validate and re-import assets (fixes corrupted YAML). Alias: `REIMPORT`
 
 ### Screenshot (single command, smart routing)
 - `SCREENSHOT [view]` - CLI-side window capture (default `editor`; views: `editor|scene|inspector|hierarchy|console|project|profiler`). Downscaled to max 1280px.

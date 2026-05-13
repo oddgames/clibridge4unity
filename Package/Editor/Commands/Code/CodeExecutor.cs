@@ -84,6 +84,7 @@ namespace clibridge4unity
                     "  NOTE: put the temp .cs file OUTSIDE the Unity project (e.g. $TEMP, /tmp, ~/.cache) —\n" +
                     "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
             RequiresMainThread = false,
+            Aliases = new[] { "EXEC" },
             RelatedCommands = new[] { "CODE_EXEC_RETURN", "LOG" })]
         public static async Task<string> Execute(string code)
         {
@@ -200,6 +201,7 @@ namespace clibridge4unity
                     "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
             RequiresMainThread = false,
             TimeoutSeconds = 30,
+            Aliases = new[] { "EVAL" },
             RelatedCommands = new[] { "CODE_EXEC", "LOG" })]
         public static async Task<string> ExecuteReturn(string code)
         {

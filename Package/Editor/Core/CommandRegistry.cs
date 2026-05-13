@@ -30,6 +30,7 @@ namespace clibridge4unity
         public bool IsStreaming { get; set; }
         public int TimeoutSeconds { get; set; }
         public string[] RelatedCommands { get; set; }
+        public string[] Aliases { get; set; }
         public MethodInfo Method { get; set; }
         public object Instance { get; set; }
     }
@@ -525,7 +526,7 @@ namespace clibridge4unity
                                 continue;
                             }
 
-                            _commands[attr.Name] = new CommandInfo
+                            var info = new CommandInfo
                             {
                                 Name = attr.Name,
                                 Description = attr.Description,
@@ -536,9 +537,16 @@ namespace clibridge4unity
                                 TimeoutSeconds = attr.TimeoutSeconds > 0 ? attr.TimeoutSeconds
                                     : attr.RequiresMainThread ? 25 : 10,
                                 RelatedCommands = attr.RelatedCommands ?? Array.Empty<string>(),
+                                Aliases = attr.Aliases ?? Array.Empty<string>(),
                                 Method = method,
                                 Instance = method.IsStatic ? null : GetOrCreateInstance(type)
                             };
+                            _commands[attr.Name] = info;
+                            foreach (var alias in info.Aliases)
+                            {
+                                if (string.IsNullOrWhiteSpace(alias)) continue;
+                                _commands[alias.ToUpperInvariant()] = info;
+                            }
                         }
                     }
                 }
@@ -565,7 +573,7 @@ namespace clibridge4unity
         // All other commands are blocked while _isBuildingPlayer is true.
         private static readonly HashSet<string> BuildBypassCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "PING", "DIAG", "STATUS", "PROBE", "HELP", "LOG", "STACK_MINIMIZE"
+            "PING", "DIAG", "STATUS", "PROBE", "HELP", "LOG"
         };
 
         // Cached `BuildPipeline.isBuildingPlayer` flag — that API is main-thread-only, so we poll
@@ -593,7 +601,7 @@ namespace clibridge4unity
         private static readonly HashSet<string> CompileErrorBypassCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "PING", "HELP", "DIAG", "LOG", "STATUS", "COMPILE", "REFRESH", "DISMISS",
-            "PROBE", "STACK_MINIMIZE", "CODE_EXEC", "CODE_EXEC_RETURN"
+            "PROBE", "CODE_EXEC", "CODE_EXEC_RETURN"
         };
 
 
@@ -603,11 +611,14 @@ namespace clibridge4unity
             if (cmd == null)
                 return Response.Error($"Unknown command: {name}. Use HELP for available commands.");
 
+            // Use canonical (primary) name for bypass checks so aliases resolve consistently.
+            string canonicalName = cmd.Name;
+
             // Block commands during Player Build — main thread is monopolised by the build,
             // so any RequiresMainThread command will time out + bubble as a build failure.
             // Allow only read-only diagnostics that don't need main thread.
             // (Reads cached flag — `BuildPipeline.isBuildingPlayer` itself is main-thread-only.)
-            if (_isBuildingPlayer && !BuildBypassCommands.Contains(name))
+            if (_isBuildingPlayer && !BuildBypassCommands.Contains(canonicalName))
             {
                 return Response.Error(
                     $"Unity is in the middle of a Player Build — '{name}' is blocked to prevent timeouts.\n" +
@@ -616,7 +627,7 @@ namespace clibridge4unity
             }
 
             // Block commands when there are compile errors (except diagnostic/fix commands)
-            if (GetCompileErrors != null && !CompileErrorBypassCommands.Contains(name))
+            if (GetCompileErrors != null && !CompileErrorBypassCommands.Contains(canonicalName))
             {
                 try
                 {
@@ -730,6 +741,8 @@ namespace clibridge4unity
                     var sb2 = new StringBuilder();
                     sb2.AppendLine($"{cmd.Name} — {cmd.Description}");
                     sb2.AppendLine($"Category: {cmd.Category}");
+                    if (cmd.Aliases != null && cmd.Aliases.Length > 0)
+                        sb2.AppendLine($"Aliases: {string.Join(", ", cmd.Aliases)}");
                     if (cmd.RequiresMainThread) sb2.AppendLine("Requires main thread: yes");
                     if (!string.IsNullOrEmpty(cmd.Usage))
                     {
@@ -750,6 +763,7 @@ namespace clibridge4unity
             sb.AppendLine();
 
             var grouped = _commands.Values
+                .Distinct()
                 .OrderBy(c => c.Category)
                 .ThenBy(c => c.Name)
                 .GroupBy(c => c.Category);
@@ -759,7 +773,10 @@ namespace clibridge4unity
                 sb.AppendLine($"[{group.Key}]");
                 foreach (var cmd in group)
                 {
-                    sb.AppendLine($"  {cmd.Name,-20} {cmd.Description}");
+                    string aliasSuffix = (cmd.Aliases != null && cmd.Aliases.Length > 0)
+                        ? $" (aliases: {string.Join(", ", cmd.Aliases)})"
+                        : string.Empty;
+                    sb.AppendLine($"  {cmd.Name,-20} {cmd.Description}{aliasSuffix}");
                     if (verbose && !string.IsNullOrEmpty(cmd.Usage) && cmd.Usage != cmd.Name)
                     {
                         foreach (var line in cmd.Usage.Split('\n'))

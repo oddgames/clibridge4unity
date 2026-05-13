@@ -173,20 +173,6 @@ namespace clibridge4unity
             return sb.ToString().TrimEnd();
         }
 
-#if UNITY_EDITOR
-        [BridgeCommand("STACK_MINIMIZE", "Minimize a stack trace for AI (strips internal frames, shortens paths)",
-            Category = "Core",
-            Usage = "STACK_MINIMIZE <stack trace text>")]
-        public static string MinimizeCommand(string data)
-        {
-            if (string.IsNullOrWhiteSpace(data))
-                return Response.Error("Provide a stack trace to minimize");
-
-            string result = Minimize(data);
-            return string.IsNullOrEmpty(result) ? "No frames found" : result;
-        }
-#endif
-
         private static bool IsFrameLine(string line)
         {
             return line.StartsWith("at ") || line.Contains(" at ") || UnityFrameRegex.IsMatch(line);

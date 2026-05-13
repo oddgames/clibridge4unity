@@ -204,7 +204,8 @@ namespace clibridge4unity
             Usage = "ASSET_RESERIALIZE                              (entire project)\n" +
                     "  ASSET_RESERIALIZE Assets/Prefabs/My.prefab     (specific asset)\n" +
                     "  ASSET_RESERIALIZE Assets/A.prefab Assets/B.mat (batch)",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            Aliases = new[] { "REIMPORT" })]
         public static string Reserialize(string data)
         {
             using var _profile = _markerReserialize.Auto();

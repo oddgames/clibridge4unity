@@ -51,6 +51,12 @@ namespace clibridge4unity
         /// </summary>
         public string[] RelatedCommands { get; set; } = Array.Empty<string>();
 
+        /// <summary>
+        /// Alternate names that resolve to this command (case-insensitive).
+        /// HELP lists them inline; lookups via any alias return the same CommandInfo.
+        /// </summary>
+        public string[] Aliases { get; set; } = Array.Empty<string>();
+
         public BridgeCommandAttribute(string name, string description)
         {
             Name = name?.ToUpperInvariant() ?? throw new ArgumentNullException(nameof(name));

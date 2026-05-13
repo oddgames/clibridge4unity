@@ -12,5 +12,7 @@ namespace clibridge4unity
         public static readonly string UnityHwnd = "Bridge_UnityHwnd";
         public static readonly string MainThreadId = "Bridge_MainThreadId";
         public static readonly string PlayModeStartTime = "Bridge_PlayModeStartTime";
+        public static readonly string LastBuildPath = "Bridge_LastBuildPath";
+        public static readonly string LastBuildTarget = "Bridge_LastBuildTarget";
     }
 }

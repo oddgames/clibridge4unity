@@ -15,7 +15,7 @@ tool_claude_unity_bridge/
 │   ├── Editor/
 │   │   ├── Core/                  # BridgeServer, CommandRegistry, BridgeCommand
 │   │   └── Commands/              # Command implementations by category
-│   │       ├── Core/              # PING, STATUS, HELP, DIAG, PROBE, COMPILE, REFRESH, LOG, MENU, PROFILE, STACK_MINIMIZE
+│   │       ├── Core/              # PING, STATUS, HELP, DIAG, PROBE, COMPILE, REFRESH, LOG, MENU, PROFILE, BUILD
 │   │       ├── Scene/             # Scene/hierarchy/play mode commands
 │   │       ├── Prefab/            # Prefab creation/instantiation/save
 │   │       ├── Component/         # Component inspection & modification
@@ -35,7 +35,7 @@ tool_claude_unity_bridge/
 - Reconnection after assembly reload
 
 ### Commands
-- **Core**: PING, HELP, PROBE, DIAG, STATUS, COMPILE, REFRESH, LOG, STACK_MINIMIZE, MENU, PROFILE
+- **Core**: PING, HELP, PROBE, DIAG, STATUS, COMPILE, REFRESH, LOG, MENU, PROFILE, BUILD
 - **CLI-side**: LINT (syntax + UXML/USS, fails fast at 20s), LINT semantic (type-binding), CODE_ANALYZE, SETUP, UPDATE, OPEN, WAKEUP, DISMISS, SCREENSHOT (window capture)
 - **Unity Code**: CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG
 - **Scene**: CREATE, FIND, DELETE, SAVE, LOAD, SCENEVIEW, WINDOWS, PLAY, STOP, PAUSE, STEP, PLAYMODE, GAMEVIEW
@@ -70,4 +70,4 @@ clibridge4unity LOG --filter "MyClass"
 
 ## Version
 
-Current: 1.1.41
+Current: 1.1.42

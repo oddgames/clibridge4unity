@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.1.42 — 2026-05-13
+
+## v1.1.42
+
+### New
+- `BUILD [--run] [--dev] [--output <path>]` command — builds the Unity Player using the active build target. Streams progress + errors/warnings live over the pipe. `--run` launches Standalone (Win/Mac/Linux) after a successful build; Android/WebGL print install/serve hints. Default output: `Builds/<Target>/<ProductName>`. Other commands auto-block during the build via existing `BuildBypassCommands` allowlist.
+- `BridgeCommand.Aliases` — attribute now accepts alternate names that resolve to the same command. HELP renders them inline as `(aliases: X, Y)`. Bypass checks resolve aliases to canonical names so Player-Build / compile-error allowlists behave correctly.
+- Command aliases (industry-standard naming, old names still work):
+  - `EXEC` → `CODE_EXEC`
+  - `EVAL` → `CODE_EXEC_RETURN`
+  - `REIMPORT` → `ASSET_RESERIALIZE`
+
+### Removed
+- `STACK_MINIMIZE` command — was an internal-only utility never exercised externally. The `StackTraceMinimizer` class is still used internally by `LogCommands` for path shortening; only the public bridge command was dropped.
+
+### Internal
+- `SessionKeys.LastBuildPath` / `LastBuildTarget` persist the last build path across domain reloads.
+- CLI `hintWorthy` list updated to surface the `LAST` replay hint for `BUILD`, `EXEC`, `EVAL`.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.41 — 2026-05-12
 
 ## v1.1.41

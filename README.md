@@ -122,7 +122,7 @@ The generated docs tell AI assistants which commands are available, when to use 
 
 | Category | Commands |
 |----------|----------|
-| **Core** | `PING` `PROBE` `DIAG` `STATUS` `HELP` `COMPILE` `REFRESH` `LOG` `STACK_MINIMIZE` `MENU` `PROFILE` |
+| **Core** | `PING` `PROBE` `DIAG` `STATUS` `HELP` `COMPILE` `REFRESH` `LOG` `MENU` `PROFILE` `BUILD` |
 | **Lint (offline, no Unity needed)** | `LINT` — syntax check + UXML well-formedness + USS brace/quote balance. Sub-second, fails fast at 20s. `LINT unity` — per-asmdef compile (asmdef-aware, type-binding, 60s budget). **Prefer over `COMPILE` first.** Daemon FileSystemWatcher catches errors in new files Unity hasn't seen. |
 | **Code** | `CODE_EXEC` `CODE_EXEC_RETURN` `TEST` `DEBUG` |
 | **Scene** | `CREATE` `FIND` `DELETE` `SAVE` `LOAD` `PLAY` `STOP` `PAUSE` `STEP` `PLAYMODE` `SCENEVIEW` `GAMEVIEW` `WINDOWS` `MENU` |

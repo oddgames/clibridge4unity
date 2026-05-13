@@ -19,7 +19,7 @@ Package/
 │       └── UI/                # UI_DISCOVER, SCREENSHOT
 ├── Runtime/                   # (Currently unused)
 ├── Tools/                     # Pre-built CLI executables (win/osx/linux)
-└── package.json               # UPM manifest (v1.1.41)
+└── package.json               # UPM manifest (v1.1.42)
 ```
 
 ## Key Architecture
@@ -66,7 +66,7 @@ The system uses a dedicated polling thread (10ms cycle) + `SynchronizationContex
 - LOG command queries Unity's Console via `LogEntries` reflection on demand
 
 ### Build-Block Guard
-- All commands except read-only diagnostics (`PING`, `DIAG`, `STATUS`, `PROBE`, `HELP`, `LOG`, `STACK_MINIMIZE`) auto-block during Unity Player Build
+- All commands except read-only diagnostics (`PING`, `DIAG`, `STATUS`, `PROBE`, `HELP`, `LOG`) auto-block during Unity Player Build
 - `BuildPipeline.isBuildingPlayer` polled at 2Hz from `EditorApplication.update` (main-thread only API), cached `volatile bool` read from threadpool
 - Returns clear error instead of timing out + bubbling as a build failure
 

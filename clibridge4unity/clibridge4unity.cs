@@ -1001,8 +1001,8 @@ class Program
             // would reach for `| head` / `| tail` (LINT, COMPILE, LOG, INSPECTOR, etc.). Skip
             // for short ones (PING/PROBE/DIAG/STATUS/SETUP/etc.) so the hint isn't pure noise.
             bool hintWorthy = firstUpper is "LINT" or "COMPILE" or "REFRESH" or "LOG" or "INSPECTOR"
-                              or "CODE_ANALYZE" or "CODE_EXEC" or "CODE_EXEC_RETURN" or "TEST"
-                              or "ASSET_SEARCH" or "ASSET_DISCOVER" or "UI_DISCOVER" or "FIND";
+                              or "CODE_ANALYZE" or "CODE_EXEC" or "CODE_EXEC_RETURN" or "EXEC" or "EVAL" or "TEST"
+                              or "BUILD" or "ASSET_SEARCH" or "ASSET_DISCOVER" or "UI_DISCOVER" or "FIND";
             if (!versionOnly && !isReplayCmd && hintWorthy)
                 try { Console.Error.WriteLine("[hint] reuse: `LAST` (full) | `LAST -tail 50` | `LAST -grep ERROR` | `LAST -list` (last 10) | `LAST 3` (3rd most recent)"); } catch { }
             CliTrace("Main", "finally exit");
@@ -2497,7 +2497,8 @@ class Program
         {
             // For CODE_EXEC commands, resolve file paths and fix shell mangling
             if (!string.IsNullOrEmpty(data) &&
-                (command == "CODE_EXEC" || command == "CODE_EXEC_RETURN"))
+                (command == "CODE_EXEC" || command == "CODE_EXEC_RETURN" ||
+                 command == "EXEC" || command == "EVAL"))
             {
                 // Detect file path input:
                 //   @script.cs           — explicit @ prefix
