@@ -1515,9 +1515,11 @@ class Program
         }
 
         // KILL: force-terminate Unity for this project (no restart) — CLI-side, no pipe needed
+        // KILL --all              kill every Unity instance on the machine
+        // KILL <substring>        kill Unity instances whose project path matches substring
         if (command.Equals("KILL", StringComparison.OrdinalIgnoreCase))
         {
-            return HandleKill(projectPath, unityInfo);
+            return HandleKill(projectPath, unityInfo, data);
         }
 
         // WAKEUP: bring Unity to foreground — CLI-side, no pipe needed
@@ -2004,20 +2006,37 @@ class Program
     /// <summary>
     /// CLI-side KILL command — terminates Unity for the targeted project without restarting.
     /// </summary>
-    static int HandleKill(string projectPath, UnityProcessInfo unityInfo)
+    static int HandleKill(string projectPath, UnityProcessInfo unityInfo, string data)
     {
-        if (unityInfo.State != UnityProcessState.Running &&
-            unityInfo.State != UnityProcessState.Importing)
+        if (unityInfo.State == UnityProcessState.Running ||
+            unityInfo.State == UnityProcessState.Importing)
         {
-            Console.Error.WriteLine($"Unity is not running for this project (state: {unityInfo.State}).");
+            string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
+            Console.Error.WriteLine($"Force-terminating Unity for '{projectName}' — unsaved work will be LOST.");
+            int killed = KillUnityProcesses(unityInfo);
+            Console.WriteLine($"Killed {killed} Unity process(es) for '{projectName}'.");
+            Console.WriteLine($"Use 'clibridge4unity OPEN' to restart.");
             return EXIT_SUCCESS;
         }
 
-        string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
-        Console.Error.WriteLine($"Force-terminating Unity for '{projectName}' — unsaved work will be LOST.");
-        int killed = KillUnityProcesses(unityInfo);
-        Console.WriteLine($"Killed {killed} Unity process(es) for '{projectName}'.");
-        Console.WriteLine($"Use 'clibridge4unity OPEN' to restart.");
+        if (unityInfo.State == UnityProcessState.DifferentProject)
+        {
+            string expected = NormalizeProjectPath(projectPath);
+            Console.Error.WriteLine($"Unity is not running for this project.");
+            Console.Error.WriteLine($"  expected: {expected}");
+            Console.Error.WriteLine($"  running Unity instances:");
+            var workspaces = unityInfo.AllWorkspaces != null && unityInfo.AllWorkspaces.Count > 0
+                ? unityInfo.AllWorkspaces
+                : EnumerateUnityWorkspaces();
+            foreach (var w in workspaces)
+            {
+                string norm = string.IsNullOrEmpty(w.ProjectPath) ? "?" : NormalizeProjectPath(w.ProjectPath);
+                Console.Error.WriteLine($"    pid={w.Pid}  {norm}");
+            }
+            return EXIT_SUCCESS;
+        }
+
+        Console.Error.WriteLine($"Unity is not running for this project (state: {unityInfo.State}).");
         return EXIT_SUCCESS;
     }
 
@@ -4262,11 +4281,34 @@ class Program
         // Determine state: lockfile is most reliable, then command line match, then window title
         if (!lockfileHeld && !foundProject)
         {
-            // No Unity matched this project — enumerate every running workspace so the
-            // user can see exactly which instances exist (and why we couldn't find theirs).
-            info.AllWorkspaces = EnumerateUnityWorkspaces();
-            info.State = allUnityPids.Count > 0 ? UnityProcessState.DifferentProject : UnityProcessState.NotRunning;
-            return info;
+            // Last-resort match: enumerate workspaces and compare normalized project paths.
+            // Catches edge cases where substring `Contains` failed (trailing slash, mixed slashes,
+            // path casing differences, quoted paths inside the command line, etc.).
+            var workspaces = EnumerateUnityWorkspaces();
+            string expectedNorm = NormalizeProjectPath(projectPath);
+            foreach (var w in workspaces)
+            {
+                if (string.IsNullOrEmpty(w.ProjectPath)) continue;
+                if (NormalizeProjectPath(w.ProjectPath) == expectedNorm)
+                {
+                    unityPids.Add(w.Pid);
+                    foundProject = true;
+                    info.MatchedByCommandLine = true;
+                    if (string.IsNullOrEmpty(info.TargetedWindowTitle) && !string.IsNullOrEmpty(w.WindowTitle))
+                        info.TargetedWindowTitle = w.WindowTitle;
+                }
+            }
+
+            if (!foundProject)
+            {
+                // No Unity matched this project — enumerate every running workspace so the
+                // user can see exactly which instances exist (and why we couldn't find theirs).
+                info.AllWorkspaces = workspaces;
+                info.State = allUnityPids.Count > 0 ? UnityProcessState.DifferentProject : UnityProcessState.NotRunning;
+                return info;
+            }
+
+            info.Pids = unityPids;
         }
 
         // Unity has this project open

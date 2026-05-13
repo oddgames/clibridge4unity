@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.43 — 2026-05-13
+
+## v1.1.43
+
+### Fixed
+- Unity-process detection now does a normalized-path match pass against `-projectPath` from every running Unity command line. Catches edge cases where the substring `Contains` check failed (trailing slash, mixed slashes, path casing differences, quoted paths) — fixes spurious `state: DifferentProject` when Unity *is* running for the target project.
+- `KILL` now prints the expected normalized path + a list of running Unity workspaces (pid + normalized path) when state is `DifferentProject`, instead of the bare "not running" message — makes it obvious why detection didn't match.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.42 — 2026-05-13
 
 ## v1.1.42
