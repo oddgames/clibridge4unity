@@ -5,6 +5,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
@@ -54,13 +56,26 @@ internal static class LintUnity
         public int UserAsmdefCount;      // debug: how many user asmdefs detected
         public int SourceGeneratorCount; // discovered Roslyn source generators
         public int SourceGeneratorFailures; // failed to load (version mismatch etc)
+        public int FreshAsmdefCount;     // asmdefs skipped because their prebuilt DLL was up-to-date
         public string UnityVersion;
     }
 
     /// <summary>Run the Unity-faithful lint on USER asmdefs only. Package asmdefs use their
     /// Library/ScriptAssemblies/<name>.dll as MetadataReference (Unity already compiled them).
-    /// Sub-10s on most projects (typically <10 user asmdefs).</summary>
-    public static RunResult Run(string projectPath, IReadOnlyDictionary<string, string> fileTexts = null)
+    /// Sub-10s on most projects (typically <10 user asmdefs).
+    ///
+    /// Budgets: hard wall-clock cap (default 30s) AND a no-progress watchdog (default 10s).
+    /// The watchdog kills the current level if no asmdef has completed in 10s — covers the case
+    /// where a single huge asmdef or a runaway source generator stalls everything. Cancellation
+    /// is propagated all the way into <c>compilation.Emit</c>, <c>GetDiagnostics</c>, and the
+    /// source generator driver, so in-flight work is actually killable (without this, Roslyn
+    /// blocks the thread until the compile finishes regardless of the budget).</summary>
+    public static RunResult Run(
+        string projectPath,
+        IReadOnlyDictionary<string, string> fileTexts = null,
+        CancellationToken externalCt = default,
+        int budgetMsOverride = 0,
+        int noProgressMsOverride = 0)
     {
         var swTotal = Stopwatch.StartNew();
         var result = new RunResult();
@@ -125,6 +140,19 @@ internal static class LintUnity
         }
         DetectStaleDlls(projectPath, userAsmdefs, scriptAsmDir, result.StaleDlls);
 
+        // Incremental skip: any user asmdef whose Library/ScriptAssemblies DLL is newer than every
+        // input (source files + .asmdef config) can be reused as-is. Unity already compiled it
+        // successfully — we hand the prebuilt DLL down the DAG as the MetadataReference instead of
+        // recompiling. This is the difference between a 30s run and a sub-second run on no-change
+        // re-invocations, and means edits only re-lint the touched asmdef + its dependents.
+        //
+        // Edge case not detected: a deleted .cs file leaves no source newer than the DLL, so the
+        // asmdef stays "fresh" until Unity recompiles. Acceptable — the DLL also still contains
+        // the deleted file's symbols, so type-binding would still pass; mismatch self-corrects on
+        // next Unity refresh.
+        var freshDllRefs = ComputeFreshAsmdefs(userAsmdefs, scriptAsmDir, prebuiltAsmdefRefs);
+        result.FreshAsmdefCount = freshDllRefs.Count;
+
         // Source generators: discover Roslyn-tagged DLLs across project + packages. Cached after first call.
         var (sourceGenerators, genFailures) = LintSourceGenerators.Discover(projectPath);
         result.SourceGeneratorCount = sourceGenerators.Count;
@@ -146,29 +174,69 @@ internal static class LintUnity
         var levels = TopoLevels(userAsmdefs, graph);
 
         // 5) Compile each level in parallel; emitted refs flow into the next level.
-        //    60s wall-clock budget — abort + return partial results if exceeded so the AI
-        //    sees something instead of waiting forever on huge projects.
-        const int budgetMs = 60_000;
+        //    Two cooperating cut-offs:
+        //     - Hard wall-clock budget (default 30s) — total work cap.
+        //     - No-progress watchdog (default 10s) — kills a level if no asmdef has completed
+        //       in that window. Covers stuck source generators and oversized single asmdefs.
+        //    Both signal via a linked CancellationTokenSource that's passed into Roslyn's
+        //    Emit/GetDiagnostics/GeneratorDriver, so in-flight work actually stops (without
+        //    this, Roslyn blocks the thread until the compile finishes regardless of budget).
+        int budgetMs = budgetMsOverride > 0 ? budgetMsOverride : 30_000;
+        int noProgressMs = noProgressMsOverride > 0 ? noProgressMsOverride : 10_000;
         var emittedRefs = new System.Collections.Concurrent.ConcurrentDictionary<string, MetadataReference>(StringComparer.OrdinalIgnoreCase);
         bool budgetBlown = false;
+        bool noProgressKilled = false;
+        long lastProgressTicks = DateTime.UtcNow.Ticks;
         foreach (var level in levels)
         {
             if (swTotal.ElapsedMilliseconds > budgetMs) { budgetBlown = true; break; }
+            if (externalCt.IsCancellationRequested) { budgetBlown = true; break; }
             int remaining = (int)Math.Max(100, budgetMs - swTotal.ElapsedMilliseconds);
-            using var cts = new System.Threading.CancellationTokenSource(remaining);
+            using var levelCts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
+            levelCts.CancelAfter(remaining);
+
+            // Watchdog: cancel the level if no completion in noProgressMs.
+            Interlocked.Exchange(ref lastProgressTicks, DateTime.UtcNow.Ticks);
+            using var watchdogCts = new CancellationTokenSource();
+            var watchdog = Task.Run(async () =>
+            {
+                while (!watchdogCts.IsCancellationRequested && !levelCts.IsCancellationRequested)
+                {
+                    try { await Task.Delay(500, watchdogCts.Token); }
+                    catch (OperationCanceledException) { return; }
+                    long ticks = Interlocked.Read(ref lastProgressTicks);
+                    var idleMs = (DateTime.UtcNow - new DateTime(ticks, DateTimeKind.Utc)).TotalMilliseconds;
+                    if (idleMs > noProgressMs)
+                    {
+                        noProgressKilled = true;
+                        try { levelCts.Cancel(); } catch { }
+                        return;
+                    }
+                }
+            });
+
             var levelResults = new CompileResult[level.Count];
             try
             {
-                System.Threading.Tasks.Parallel.For(0, level.Count,
-                    new System.Threading.Tasks.ParallelOptions { CancellationToken = cts.Token },
+                Parallel.For(0, level.Count,
+                    new ParallelOptions { CancellationToken = levelCts.Token },
                     i =>
                 {
                     levelResults[i] = CompileOne(level[i], graph, runtimeRefs, editorRefs,
                         new Dictionary<string, MetadataReference>(emittedRefs, StringComparer.OrdinalIgnoreCase),
-                        prebuiltAsmdefRefs, builtinDefines, userDefines, fileTexts, projectRsp, sourceGenerators, projectAllowUnsafe);
+                        prebuiltAsmdefRefs, freshDllRefs, builtinDefines, userDefines, fileTexts, projectRsp,
+                        sourceGenerators, projectAllowUnsafe, levelCts.Token);
+                    Interlocked.Exchange(ref lastProgressTicks, DateTime.UtcNow.Ticks);
                 });
             }
             catch (OperationCanceledException) { budgetBlown = true; }
+            catch (AggregateException ae) when (ae.InnerExceptions.All(e => e is OperationCanceledException))
+            { budgetBlown = true; }
+            finally
+            {
+                try { watchdogCts.Cancel(); } catch { }
+                try { watchdog.Wait(1000); } catch { }
+            }
             foreach (var r in levelResults)
             {
                 if (r == null) continue;
@@ -181,7 +249,12 @@ internal static class LintUnity
         swTotal.Stop();
         result.TotalMs = swTotal.ElapsedMilliseconds;
         if (budgetBlown)
-            result.Error = $"LINT unity exceeded 60s budget — partial results above. Run COMPILE for full check.";
+        {
+            string reason = noProgressKilled
+                ? $"no asmdef completed in {noProgressMs}ms (stuck source generator or oversized asmdef)"
+                : $"exceeded {budgetMs}ms wall-clock budget";
+            result.Error = $"LINT unity stopped early — {reason}. Partial results above. Run COMPILE for full check.";
+        }
         return result;
     }
 
@@ -345,6 +418,46 @@ internal static class LintUnity
         };
     }
 
+    /// <summary>For each user asmdef, return its prebuilt DLL as a MetadataReference if and
+    /// only if the DLL is newer than the .asmdef config AND every source file. Caller skips
+    /// the compile entirely for these — Unity already produced a successful build, so the
+    /// emitted reference for downstream asmdefs is just the existing DLL.
+    /// Reuses entries from <paramref name="prebuiltAsmdefRefs"/> so we don't double-load.</summary>
+    static Dictionary<string, MetadataReference> ComputeFreshAsmdefs(
+        List<LintAsmdef.AsmdefNode> userAsmdefs,
+        string scriptAsmDir,
+        Dictionary<string, MetadataReference> prebuiltAsmdefRefs)
+    {
+        var fresh = new Dictionary<string, MetadataReference>(StringComparer.OrdinalIgnoreCase);
+        if (!Directory.Exists(scriptAsmDir)) return fresh;
+        foreach (var node in userAsmdefs)
+        {
+            if (node.AsmdefPath == null) continue;       // predefined Assembly-CSharp* — always recompile
+            if (node.SourceFiles.Count == 0) continue;
+            string dll = Path.Combine(scriptAsmDir, node.Name + ".dll");
+            if (!File.Exists(dll)) continue;
+            DateTime dllMtime;
+            try { dllMtime = File.GetLastWriteTimeUtc(dll); } catch { continue; }
+
+            bool stale = false;
+            try { if (File.GetLastWriteTimeUtc(node.AsmdefPath) > dllMtime) stale = true; }
+            catch { stale = true; }
+            if (!stale)
+            {
+                foreach (var f in node.SourceFiles)
+                {
+                    try { if (File.GetLastWriteTimeUtc(f) > dllMtime) { stale = true; break; } }
+                    catch { stale = true; break; }
+                }
+            }
+            if (stale) continue;
+
+            if (prebuiltAsmdefRefs.TryGetValue(node.Name, out var pre)) fresh[node.Name] = pre;
+            else { try { fresh[node.Name] = MetadataReference.CreateFromFile(dll); } catch { } }
+        }
+        return fresh;
+    }
+
     /// <summary>For each user asmdef, find its compiled DLL in Library/ScriptAssemblies and check
     /// whether any of its source files are NEWER than the DLL. Helps explain false-positive
     /// missing-type errors: "Unity hasn't recompiled this asmdef since the source change".</summary>
@@ -459,11 +572,13 @@ internal static class LintUnity
         List<MetadataReference> runtimeRefs, List<MetadataReference> editorRefs,
         Dictionary<string, MetadataReference> emittedRefs,
         Dictionary<string, MetadataReference> prebuiltAsmdefRefs,
+        IReadOnlyDictionary<string, MetadataReference> freshDllRefs,
         string[] builtinDefines, string[] userDefines,
         IReadOnlyDictionary<string, string> fileTexts,
         LintCscRsp.Options projectRsp,
         IReadOnlyList<Microsoft.CodeAnalysis.ISourceGenerator> sourceGenerators,
-        bool projectAllowUnsafe)
+        bool projectAllowUnsafe,
+        CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
         var result = new CompileResult { Node = node };
@@ -473,6 +588,18 @@ internal static class LintUnity
         {
             result.Skipped = true;
             result.SkipReason = "no .cs files";
+            sw.Stop(); result.ElapsedMs = sw.ElapsedMilliseconds;
+            return result;
+        }
+
+        // Incremental fast-path: if Unity's prebuilt DLL is newer than every input, reuse it
+        // verbatim as the downstream MetadataReference and skip the compile. Computed up-front
+        // in ComputeFreshAsmdefs (see Run for the rationale + edge cases).
+        if (freshDllRefs != null && freshDllRefs.TryGetValue(node.Name, out var freshRef))
+        {
+            result.Skipped = true;
+            result.SkipReason = "DLL up-to-date (no source changes)";
+            result.EmittedRef = freshRef;
             sw.Stop(); result.ElapsedMs = sw.ElapsedMilliseconds;
             return result;
         }
@@ -670,15 +797,21 @@ internal static class LintUnity
                 specificDiagnosticOptions: diagOpts));
 
         // Run discovered source generators so types they emit (Burst, Mirror, MessagePack-CSharp,
-        // Photon Fusion, etc.) are visible to GetDiagnostics + Emit.
+        // Photon Fusion, etc.) are visible to GetDiagnostics + Emit. Cancellation is forwarded
+        // — a runaway generator must be killable or the whole lint hangs.
         if (sourceGenerators != null && sourceGenerators.Count > 0)
-            compilation = LintSourceGenerators.RunGenerators(compilation, sourceGenerators, parseOpts);
+        {
+            ct.ThrowIfCancellationRequested();
+            compilation = LintSourceGenerators.RunGenerators(compilation, sourceGenerators, parseOpts, ct);
+        }
 
-        // Emit to in-memory bytes so downstream asmdefs can ref this one.
+        // Emit to in-memory bytes so downstream asmdefs can ref this one. Cancellation is
+        // forwarded so the level watchdog / budget can actually stop a long compile.
         try
         {
+            ct.ThrowIfCancellationRequested();
             using var ms = new MemoryStream();
-            var emit = compilation.Emit(ms);
+            var emit = compilation.Emit(ms, cancellationToken: ct);
             // Even if Emit fails, GetDiagnostics gives us all type errors. Use Emit's diagnostics
             // as the authoritative set — they include the emit-stage checks (unsafe, IVT, etc).
             foreach (var d in emit.Diagnostics) result.Diagnostics.Add(d);
@@ -690,15 +823,21 @@ internal static class LintUnity
             else
             {
                 // Even if emit failed, still expose diagnostics-only path.
-                foreach (var d in compilation.GetDiagnostics()) result.Diagnostics.Add(d);
+                foreach (var d in compilation.GetDiagnostics(ct)) result.Diagnostics.Add(d);
                 // Dedupe.
                 result.Diagnostics = result.Diagnostics.Distinct().ToList();
             }
         }
+        catch (OperationCanceledException)
+        {
+            result.Skipped = true;
+            result.SkipReason = "cancelled (budget or no-progress watchdog)";
+        }
         catch (Exception ex)
         {
             result.SkipReason = $"emit threw: {ex.GetType().Name}: {ex.Message}";
-            foreach (var d in compilation.GetDiagnostics()) result.Diagnostics.Add(d);
+            try { foreach (var d in compilation.GetDiagnostics(ct)) result.Diagnostics.Add(d); }
+            catch (OperationCanceledException) { }
         }
 
         sw.Stop();
@@ -740,7 +879,8 @@ internal static class LintUnity
                 lines.Add($"{rel}:{pos.Line + 1}:{pos.Character + 1}: {sev} {d.Id}: {d.GetMessage()}  [{r.Node.Name}]");
             }
         }
-        sb.AppendLine($"Files: {totalFiles}  Errors: {totalErrors}{(includeWarnings ? $"  Warnings: {totalWarnings}" : "")}  Mode: unity (asmdef-aware, {asmdefsCompiled} compiled, {asmdefsSkipped} skipped, {run.UserAsmdefCount} user asmdefs, {run.RefCount} engine refs, {run.FilterDebugCount} dupe-refs filtered, {run.SourceGeneratorCount} source generators, {run.TotalMs}ms)");
+        string incNote = run.FreshAsmdefCount > 0 ? $", {run.FreshAsmdefCount} incremental-skipped" : "";
+        sb.AppendLine($"Files: {totalFiles}  Errors: {totalErrors}{(includeWarnings ? $"  Warnings: {totalWarnings}" : "")}  Mode: unity (asmdef-aware, {asmdefsCompiled} compiled, {asmdefsSkipped} skipped{incNote}, {run.UserAsmdefCount} user asmdefs, {run.RefCount} engine refs, {run.FilterDebugCount} dupe-refs filtered, {run.SourceGeneratorCount} source generators, {run.TotalMs}ms)");
         if (!string.IsNullOrEmpty(run.ProjectRspNote))
             sb.AppendLine(run.ProjectRspNote);
         if (run.StaleDlls.Count > 0)

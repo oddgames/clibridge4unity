@@ -1683,10 +1683,10 @@ class Program
                 }
             }
 
-            // Fallback: parse all Assets/*.cs in-process. 60s budget — covers per-asmdef on big projects.
-            Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass lint (60s budget)");
+            // Fallback: parse all Assets/*.cs in-process. 30s budget — covers per-asmdef on big projects.
+            Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass lint (30s budget)");
             var lintBudget = System.Diagnostics.Stopwatch.StartNew();
-            const int lintBudgetMs = 60_000;
+            const int lintBudgetMs = 30_000;
             string assetsDir = Path.Combine(projectPath, "Assets");
             if (!Directory.Exists(assetsDir))
             {
@@ -1702,7 +1702,7 @@ class Program
             // Replaced the old `semantic` lump-compile mode which false-positived on plugin-heavy projects.
             if (unityMode)
             {
-                Console.Error.WriteLine("[lint] Running unity per-asmdef compile (60s budget)...");
+                Console.Error.WriteLine("[lint] Running unity per-asmdef compile (30s budget, 10s no-progress watchdog)...");
                 var unityRun = LintUnity.Run(projectPath, fileTexts: null);
                 Console.WriteLine(LintUnity.Format(unityRun, projectPath, incWarn));
                 return unityRun.PerAsmdef.Any(r => r.Diagnostics.Any(d => d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error))
@@ -2011,7 +2011,7 @@ class Program
         Console.Error.WriteLine("  SERVE [--port N] [--ttl M] [--public] [--cors] Start local file server (localhost:8420)");
         Console.Error.WriteLine("  CODE_ANALYZE <query>       Offline Roslyn/source analysis");
         Console.Error.WriteLine("  LINT [warnings]            Syntax-only fast check (default, ~1s, catches braces/strings/typos/new files)");
-        Console.Error.WriteLine("  LINT unity [warnings]      Per-asmdef Unity-faithful compile (~5-60s, asmdef-aware, type-binding)");
+        Console.Error.WriteLine("  LINT unity [warnings]      Per-asmdef Unity-faithful compile (~5-30s, asmdef-aware, type-binding; aborts on 10s no-progress)");
         Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");
         Console.Error.WriteLine("  WAKEUP refresh             Bring to foreground + force recompile (Ctrl+R)");
         Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");

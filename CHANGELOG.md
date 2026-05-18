@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.1.45 — 2026-05-18
+
+## v1.1.45
+
+### New
+- `SCREENSHOT <uxml> --el <selector>` now force-unhides the target element and every ancestor before rendering: inline `display: Flex`, `visibility: Visible`, `opacity: 1` overrides USS and UXML `style=` attributes. Lets you screenshot elements that production UI keeps hidden until a runtime trigger fires. On-disk UXML is never touched — only the throwaway render clone is mutated.
+- Render success message reports `force-unhid N ancestor(s)` so it's obvious the screenshot does not represent the production-runtime state.
+
+### Fixed
+- `LINT unity` no longer gets stuck for minutes on big projects. `compilation.Emit()`, `GetDiagnostics()`, and the source-generator driver now all receive a `CancellationToken`, so the wall-clock budget is actually enforceable instead of being silently ignored.
+- Added a no-progress watchdog (10s default): if no asmdef completes in 10s, the level is cancelled and partial results are returned. Covers stuck source generators and oversized single asmdefs.
+- Lowered the wall-clock budget from 60s to 30s now that cancellation actually works.
+- Error message now distinguishes "no asmdef completed in Xms (stuck generator/oversized asmdef)" from "exceeded wall-clock budget" so it's clear which limit fired.
+- Zero-size element error in UXML screenshot updated to point at the cases force-unhide can't fix (width:0, position:absolute offscreen, runtime-only data) instead of generic "make it visible".
+
+### Internal
+- `LintUnity.Run()` now skips per-asmdef compilation for any user asmdef whose `Library/ScriptAssemblies/<name>.dll` is newer than its `.asmdef` config and every source file. The prebuilt DLL is reused as the downstream MetadataReference. No-change re-runs go from ~30s to sub-second; edits only recompile the touched asmdef + its DAG dependents.
+- New `ComputeFreshAsmdefs()` helper centralizes the incremental-skip mtime check; `Format()` now reports `N incremental-skipped` in the mode line so it's visible.
+- `LintSourceGenerators.RunGenerators()` accepts and forwards a `CancellationToken` into `CSharpGeneratorDriver.RunGeneratorsAndUpdateCompilation`.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.44 — 2026-05-13
 
 ## v1.1.44

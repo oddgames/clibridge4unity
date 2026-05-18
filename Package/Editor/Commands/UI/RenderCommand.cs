@@ -371,6 +371,32 @@ namespace clibridge4unity
                     return 0;
                 });
 
+                // If targeting a specific element, force it (and every ancestor up to root) visible
+                // before layout settles. Inline style overrides USS rules and UXML `style=` attrs,
+                // so this beats `display:none`, `visibility:hidden`, and `opacity:0` regardless of
+                // where they were set. We render into a throwaway EditorWindow, so the on-disk UXML
+                // is never modified. Caller intent is clear: "screenshot this element, even if the
+                // production UI keeps it hidden until some runtime trigger fires."
+                int unhiddenCount = 0;
+                if (!string.IsNullOrEmpty(elSelector))
+                {
+                    unhiddenCount = await CommandRegistry.RunOnMainThreadAsync(() =>
+                    {
+                        var target = ResolveSelector(instantiatedRoot, elSelector);
+                        if (target == null) return 0;
+                        int n = 0;
+                        for (var v = target; v != null && v != instantiatedRoot.parent; v = v.parent)
+                        {
+                            v.style.display = DisplayStyle.Flex;
+                            v.style.visibility = Visibility.Visible;
+                            v.style.opacity = 1f;
+                            n++;
+                        }
+                        instantiatedRoot.MarkDirtyRepaint();
+                        return n;
+                    });
+                }
+
                 // Wait for UI Toolkit to layout and paint
                 await Task.Delay(500);
 
@@ -474,12 +500,13 @@ namespace clibridge4unity
                             var wb = el.worldBound;
                             if (float.IsNaN(wb.width) || wb.width <= 0 || wb.height <= 0)
                                 return Response.Error(
-                                    $"Element '{elSelector}' has zero size — likely hidden (display:none, visibility:hidden, or a disabled parent). Make it visible in the UXML/USS first.");
+                                    $"Element '{elSelector}' still has zero size after force-unhiding {unhiddenCount} ancestor(s). Likely cause: width/height is 0, parent uses position:absolute with offscreen coords, or layout depends on runtime data not present in the raw UXML.");
                             cropX = Mathf.Clamp(Mathf.FloorToInt(wb.xMin * dpi), 0, w - 1);
                             cropY = Mathf.Clamp(Mathf.FloorToInt(wb.yMin * dpi), 0, h - 1);
                             cropW = Mathf.Clamp(Mathf.CeilToInt(wb.width * dpi), 1, w - cropX);
                             cropH = Mathf.Clamp(Mathf.CeilToInt(wb.height * dpi), 1, h - cropY);
                             cropNote = $" → element '{elSelector}' ({cropW}x{cropH})";
+                            if (unhiddenCount > 0) cropNote += $", force-unhid {unhiddenCount} ancestor(s)";
                         }
 
                         // Read pixels and fix orientation (GrabPixels returns vertically flipped)

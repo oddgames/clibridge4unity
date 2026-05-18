@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Diagnostics;
@@ -139,16 +140,18 @@ internal static class LintSourceGenerators
     }
 
     /// <summary>Run all discovered source generators against `compilation`. Returns the new
-    /// compilation containing generated trees, or the original if no generators apply.</summary>
-    public static CSharpCompilation RunGenerators(CSharpCompilation compilation, IReadOnlyList<ISourceGenerator> generators, CSharpParseOptions parseOpts)
+    /// compilation containing generated trees, or the original if no generators apply.
+    /// Cancellation is forwarded into the generator driver so a runaway generator can be killed.</summary>
+    public static CSharpCompilation RunGenerators(CSharpCompilation compilation, IReadOnlyList<ISourceGenerator> generators, CSharpParseOptions parseOpts, CancellationToken ct = default)
     {
         if (generators == null || generators.Count == 0) return compilation;
         try
         {
             var driver = CSharpGeneratorDriver.Create(generators, parseOptions: parseOpts);
-            driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(compilation, out var updated, out _);
+            driver = (CSharpGeneratorDriver)driver.RunGeneratorsAndUpdateCompilation(compilation, out var updated, out _, ct);
             return (CSharpCompilation)updated;
         }
+        catch (OperationCanceledException) { throw; }
         catch
         {
             return compilation;
