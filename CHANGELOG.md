@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.46 — 2026-05-21
+
+## v1.1.46
+
+### Fixed
+- **STATUS no longer times out when Unity's main thread is busy.** Previously, asking for STATUS during an asset import / shader compile / domain reload returned a `TimeoutException` after a long wait. It now degrades gracefully: with a 5s soft deadline on the main-thread dispatch, on timeout it returns `Response.SuccessWithData(...)` with `mainThreadBusy: true`, the busy report (heartbeat staleness, queued commands, open dialogs) embedded as `busyReport`, plus cached values (bridge version, last compile times, compile time stats) from background-safe sources. Same response *type* as the happy path — callers can rely on STATUS to always return something useful.
+- **Missing `.meta` file for `BuildCommand.cs`** that caused Unity to log "has no meta file, but it's in an immutable folder. The asset will be ignored" on package install. Added the meta with a fresh GUID.
+
+### Internal
+- Refactored `CoreCommands.GetStatus()` from sync into `async Task<string>`; extracted main-thread-only work into `BuildMainThreadStatus()` helper, gated `playModeDuration` on `isPlaying` to avoid stale SessionState leaking after STOP. Moved the profiler marker inside the sync helper so Begin/End don't span an `await`.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.45 — 2026-05-18
 
 ## v1.1.45

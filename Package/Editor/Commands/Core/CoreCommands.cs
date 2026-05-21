@@ -321,27 +321,106 @@ namespace clibridge4unity
             return sb.ToString().TrimEnd();
         }
 
-        [BridgeCommand("STATUS", "Get Unity Editor status",
+        [BridgeCommand("STATUS", "Get Unity Editor status (degrades gracefully when main thread is busy)",
             Category = "Core",
             Usage = "STATUS",
-            RequiresMainThread = true,
             RelatedCommands = new[] { "DIAG", "LOG", "PROBE" })]
-        public static string GetStatus()
+        public static async System.Threading.Tasks.Task<string> GetStatus()
+        {
+            // SessionState reads are safe from background (already used freely elsewhere),
+            // so derive these up front — they're useful whether or not main thread responds.
+            string lastCompileStr = ReadSessionStateDate(SessionKeys.LastCompileTime);
+            string lastCompileRequestStr = ReadSessionStateDate(SessionKeys.LastCompileRequest);
+            var compileStats = SafeGetCompileTimeStats();
+            string compileTimeAvg = compileStats.HasValue ? $"{compileStats.Value.avg}s" : "unknown";
+            string compileTimeLast = compileStats.HasValue ? $"{compileStats.Value.last}s" : "unknown";
+
+            try
+            {
+                var mt = await CommandRegistry.RunOnMainThreadAsync(
+                    () => BuildMainThreadStatus(), "STATUS", 5000);
+
+                return Response.SuccessWithData(new
+                {
+                    bridgeVersion = BridgeServer.Version,
+                    diagnosticLog = BridgeDiagnostics.LogPath,
+                    mainThreadBusy = false,
+                    isCompiling = mt.isCompiling,
+                    hasCompileErrors = mt.hasCompileErrors,
+                    compileErrorCount = mt.compileErrorCount,
+                    compileErrors = mt.compileErrors,
+                    hasUiToolkitErrors = mt.uiToolkitErrors != null && mt.uiToolkitErrors.Length > 0,
+                    uiToolkitErrorCount = mt.uiToolkitErrors?.Length ?? 0,
+                    uiToolkitErrors = mt.uiToolkitErrors,
+                    consoleErrors = mt.consoleErrors,
+                    consoleWarnings = mt.consoleWarnings,
+                    isPlaying = mt.isPlaying,
+                    isPaused = mt.isPaused,
+                    playModeDuration = mt.playModeDuration,
+                    currentScene = mt.currentScene,
+                    currentScenePath = mt.currentScenePath,
+                    scriptsModified = mt.scriptsModified,
+                    compileRecommended = mt.scriptsModified && !mt.isCompiling,
+                    compileRecommendation = mt.scriptsModified && !mt.isCompiling
+                        ? "Run COMPILE — script changes detected since last compile."
+                        : (mt.isCompiling ? "Compilation in progress." : "Up to date."),
+                    lastCompileRequest = lastCompileRequestStr,
+                    lastCompileFinished = lastCompileStr,
+                    compileTimeAvg,
+                    compileTimeLast,
+                    projectPath = mt.projectPath,
+                    unityVersion = mt.unityVersion,
+                    openWindows = mt.openWindows
+                });
+            }
+            catch (System.TimeoutException tex)
+            {
+                // Main thread blocked — return what we have from background-safe sources
+                // plus the busy report so the caller knows *why* fields are missing.
+                return Response.SuccessWithData(new
+                {
+                    bridgeVersion = BridgeServer.Version,
+                    diagnosticLog = BridgeDiagnostics.LogPath,
+                    mainThreadBusy = true,
+                    busyReport = tex.Message.TrimEnd(),
+                    heartbeatStaleness = CommandRegistry.GetHeartbeatStaleness(),
+                    lastCompileRequest = lastCompileRequestStr,
+                    lastCompileFinished = lastCompileStr,
+                    compileTimeAvg,
+                    compileTimeLast,
+                    recommendation = "Main thread is blocked. Re-run STATUS shortly, or use DIAG for full diagnostics."
+                });
+            }
+        }
+
+        private struct MainThreadStatus
+        {
+            public bool isCompiling;
+            public bool isPlaying;
+            public bool isPaused;
+            public bool hasCompileErrors;
+            public int compileErrorCount;
+            public string[] compileErrors;
+            public string[] uiToolkitErrors;
+            public int consoleErrors;
+            public int consoleWarnings;
+            public string currentScene;
+            public string currentScenePath;
+            public bool scriptsModified;
+            public string projectPath;
+            public string unityVersion;
+            public string[] openWindows;
+            public string playModeDuration;
+        }
+
+        private static MainThreadStatus BuildMainThreadStatus()
         {
             using var _profile = _markerStatus.Auto();
-            var windowList = GetOpenEditorWindowsCached();
+            var result = new MainThreadStatus
+            {
+                openWindows = GetOpenEditorWindowsCached()
+            };
 
-            // Get last compile time from SessionState (survives domain reloads)
-            string lastCompileStr = "never";
-            string lastCompileRequestStr = "never";
-            if (long.TryParse(SessionState.GetString(SessionKeys.LastCompileTime, "0"), out var compileTicks) && compileTicks > 0)
-                lastCompileStr = new System.DateTime(compileTicks).ToString("yyyy-MM-dd HH:mm:ss");
-            if (long.TryParse(SessionState.GetString(SessionKeys.LastCompileRequest, "0"), out var requestTicks) && requestTicks > 0)
-                lastCompileRequestStr = new System.DateTime(requestTicks).ToString("yyyy-MM-dd HH:mm:ss");
-
-            // Check for compile errors
-            bool hasCompileErrors = false;
-            int compileErrorCount = 0;
             var getErrors = CommandRegistry.GetCompileErrors;
             if (getErrors != null)
             {
@@ -349,32 +428,25 @@ namespace clibridge4unity
                 string compileErrors = getErrors();
                 if (compileErrors != null)
                 {
-                    hasCompileErrors = true;
+                    result.hasCompileErrors = true;
                     var match = System.Text.RegularExpressions.Regex.Match(compileErrors, @"COMPILE ERRORS \((\d+)\)");
-                    if (match.Success) compileErrorCount = int.Parse(match.Groups[1].Value);
+                    if (match.Success) result.compileErrorCount = int.Parse(match.Groups[1].Value);
                 }
             }
 
-            // Compile time stats
-            _markerStatusCompileStats.Begin();
-            var compileStats = BridgeServer.GetCompileTimeStats();
-            _markerStatusCompileStats.End();
-            string compileTimeAvg = compileStats.HasValue ? $"{compileStats.Value.avg}s" : "unknown";
-            string compileTimeLast = compileStats.HasValue ? $"{compileStats.Value.last}s" : "unknown";
-
-            // Get Unity Console counts. If the console has zero errors AND zero warnings,
-            // skip the LogEntries reflection sweeps entirely — they iterate every console
-            // entry, which is the slow part on big projects.
             int consoleErrors = 0, consoleWarnings = 0;
             LogCommands.GetConsoleCounts(out consoleErrors, out consoleWarnings);
+            result.consoleErrors = consoleErrors;
+            result.consoleWarnings = consoleWarnings;
 
-            List<string> compileErrorMessages = consoleErrors > 0
+            var compileErrorMessages = consoleErrors > 0
                 ? LogCommands.GetCompileErrorsFromConsole()
                 : new List<string>();
             if (compileErrorMessages.Count > 0)
             {
-                hasCompileErrors = true;
-                compileErrorCount = compileErrorMessages.Count;
+                result.hasCompileErrors = true;
+                result.compileErrorCount = compileErrorMessages.Count;
+                result.compileErrors = compileErrorMessages.ToArray();
             }
 
             var uiToolkitDiagnostics = (consoleErrors > 0 || consoleWarnings > 0)
@@ -384,61 +456,55 @@ namespace clibridge4unity
                 .Where(d => d.IsError)
                 .Select(d => d.ToString())
                 .ToArray();
+            result.uiToolkitErrors = uiToolkitErrors.Length > 0 ? uiToolkitErrors : null;
 
-            // Play mode duration
-            string playModeDuration = null;
-            if (EditorApplication.isPlaying)
+            result.isCompiling = EditorApplication.isCompiling;
+            result.isPlaying = EditorApplication.isPlaying;
+            result.isPaused = EditorApplication.isPaused;
+            result.currentScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+            result.currentScenePath = UnityEngine.SceneManagement.SceneManager.GetActiveScene().path;
+            result.scriptsModified = ScriptsModifiedSinceCompileCached();
+            result.projectPath = Application.dataPath;
+            result.unityVersion = Application.unityVersion;
+            result.playModeDuration = result.isPlaying ? ReadPlayModeDurationFromSession() : null;
+            return result;
+        }
+
+        private static string ReadSessionStateDate(string key)
+        {
+            try
+            {
+                if (long.TryParse(SessionState.GetString(key, "0"), out var ticks) && ticks > 0)
+                    return new System.DateTime(ticks).ToString("yyyy-MM-dd HH:mm:ss");
+            }
+            catch { }
+            return "never";
+        }
+
+        private static string ReadPlayModeDurationFromSession()
+        {
+            try
             {
                 string startStr = SessionState.GetString(SessionKeys.PlayModeStartTime, "0");
-                if (long.TryParse(startStr, out var startTicks) && startTicks > 0)
-                {
-                    var elapsed = System.DateTime.Now - new System.DateTime(startTicks);
-                    playModeDuration = elapsed.TotalMinutes >= 1
-                        ? $"{(int)elapsed.TotalMinutes}m {elapsed.Seconds}s"
-                        : $"{(int)elapsed.TotalSeconds}s";
-                }
+                if (!long.TryParse(startStr, out var startTicks) || startTicks <= 0) return null;
+                var elapsed = System.DateTime.Now - new System.DateTime(startTicks);
+                if (elapsed.TotalSeconds < 0) return null;
+                return elapsed.TotalMinutes >= 1
+                    ? $"{(int)elapsed.TotalMinutes}m {elapsed.Seconds}s"
+                    : $"{(int)elapsed.TotalSeconds}s";
             }
+            catch { return null; }
+        }
 
-            // Current scene
-            string currentScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
-            string currentScenePath = UnityEngine.SceneManagement.SceneManager.GetActiveScene().path;
-
-            // Compute once and reuse — was called 3× in the response object, each going through
-            // the cached helper but still adding work and risking TTL boundary issues.
-            bool scriptsModified = ScriptsModifiedSinceCompileCached();
-            bool isCompiling = EditorApplication.isCompiling;
-
-            return Response.SuccessWithData(new
+        private static (int avg, int last, int count)? SafeGetCompileTimeStats()
+        {
+            try
             {
-                bridgeVersion = BridgeServer.Version,
-                diagnosticLog = BridgeDiagnostics.LogPath,
-                isCompiling,
-                hasCompileErrors,
-                compileErrorCount,
-                compileErrors = compileErrorMessages.Count > 0 ? compileErrorMessages.ToArray() : null,
-                hasUiToolkitErrors = uiToolkitErrors.Length > 0,
-                uiToolkitErrorCount = uiToolkitErrors.Length,
-                uiToolkitErrors = uiToolkitErrors.Length > 0 ? uiToolkitErrors : null,
-                consoleErrors,
-                consoleWarnings,
-                isPlaying = EditorApplication.isPlaying,
-                isPaused = EditorApplication.isPaused,
-                playModeDuration,
-                currentScene,
-                currentScenePath,
-                scriptsModified,
-                compileRecommended = scriptsModified && !isCompiling,
-                compileRecommendation = scriptsModified && !isCompiling
-                    ? "Run COMPILE — script changes detected since last compile."
-                    : (isCompiling ? "Compilation in progress." : "Up to date."),
-                lastCompileRequest = lastCompileRequestStr,
-                lastCompileFinished = lastCompileStr,
-                compileTimeAvg,
-                compileTimeLast,
-                projectPath = Application.dataPath,
-                unityVersion = Application.unityVersion,
-                openWindows = windowList
-            });
+                _markerStatusCompileStats.Begin();
+                return BridgeServer.GetCompileTimeStats();
+            }
+            catch { return null; }
+            finally { _markerStatusCompileStats.End(); }
         }
 
         [BridgeCommand("COMPILE", "Force script recompilation. Pass 'force' to bypass the no-change skip check. " +
