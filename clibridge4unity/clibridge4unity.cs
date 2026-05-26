@@ -10,8 +10,10 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.IO.Pipes;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Net.Http;
@@ -2006,7 +2008,7 @@ class Program
         Console.Error.WriteLine("  --version               Show version information");
         Console.Error.WriteLine();
         Console.Error.WriteLine("CLI-side commands (no Unity pipe needed):");
-        Console.Error.WriteLine("  SETUP                      Install UPM package + generate CLAUDE.md and AGENTS.md");
+        Console.Error.WriteLine("  SETUP                      Install UPM package + per-task skills + generate CLAUDE.md and AGENTS.md");
         Console.Error.WriteLine("  UPDATE                     Self-update CLI + UPM package");
         Console.Error.WriteLine("  SERVE [--port N] [--ttl M] [--public] [--cors] Start local file server (localhost:8420)");
         Console.Error.WriteLine("  CODE_ANALYZE <query>       Offline Roslyn/source analysis");
@@ -5914,11 +5916,15 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         Console.WriteLine();
         InstallHooks(projectPath);
 
-        // Step 4: Configure local sandbox pipe access for Codex-style assistants
+        // Step 4: Install per-task skill files into .claude/skills/
+        Console.WriteLine();
+        InstallSkills(projectPath);
+
+        // Step 5: Configure local sandbox pipe access for Codex-style assistants
         Console.WriteLine();
         ConfigureSandboxPipeAccess(projectPath);
 
-        // Step 5: Generate assistant docs
+        // Step 6: Generate assistant docs
         Console.WriteLine();
         return HandleInstallForSetup(pipeName, projectPath, data);
     }
@@ -6263,6 +6269,164 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         {
             try { File.Delete(oldScript); } catch { }
         }
+    }
+
+    // ─── Skill installation ────────────────────────────────────────────
+    // Embeds curated per-task skill files (skills/*.md) into the CLI exe and
+    // unpacks them into <project>/.claude/skills/ on SETUP. Each installed
+    // file gets a hidden trailer:
+    //     <!-- clibridge4unity:installed-sha=<hex> -->
+    // where <hex> is sha1 of the file's body (everything before the marker,
+    // \r\n normalized to \n, trailing whitespace trimmed, single trailing \n).
+    // On re-install, we recompute the hash for the existing file:
+    //   - hash matches  → user hasn't edited it, safe to overwrite
+    //   - hash differs  → user edited, leave alone with a warning
+    //   - no marker     → user-authored, never touch
+    static void InstallSkills(string projectPath)
+    {
+        string skillsDir = Path.Combine(projectPath, ".claude", "skills");
+
+        try { Directory.CreateDirectory(skillsDir); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Warning: Could not create .claude/skills ({ex.Message})");
+            return;
+        }
+
+        var asm = typeof(Program).Assembly;
+        var resourceNames = asm.GetManifestResourceNames()
+            .Where(n => n.StartsWith("skills/", StringComparison.Ordinal) &&
+                        n.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        if (resourceNames.Count == 0)
+        {
+            Console.WriteLine("[!!] No bundled skills found in this CLI build");
+            return;
+        }
+
+        int installed = 0, updated = 0, unchanged = 0, skipped = 0;
+
+        foreach (var resourceName in resourceNames)
+        {
+            string fileName = resourceName.Substring("skills/".Length);
+            string targetPath = Path.Combine(skillsDir, fileName);
+
+            string body;
+            try
+            {
+                using var stream = asm.GetManifestResourceStream(resourceName);
+                if (stream == null) continue;
+                using var reader = new StreamReader(stream);
+                body = reader.ReadToEnd();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"     skipped     .claude/skills/{fileName} (read error: {ex.Message})");
+                skipped++;
+                continue;
+            }
+
+            string canonical = CanonicalizeSkillBody(body);
+            string newHash = Sha1Hex(canonical);
+            string toWrite = canonical + $"<!-- clibridge4unity:installed-sha={newHash} -->\n";
+
+            if (!File.Exists(targetPath))
+            {
+                try
+                {
+                    File.WriteAllText(targetPath, toWrite);
+                    Console.WriteLine($"     installed   .claude/skills/{fileName}");
+                    installed++;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"     skipped     .claude/skills/{fileName} (write error: {ex.Message})");
+                    skipped++;
+                }
+                continue;
+            }
+
+            string existing;
+            try { existing = File.ReadAllText(targetPath); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"     skipped     .claude/skills/{fileName} (read error: {ex.Message})");
+                skipped++;
+                continue;
+            }
+
+            // Match the entire marker line (with surrounding newlines) so we can excise it
+            // and hash the rest of the file. Catches edits both before AND after the marker.
+            var markerMatch = System.Text.RegularExpressions.Regex.Match(
+                existing,
+                @"(^|\n)[ \t]*<!--\s*clibridge4unity:installed-sha=([0-9a-fA-F]+)\s*-->[ \t]*(\r?\n|$)",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            if (!markerMatch.Success)
+            {
+                Console.WriteLine($"     kept        .claude/skills/{fileName} (user-authored, no clibridge4unity marker)");
+                skipped++;
+                continue;
+            }
+
+            string existingShippedHash = markerMatch.Groups[2].Value.ToLowerInvariant();
+            string remainder = existing.Substring(0, markerMatch.Index) +
+                               existing.Substring(markerMatch.Index + markerMatch.Length);
+            string existingBody = CanonicalizeSkillBody(remainder);
+            string actualHash = Sha1Hex(existingBody);
+
+            if (actualHash != existingShippedHash)
+            {
+                Console.WriteLine($"     kept        .claude/skills/{fileName} (locally modified — delete to re-install)");
+                skipped++;
+                continue;
+            }
+
+            if (existingShippedHash == newHash)
+            {
+                unchanged++;
+                continue;
+            }
+
+            try
+            {
+                File.WriteAllText(targetPath, toWrite);
+                Console.WriteLine($"     updated     .claude/skills/{fileName}");
+                updated++;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"     skipped     .claude/skills/{fileName} (write error: {ex.Message})");
+                skipped++;
+            }
+        }
+
+        var summary = new List<string>();
+        if (installed > 0) summary.Add($"{installed} installed");
+        if (updated > 0)   summary.Add($"{updated} updated");
+        if (unchanged > 0) summary.Add($"{unchanged} up-to-date");
+        if (skipped > 0)   summary.Add($"{skipped} kept");
+        if (summary.Count == 0) summary.Add($"{resourceNames.Count} processed");
+
+        Console.WriteLine($"[OK] .claude/skills: {string.Join(", ", summary)}");
+    }
+
+    static string CanonicalizeSkillBody(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return "\n";
+        string normalized = text.Replace("\r\n", "\n").Replace("\r", "\n").TrimEnd('\n', ' ', '\t');
+        return normalized + "\n";
+    }
+
+    static string Sha1Hex(string text)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(text);
+        byte[] hash = SHA1.HashData(bytes);
+        var sb = new StringBuilder(hash.Length * 2);
+        foreach (var b in hash) sb.Append(b.ToString("x2"));
+        return sb.ToString();
     }
 
     static int EnsureUpmPackage(string projectPath)

@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.1.47 — 2026-05-26
+
+## v1.1.47
+
+### New
+- `SETUP` now installs **12 task-focused skill files** into `.claude/skills/` so Claude Code (and any other skill-aware assistant) can route to per-task guidance instead of a single fat reference:
+  - `unity-bridge` — orientation: when to use which skill, connection, troubleshooting
+  - `unity-run-code` — `CODE_EXEC` / `CODE_EXEC_RETURN` (with file-path tip, `--inspect`, `--trace`)
+  - `unity-find-code` — `CODE_ANALYZE` (symbol-aware search, offline)
+  - `unity-lint` — `STATUS` / `LINT` / `COMPILE` discipline (reactive, not routine)
+  - `unity-scene` — scene hierarchy, GameObjects, play mode, scene/game view
+  - `unity-components` — `COMPONENT_SET` / `ADD` / `REMOVE`, `INSPECTOR`
+  - `unity-prefab` — `PREFAB_*` and prefab-asset inspection
+  - `unity-assets` — `ASSET_*` (search, discover, move, copy, delete, label, reserialize)
+  - `unity-screenshot` — all `SCREENSHOT` routing modes
+  - `unity-ui` — UI Toolkit workflow (`UI_DISCOVER`, UXML rendering, USS import errors)
+  - `unity-tests` — `TEST` modes and filters
+  - `unity-build` — `BUILD` (streaming, `--run`, `--dev`, `--output`)
+
+### Internal
+- Skill files are embedded as resources in `clibridge4unity.exe` (`<EmbeddedResource Include="skills\*.md">`) — no extra files to ship in the UPM Package, and SETUP can install skills before the UPM import finishes.
+- Hash-based overwrite policy: each installed skill ends with `<!-- clibridge4unity:installed-sha=<hex> -->`. On re-install, the existing file's body (everything except the marker line) is rehashed; matching hash → safe to update, mismatch → kept as locally modified, missing marker → kept as user-authored. Detects edits both before AND after the marker line.
+- `unity-lint.md` codifies the "don't COMPILE/LINT proactively" rule: `STATUS` first, only escalate when there's evidence of an issue. `COMPILE` is documented as a last resort (breaks pipe via domain reload).
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.46 — 2026-05-21
 
 ## v1.1.46

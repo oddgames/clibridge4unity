@@ -110,7 +110,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (CODE_ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.46)
+│   └── package.json           # UPM manifest (v1.1.47)
 └── UnityTestProject/          # Test Unity project
 ```
 
@@ -311,7 +311,7 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 ### CLI-side (no Unity connection needed)
 - `LINT` / `LINT semantic` - Offline syntax/semantic check (see Core section above)
 - `CODE_ANALYZE query` - Roslyn-based code analysis (Roslyn daemon, persistent index)
-- `SETUP` - Install UPM package + verify Unity + generate CLAUDE.md and AGENTS.md (alias: `INSTALL`)
+- `SETUP` - Install UPM package + install per-task skills into `.claude/skills/` + verify Unity + generate CLAUDE.md and AGENTS.md (alias: `INSTALL`). Skills are embedded in the CLI exe (`clibridge4unity/skills/*.md`) and unpacked with a SHA-1 trailer; re-running SETUP only overwrites files the user hasn't edited.
 - `UPDATE` - Self-update CLI exe + UPM package tag (no Unity connection needed)
 - `OPEN` - Launch Unity with project (auto-detects Unity version via ProjectVersion.txt)
 - `WAKEUP` - Bring Unity to foreground (targets project via -d)
