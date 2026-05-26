@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.1.49 — 2026-05-26
+
+## v1.1.49
+
+### Fixed
+- **SETUP did not actually refresh UPM when the package version changed** — re-running `clibridge4unity SETUP` after a CLI update would rewrite the git ref in `Packages/manifest.json` but UPM would silently keep using the cached commit hash recorded in `Packages/packages-lock.json`. Symptoms: compile errors against an outdated package (e.g. UI / TestRunner errors that were already fixed upstream), `Library/PackageCache/au.com.oddgames.clibridge4unity@<old-hash>` continuing to be referenced.
+- `EnsureUpmPackage` now calls a new `InvalidateUpmCache` step whenever it changes the URL in `manifest.json`:
+  - Surgically removes our package's entry from `Packages/packages-lock.json` (leaves other packages untouched) so UPM re-resolves the new git ref.
+  - Deletes `Library/PackageCache/au.com.oddgames.clibridge4unity@*` directories so UPM refetches from GitHub rather than reusing the stale clone.
+  - Both ops are best-effort — locked files/dirs are skipped silently so the user can clear them manually.
+
+### Notes
+- If you're upgrading from v1.1.47 / v1.1.48 and your project is still hitting the UnityEngine.UI / TMPro / TestRunner compile errors, run `clibridge4unity SETUP` once more under v1.1.49 — it will now perform the cache invalidation that was missing. Unity will re-resolve on next focus.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.48 — 2026-05-26
 
 ## v1.1.48

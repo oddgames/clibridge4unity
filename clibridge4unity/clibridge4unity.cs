@@ -6465,6 +6465,11 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
                 $"\"{UPM_PACKAGE_NAME}\": \"{gitUrl}\"");
             File.WriteAllText(manifestPath, manifest);
             Console.WriteLine($"[OK] Updated UPM package to v{CLI_VERSION}");
+
+            // CRITICAL: also invalidate packages-lock.json and PackageCache so UPM actually
+            // re-resolves to the new git ref. Without this, UPM keeps using the cached
+            // commit hash from the lock file and the manifest change is silently ignored.
+            InvalidateUpmCache(projectPath);
             return EXIT_SUCCESS;
         }
 
@@ -6499,6 +6504,113 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         Console.WriteLine($"[OK] Added UPM package v{CLI_VERSION}");
         Console.WriteLine($"     Unity will import the package on next focus/refresh.");
         return EXIT_SUCCESS;
+    }
+
+    // Force UPM to re-resolve our package next time Unity refreshes. Called after we change
+    // the git ref in manifest.json — otherwise UPM happily keeps using the cached commit
+    // from packages-lock.json and our manifest update is a no-op until the user manually
+    // clears caches.
+    //
+    // Two surgical changes:
+    //   1) Strip our package's entry from Packages/packages-lock.json (leave others alone).
+    //   2) Delete Library/PackageCache/<our-package>@* directories so UPM refetches.
+    //
+    // Both ops are best-effort — if Unity is running with the lock file open or the cache
+    // dir is locked, we skip silently and the user can clear them manually.
+    static void InvalidateUpmCache(string projectPath)
+    {
+        // 1) Remove our entry from packages-lock.json
+        string lockPath = Path.Combine(projectPath, "Packages", "packages-lock.json");
+        if (File.Exists(lockPath))
+        {
+            try
+            {
+                string lockJson = File.ReadAllText(lockPath);
+                // Locate `"<UPM_PACKAGE_NAME>": { ... },` (or trailing without comma).
+                // The value is a JSON object — find matching braces.
+                string keyToken = $"\"{UPM_PACKAGE_NAME}\"";
+                int keyIdx = lockJson.IndexOf(keyToken, StringComparison.Ordinal);
+                if (keyIdx >= 0)
+                {
+                    int colonIdx = lockJson.IndexOf(':', keyIdx + keyToken.Length);
+                    int objStart = lockJson.IndexOf('{', colonIdx);
+                    if (objStart > 0)
+                    {
+                        // Find matching closing brace (account for nesting and strings).
+                        int depth = 1;
+                        int i = objStart + 1;
+                        bool inString = false;
+                        bool escape = false;
+                        for (; i < lockJson.Length && depth > 0; i++)
+                        {
+                            char c = lockJson[i];
+                            if (escape) { escape = false; continue; }
+                            if (c == '\\' && inString) { escape = true; continue; }
+                            if (c == '"') { inString = !inString; continue; }
+                            if (inString) continue;
+                            if (c == '{') depth++;
+                            else if (c == '}') depth--;
+                        }
+                        if (depth == 0)
+                        {
+                            int objEnd = i; // one past the closing brace
+
+                            // Extend the deletion range to include the leading whitespace/newline
+                            // before the key, and the trailing comma + newline if present.
+                            int startCut = keyIdx;
+                            while (startCut > 0 && (lockJson[startCut - 1] == ' ' ||
+                                                    lockJson[startCut - 1] == '\t'))
+                                startCut--;
+                            // Eat one leading newline so we don't leave a blank line.
+                            if (startCut > 0 && lockJson[startCut - 1] == '\n') startCut--;
+                            if (startCut > 0 && lockJson[startCut - 1] == '\r') startCut--;
+
+                            int endCut = objEnd;
+                            // Eat trailing comma (and following whitespace up to newline).
+                            while (endCut < lockJson.Length && (lockJson[endCut] == ' ' ||
+                                                                lockJson[endCut] == '\t'))
+                                endCut++;
+                            if (endCut < lockJson.Length && lockJson[endCut] == ',')
+                                endCut++;
+
+                            string newLockJson = lockJson.Remove(startCut, endCut - startCut);
+                            File.WriteAllText(lockPath, newLockJson);
+                            Console.WriteLine($"     removed package entry from packages-lock.json");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"     warning: could not update packages-lock.json ({ex.Message})");
+            }
+        }
+
+        // 2) Delete the cached UPM directory(ies) for our package
+        try
+        {
+            string packageCacheDir = Path.Combine(projectPath, "Library", "PackageCache");
+            if (Directory.Exists(packageCacheDir))
+            {
+                int wiped = 0;
+                foreach (var dir in Directory.GetDirectories(packageCacheDir,
+                             UPM_PACKAGE_NAME + "@*"))
+                {
+                    try { Directory.Delete(dir, true); wiped++; }
+                    catch
+                    {
+                        // Unity may have a file lock on the dir; try again later.
+                        // Not fatal — UPM will still re-resolve once the lock file entry is gone.
+                    }
+                }
+                if (wiped > 0)
+                    Console.WriteLine($"     cleared {wiped} cached package directory(ies) from Library/PackageCache");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"     warning: could not clear Library/PackageCache ({ex.Message})");
+        }
     }
 
     static string GetPackageGitUrl()
