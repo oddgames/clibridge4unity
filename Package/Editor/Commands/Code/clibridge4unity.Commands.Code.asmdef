@@ -4,7 +4,9 @@
     "references": [
         "clibridge4unity.Core",
         "clibridge4unity.Commands.Core",
-        "Unity.Newtonsoft.Json"
+        "Unity.Newtonsoft.Json",
+        "UnityEditor.TestRunner",
+        "UnityEngine.TestRunner"
     ],
     "includePlatforms": [
         "Editor"

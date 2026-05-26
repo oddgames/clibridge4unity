@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.1.48 — 2026-05-26
+
+## v1.1.48
+
+### Fixed
+- **Package compiled cleanly only by accident** — UPM package now declares the dependencies it actually needs:
+  - Added `com.unity.ugui` so `UnityEngine.UI` types (Button, Image, Text, Canvas, GraphicRaycaster) used by `UICommands` and `RenderCommand` resolve in fresh projects.
+  - Added `com.unity.test-framework` so the Test Runner API types (`TestRunnerApi`, `ITestAdaptor`, `ITestResultAdaptor`, `ICallbacks`, `TestMode`) used by `TestRunner` resolve in fresh projects.
+  - Added `UnityEditor.TestRunner` and `UnityEngine.TestRunner` to the `clibridge4unity.Commands.Code` asmdef references — they were missing entirely, so the file only compiled when the test framework happened to be present in the host project.
+- Symptom on a fresh Unity 6 project after `clibridge4unity SETUP`:
+  - `CS0234: The type or namespace name 'UI' does not exist in the namespace 'UnityEngine'`
+  - `CS0246: The type or namespace name 'TMPro' could not be found` (resolved transitively through `com.unity.ugui` 2.x on Unity 6)
+  - `CS0234: The type or namespace name 'TestTools' does not exist in the namespace 'UnityEditor'`
+  - `CS0246: TestRunnerApi / ITestAdaptor / TestMode / ICallbacks could not be found`
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.47 — 2026-05-26
 
 ## v1.1.47
