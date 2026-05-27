@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.50 — 2026-05-27
+
+## v1.1.50
+
+### Fixed
+- **`TEST` command spammed `ObjectDisposedException: Cannot access a closed pipe` into Unity's console** when the CLI client disconnected mid-run or when Unity's test framework crashed internally (e.g. `ReloadScene cannot be used with a scene without a SceneAsset`, `Test tree is not available for PostbuildCleanupTask`). `TestRunner.Run` and `RunTests` were calling `writer.WriteLineAsync` for progress/summary/error output without guarding against a closed pipe, so once the pipe was gone every write threw and the outer catch handler itself rethrew. Resulting log lines bubbled all the way up through `CommandRegistry.InvokeCommand` as `[Bridge] Command 'TEST' failed` errors.
+- All `writer.WriteLineAsync` calls in `TestRunner` now go through a new `SafeWriteLineAsync` helper that swallows `ObjectDisposedException` and `IOException` (pipe-closed / broken-pipe).
+- `TestRunner.Run` catches `ObjectDisposedException` / `IOException` at the outer level and exits silently — the streaming callbacks already swallowed their own writes, but a final summary or error write was still escaping.
+- `TestRunner.Run` now has a `finally` block that always unregisters our `StreamingTestCallbacks` from `TestRunnerApi` so a test-framework crash mid-run can't keep firing callbacks at a stale `RunState` after the pipe is gone.
+
+### Notes
+- This is a logging hygiene fix only. The underlying Unity test framework errors (`ReloadScene` / `Test tree is not available`) are not from the bridge — they originate inside `com.unity.test-framework` when it encounters a scene without a SceneAsset. The bridge no longer amplifies them with its own noisy stack traces.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.49 — 2026-05-26
 
 ## v1.1.49

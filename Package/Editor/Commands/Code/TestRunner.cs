@@ -79,14 +79,50 @@ namespace clibridge4unity
                 // Run tests with streaming output
                 await RunTests(writer, testMode, groupNames, categoryNames, testNames, ct);
             }
+            catch (ObjectDisposedException)
+            {
+                // Client disconnected mid-run (pipe closed). Tests may still be running
+                // server-side — TestRunnerApi has no Cancel. Just exit quietly; the
+                // streaming callbacks already swallow further pipe writes.
+            }
+            catch (IOException)
+            {
+                // Broken pipe — same as above.
+            }
             catch (OperationCanceledException)
             {
-                await writer.WriteLineAsync("\n--- Test run cancelled by client ---");
+                await SafeWriteLineAsync(writer, "\n--- Test run cancelled by client ---");
             }
             catch (Exception ex)
             {
-                await writer.WriteLineAsync($"\nError: {ex.Message}");
+                await SafeWriteLineAsync(writer, $"\nError: {ex.Message}");
             }
+            finally
+            {
+                // Always detach our callbacks so a test-framework crash mid-run doesn't keep
+                // firing into a dead RunState after the pipe is gone.
+                try
+                {
+                    if (currentCallbacks != null && api != null)
+                    {
+                        await CommandRegistry.RunOnMainThreadAsync(() =>
+                        {
+                            api.UnregisterCallbacks(currentCallbacks);
+                            return 0;
+                        });
+                        currentCallbacks = null;
+                    }
+                }
+                catch { /* best-effort cleanup */ }
+            }
+        }
+
+        /// <summary>Writes a line to the pipe, swallowing pipe-closed/IO errors.</summary>
+        private static async Task SafeWriteLineAsync(StreamWriter w, string text)
+        {
+            try { await w.WriteLineAsync(text); }
+            catch (ObjectDisposedException) { }
+            catch (IOException) { }
         }
 
         private static async Task ListTests(StreamWriter writer, TestMode testMode, string nameFilter)
@@ -108,7 +144,7 @@ namespace clibridge4unity
             var completed = await Task.WhenAny(tcs.Task, timeout);
             if (completed == timeout)
             {
-                await writer.WriteLineAsync("Error: Timeout listing tests");
+                await SafeWriteLineAsync(writer, "Error: Timeout listing tests");
                 return;
             }
 
@@ -121,9 +157,9 @@ namespace clibridge4unity
                 allTests = allTests.FindAll(t => t.ToLowerInvariant().Contains(filterLower));
             }
 
-            await writer.WriteLineAsync($"Found {allTests.Count} tests ({testMode}):");
+            await SafeWriteLineAsync(writer, $"Found {allTests.Count} tests ({testMode}):");
             foreach (var t in allTests)
-                await writer.WriteLineAsync("  " + t);
+                await SafeWriteLineAsync(writer, "  " + t);
         }
 
         private static async Task RunTests(StreamWriter writer, TestMode testMode,
@@ -139,7 +175,7 @@ namespace clibridge4unity
                 if (groupNames.Length > 0) parts.Add($"groups=[{string.Join(",", groupNames)}]");
                 if (categoryNames.Length > 0) parts.Add($"categories=[{string.Join(",", categoryNames)}]");
                 if (testNames.Length > 0) parts.Add($"tests=[{string.Join(",", testNames)}]");
-                await writer.WriteLineAsync($"Filter: {string.Join(" ", parts)}  mode={testMode}");
+                await SafeWriteLineAsync(writer, $"Filter: {string.Join(" ", parts)}  mode={testMode}");
             }
 
             await CommandRegistry.RunOnMainThreadAsync(() =>
@@ -171,16 +207,17 @@ namespace clibridge4unity
             {
                 // Client disconnected — cancel the test run
                 // TestRunnerApi doesn't have a Cancel method, but we stop reporting
-                await writer.WriteLineAsync("\n--- Cancelled ---");
+                await SafeWriteLineAsync(writer, "\n--- Cancelled ---");
             }
             else if (completedTask == timeoutTask)
             {
-                await writer.WriteLineAsync("\n--- Test run timed out (10 min) ---");
+                await SafeWriteLineAsync(writer, "\n--- Test run timed out (10 min) ---");
             }
 
             // Write final summary
-            await writer.WriteLineAsync("");
-            await writer.WriteLineAsync($"=== {state.PassedTests}/{state.CompletedTests} passed" +
+            await SafeWriteLineAsync(writer, "");
+            await SafeWriteLineAsync(writer,
+                $"=== {state.PassedTests}/{state.CompletedTests} passed" +
                 (state.FailedTests > 0 ? $", {state.FailedTests} failed" : "") +
                 (state.SkippedTests > 0 ? $", {state.SkippedTests} skipped" : "") +
                 $" in {(DateTime.Now - state.StartTime).TotalSeconds:F1}s ===");
