@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.CSharp;
 using Unity.Profiling;
@@ -78,9 +79,16 @@ namespace clibridge4unity
             Category = "Code",
             Usage = "CODE_EXEC <c# code>\n" +
                     "  CODE_EXEC @/path/to/tempfile.cs  (read code from file — preferred for multi-line / $\"…\")\n" +
-                    "  CODE_EXEC <code> --bg            run on threadpool, NOT Unity main thread.\n" +
-                    "                                    Use for blocking work (CDP, HTTP, large file IO).\n" +
-                    "                                    Unity API calls from --bg code will throw.\n" +
+                    "  Code runs on the Unity main thread by default — Unity API is safe to call directly.\n" +
+                    "  BLOCKING WORK (HTTP, sockets, large file IO, downloads) must NOT run on the main thread\n" +
+                    "  — it freezes the whole Editor. Hop off and back with the await-able CLIBridge utility:\n" +
+                    "      await CLIBridge.SwitchToBackground();                 // now on a threadpool thread\n" +
+                    "      var bytes = await http.GetByteArrayAsync(url, CLIBridge.Token);\n" +
+                    "      await CLIBridge.SwitchToMainThread();                 // back on the main thread\n" +
+                    "      var tex = new Texture2D(2,2); tex.LoadImage(bytes);   // Unity API — safe here\n" +
+                    "  Using 'await' anywhere auto-makes the snippet async. Pass CLIBridge.Token to cancellable\n" +
+                    "  APIs so the command timeout can actually abort them.\n" +
+                    "  CODE_EXEC <code> --bg            start on the threadpool instead of the main thread.\n" +
                     "  NOTE: put the temp .cs file OUTSIDE the Unity project (e.g. $TEMP, /tmp, ~/.cache) —\n" +
                     "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
             RequiresMainThread = false,
@@ -118,32 +126,8 @@ namespace clibridge4unity
                 string desc = code.Length > 80 ? $"CODE_EXEC|{code.Substring(0, 80)}..." : $"CODE_EXEC|{code}";
                 try
                 {
-                    if (background)
-                    {
-                        // Threadpool path. 25s hard timeout so the bridge command slot does not
-                        // sit on a stuck blocking call (CDP / HTTP / file IO). Task keeps running
-                        // after timeout; result is abandoned.
-                        var execTask = Task.Run<object>(() => RunAssembly(asm));
-                        var completed = await Task.WhenAny(execTask, Task.Delay(25000));
-                        if (completed != execTask)
-                        {
-                            Debug.LogError("[Bridge] CODE_EXEC --bg timed out after 25s (task abandoned on threadpool).");
-                        }
-                        else
-                        {
-                            var r = await execTask;
-                            Debug.Log($"[Bridge] CODE_EXEC completed -> {r ?? "null"}");
-                        }
-                    }
-                    else
-                    {
-                        await CommandRegistry.RunOnMainThreadAsync<object>(() =>
-                        {
-                            var r = RunAssembly(asm);
-                            Debug.Log($"[Bridge] CODE_EXEC completed -> {r ?? "null"}");
-                            return null;
-                        }, desc);
-                    }
+                    object r = await RunCompiledAsync(asm, desc, background, 25000);
+                    Debug.Log($"[Bridge] CODE_EXEC completed -> {r ?? "null"}");
                 }
                 catch (Exception ex)
                 {
@@ -193,10 +177,15 @@ namespace clibridge4unity
                     "  CODE_EXEC_RETURN <code> --trace [--maxlines N] [--from N]\n" +
                     "  CODE_EXEC_RETURN <code> --trace --only varName\n" +
                     "  CODE_EXEC_RETURN <code> --trace --vars x,y --skip print\n" +
-                    "  CODE_EXEC_RETURN <code> --bg               run on threadpool, NOT Unity main thread.\n" +
-                    "                                              Use for blocking work (CDP, HTTP, large file IO) so\n" +
-                    "                                              the Editor stays responsive. Calls to Unity API from\n" +
-                    "                                              --bg code will throw — keep Unity work on main thread.\n" +
+                    "  Code runs on the Unity main thread by default — Unity API is safe to call directly.\n" +
+                    "  For BLOCKING work (HTTP, sockets, large file IO) hop off the main thread so the Editor\n" +
+                    "  never freezes, then hop back for Unity API (using 'await' auto-makes the snippet async):\n" +
+                    "      await CLIBridge.SwitchToBackground();                 // threadpool thread\n" +
+                    "      var json = await http.GetStringAsync(url, CLIBridge.Token);\n" +
+                    "      await CLIBridge.SwitchToMainThread();                 // back on main thread\n" +
+                    "      return AssetDatabase.FindAssets(\"t:Texture\").Length; // Unity API — safe here\n" +
+                    "  Pass CLIBridge.Token to cancellable APIs so the timeout can abort them.\n" +
+                    "  CODE_EXEC_RETURN <code> --bg               start on the threadpool instead of main thread.\n" +
                     "  NOTE: put the temp .cs file OUTSIDE the Unity project (e.g. $TEMP, /tmp, ~/.cache) —\n" +
                     "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
             RequiresMainThread = false,
@@ -253,23 +242,7 @@ namespace clibridge4unity
                 var asm = assembly;
                 string desc = code.Length > 80 ? $"CODE_EXEC_RETURN|{code.Substring(0, 80)}..." : $"CODE_EXEC_RETURN|{code}";
 
-                object result;
-                if (background)
-                {
-                    // Run on threadpool — caller opted out of main thread. Hard timeout via
-                    // WaitAny so blocking user code (CDP, HTTP, etc) doesn't tie up the bridge
-                    // command slot. Task keeps running after timeout but result is abandoned.
-                    var execTask = Task.Run<object>(() => RunAssembly(asm));
-                    var timeoutMs = 25000;
-                    var completed = await Task.WhenAny(execTask, Task.Delay(timeoutMs));
-                    if (completed != execTask)
-                        return Response.Error($"--bg code timed out after {timeoutMs / 1000}s (task abandoned on threadpool; remove blocking calls or split work).");
-                    result = await execTask;
-                }
-                else
-                {
-                    result = await CommandRegistry.RunOnMainThreadAsync<object>(() => RunAssembly(asm), desc);
-                }
+                object result = await RunCompiledAsync(asm, desc, background, background ? 25000 : 30000);
 
                 string baseResponse;
                 if (inspect)
@@ -536,7 +509,7 @@ namespace clibridge4unity
             try
             {
                 var asm = result.Assembly;
-                var obj = await CommandRegistry.RunOnMainThreadAsync<object>(() => RunAssembly(asm));
+                var obj = await RunCompiledAsync(asm, "CODE_EXEC_RETURN|trace", false, 30000);
                 return Response.Success(obj?.ToString() ?? "(no output)");
             }
             catch (TargetInvocationException ex)
@@ -912,6 +885,66 @@ namespace clibridge4unity
             return method.Invoke(null, null);
         }
 
+        // Unwraps the entry-point return: async snippets return Task / Task<object>, sync return object.
+        static async Task<object> AwaitRunResult(object raw)
+        {
+            if (raw is Task task)
+            {
+                await task.ConfigureAwait(false);
+                var t = task.GetType();
+                if (t.IsGenericType)
+                {
+                    var resultProp = t.GetProperty("Result");
+                    return resultProp != null ? resultProp.GetValue(task) : null;
+                }
+                return null; // non-generic Task (async with no return value)
+            }
+            return raw;
+        }
+
+        // Runs the compiled entry point with the correct starting thread + a cooperative timeout.
+        // Sync snippets (and the synchronous prefix of async ones) run on the Unity main thread by
+        // default — Unity API is legal there. background=true starts on the threadpool. Async snippets
+        // move threads themselves via CLIBridge.SwitchToBackground/SwitchToMainThread. On timeout the
+        // token is cancelled (cooperative APIs that were handed CLIBridge.Token will abort).
+        static async Task<object> RunCompiledAsync(Assembly asm, string desc, bool background, int timeoutMs)
+        {
+            using var cts = new CancellationTokenSource();
+            cts.CancelAfter(timeoutMs);
+
+            Task<object> work;
+            if (background)
+            {
+                work = Task.Run(async () =>
+                {
+                    CLIBridge.SetToken(cts.Token);
+                    return await AwaitRunResult(RunAssembly(asm));
+                });
+            }
+            else
+            {
+                // Start on the main thread so a Unity-API prefix is legal; the returned Task (for
+                // async snippets) is then awaited off the main thread as the snippet hops around.
+                object started = await CommandRegistry.RunOnMainThreadAsync<object>(() =>
+                {
+                    CLIBridge.SetToken(cts.Token);
+                    return RunAssembly(asm);
+                }, desc, timeoutMs);
+                work = AwaitRunResult(started);
+            }
+
+            var done = await Task.WhenAny(work, Task.Delay(timeoutMs));
+            if (done != work)
+            {
+                cts.Cancel();
+                throw new TimeoutException(
+                    $"Code did not finish within {timeoutMs / 1000}s. For blocking work, hop off the main thread: " +
+                    "await CLIBridge.SwitchToBackground(); /* blocking */ await CLIBridge.SwitchToMainThread(); " +
+                    "and pass CLIBridge.Token to cancellable APIs so the timeout can abort them.");
+            }
+            return await work;
+        }
+
         internal static string WrapCode(string code)
         {
             code = code.Trim();
@@ -950,6 +983,10 @@ namespace clibridge4unity
             else if (!code.Contains("return "))
                 code = code + "\nreturn null;";
 
+            // Snippets that use await must be wrapped in an async entry point. Sync snippets keep the
+            // plain signature so the common case (Unity API on the main thread) is unchanged.
+            bool isAsync = System.Text.RegularExpressions.Regex.IsMatch(code, @"\bawait\b");
+
             var sb = new StringBuilder();
             sb.AppendLine("using System;");
             sb.AppendLine("using System.Collections.Generic;");
@@ -964,6 +1001,12 @@ namespace clibridge4unity
             sb.AppendLine("using Random = UnityEngine.Random;");
             sb.AppendLine("using Debug  = UnityEngine.Debug;");
 
+            if (isAsync)
+            {
+                sb.AppendLine("using System.Threading.Tasks;");
+                sb.AppendLine("using clibridge4unity;"); // CLIBridge.SwitchToMainThread/SwitchToBackground/Token
+            }
+
             foreach (var u in customUsings)
                 sb.AppendLine(u);
 
@@ -972,7 +1015,9 @@ namespace clibridge4unity
             sb.AppendLine("{");
             sb.AppendLine("    public static class Runner");
             sb.AppendLine("    {");
-            sb.AppendLine("        public static object Run()");
+            sb.AppendLine(isAsync
+                ? "        public static async System.Threading.Tasks.Task<object> Run()"
+                : "        public static object Run()");
             sb.AppendLine("        {");
             sb.AppendLine($"            {code}");
             sb.AppendLine("        }");

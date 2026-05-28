@@ -107,7 +107,24 @@ namespace clibridge4unity
             public string Description;
             public DateTime EnqueuedAt;
             public volatile bool IsExecuting; // true once dequeued and running
+            public DateTime StartedExecutingAt; // set on the main thread right before Action() runs
         }
+
+        // The main-thread work item currently executing (dequeued, Action in progress), or null
+        // when idle. Set on the main thread, read from any thread for diagnostics. If a command
+        // blocks the main thread (e.g. network/IO/loop), this stays set and names the culprit —
+        // the work queue alone can't, because the item is already dequeued while it runs.
+        private static volatile MainThreadWork _executingWork;
+
+        // Every command currently executing (id -> name+start). Different command types run
+        // concurrently; this drives same-type de-dup (so the AI can't accidentally double-fire) and
+        // the "what's running" diagnostics. A long-running command never blocks a different one.
+        private sealed class InFlightEntry { public string Name; public DateTime StartedAt; }
+        private static readonly ConcurrentDictionary<long, InFlightEntry> _inFlight = new ConcurrentDictionary<long, InFlightEntry>();
+        private static long _inFlightSeq;
+        // A duplicate of a command already running for less than this is rejected (accidental
+        // double-fire). After this, a re-fire is treated as an intentional retry and allowed.
+        private const double DupRejectWindowSec = 5.0;
 
         // Captured on main thread for SynchronizationContext.Post
         private static SynchronizationContext _mainThreadContext;
@@ -232,6 +249,8 @@ namespace clibridge4unity
                     continue;
 
                 work.IsExecuting = true;
+                work.StartedExecutingAt = DateTime.Now;
+                _executingWork = work; // publish before Action() so a hung Action leaves the culprit visible
                 try
                 {
                     var result = work.Action();
@@ -248,6 +267,11 @@ namespace clibridge4unity
                         ? tie.InnerException : ex;
                     BridgeDiagnostics.LogException($"CommandRegistry main-thread work failed: {work.Description}", inner);
                     work.CompletionSource.TrySetException(inner);
+                }
+                finally
+                {
+                    // On a true hang this never runs, so _executingWork keeps naming the blocker.
+                    _executingWork = null;
                 }
             }
         }
@@ -459,6 +483,9 @@ namespace clibridge4unity
             sb.AppendLine($"isRunning: {_isRunning}");
             sb.AppendLine($"timerTicks: {_timerTickCount}");
             sb.AppendLine($"lastTimerTick: {_lastTimerTick:HH:mm:ss.fff}");
+            var executingInfo = GetExecutingWorkInfo();
+            if (executingInfo != null)
+                sb.AppendLine($"  executing: {executingInfo}");
             foreach (var item in snapshot.Where(w => !w.CompletionSource.Task.IsCanceled).Take(5))
             {
                 sb.AppendLine($"  pending: {item.Description} (waiting {(DateTime.Now - item.EnqueuedAt).TotalSeconds:F1}s)");
@@ -921,6 +948,33 @@ namespace clibridge4unity
             return await InvokeOnMainThread(action, description ?? "RunOnMainThreadAsync", timeoutMs);
         }
 
+        /// <summary>True when the calling thread is Unity's main thread. Safe to call from any thread.</summary>
+        public static bool IsOnMainThread =>
+            _mainThreadContext != null && SynchronizationContext.Current == _mainThreadContext;
+
+        /// <summary>
+        /// Queue a continuation to run on Unity's main thread without blocking the caller. Used by
+        /// CLIBridge.SwitchToMainThread() so exec'd code can hop back onto the main thread for Unity
+        /// API calls. The WakeLoop + Post barrage pumps it even when the Editor is backgrounded.
+        /// </summary>
+        public static void PostToMainThread(Action continuation)
+        {
+            if (continuation == null) return;
+            var work = new MainThreadWork
+            {
+                Action = () => { continuation(); return null; },
+                CompletionSource = new TaskCompletionSource<object>(),
+                Description = "SwitchToMainThread continuation",
+                EnqueuedAt = DateTime.Now
+            };
+            _mainThreadQueue.Enqueue(work);
+            _mainThreadContext?.Post(_ =>
+            {
+                EnsureEditorUpdateSubscribed();
+                ProcessAllPendingWork();
+            }, null);
+        }
+
         /// <summary>
         /// Detect visible windows belonging to Unity's process (excluding the main editor window).
         /// These are typically dialogs, popups, or floating panels that may block the main thread.
@@ -970,15 +1024,27 @@ namespace clibridge4unity
             // Queue state — is another command already running?
             var snapshot = _mainThreadQueue.ToArray();
             var pending = snapshot.Where(w => !w.CompletionSource.Task.IsCanceled && !w.CompletionSource.Task.IsCompleted).ToArray();
+            // The command actually ON the main thread is dequeued (not in the queue), so report it
+            // separately — this is the one wedging the thread when it has stopped returning.
+            var executing = GetExecutingWorkInfo();
+            if (executing != null)
+                sb.AppendLine($"Executing on main thread: {executing}");
+
             if (pending.Length > 0)
             {
                 sb.AppendLine($"Commands waiting on main thread ({pending.Length}):");
                 foreach (var item in pending)
                     sb.AppendLine($"  - {item.Description} (waiting {(DateTime.Now - item.EnqueuedAt).TotalSeconds:F1}s)");
             }
+            else if (executing != null)
+            {
+                sb.AppendLine("The command above has not returned — it is blocking the main thread "
+                    + "(likely network/IO, Thread.Sleep, or a loop run on the main thread). It cannot be interrupted.");
+            }
             else
             {
-                sb.AppendLine("No commands were running — main thread is blocked by Unity itself.");
+                sb.AppendLine("No bridge command is running — main thread is blocked by Unity itself "
+                    + "(asset import, shader compile, or an editor operation).");
             }
 
             // Open windows — detect dialogs
@@ -1016,12 +1082,91 @@ namespace clibridge4unity
             sb.AppendLine("Recommendations:");
             if (hasDialogs)
                 sb.AppendLine("  - Run DISMISS to close dialog windows, then retry.");
-            if (staleness > 10)
+            if (executing != null && staleness > 10)
+                sb.AppendLine("  - A bridge command is wedged on the main thread and cannot be interrupted. "
+                    + "Restart Unity (KILL) to recover, and don't run blocking I/O on the main thread.");
+            else if (staleness > 10)
                 sb.AppendLine("  - Unity may be frozen. Ask user to check Unity Editor.");
             else
                 sb.AppendLine("  - Wait a few seconds and retry the command.");
             sb.Append("  - Run DIAG for full diagnostics (works even when main thread is blocked).");
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// Describes the main-thread work item currently executing (dequeued, Action in progress),
+        /// including how long it has been running, or null if the main thread isn't mid-command.
+        /// When the main thread is wedged this names the exact command blocking it. Any thread.
+        /// </summary>
+        private static string GetExecutingWorkInfo()
+        {
+            var work = _executingWork;
+            if (work == null) return null;
+            return $"{work.Description} (executing {(DateTime.Now - work.StartedExecutingAt).TotalSeconds:F1}s on main thread)";
+        }
+
+        /// <summary>Lines describing every command currently in flight (name + elapsed). Any thread.</summary>
+        private static List<string> GetInFlightInfo()
+        {
+            var now = DateTime.Now;
+            return _inFlight.Values
+                .OrderByDescending(e => now - e.StartedAt)
+                .Select(e => $"{e.Name} (running {(now - e.StartedAt).TotalSeconds:F1}s)")
+                .ToList();
+        }
+
+        /// <summary>
+        /// Register a command for execution. Different command types always proceed concurrently —
+        /// a long-running command never blocks a different one. A second instance of the SAME type is
+        /// rejected only while the existing one has been running &lt; DupRejectWindowSec (catches an
+        /// accidental double-fire); after that, a re-fire is treated as an intentional retry. Returns
+        /// false + a busy response when rejected. Diagnostics bypass this entirely. Any thread.
+        /// </summary>
+        public static bool TryBeginCommand(string canonicalName, out long token, out string busyResponse)
+        {
+            token = 0;
+            busyResponse = null;
+            var now = DateTime.Now;
+            foreach (var e in _inFlight.Values)
+            {
+                if (string.Equals(e.Name, canonicalName, StringComparison.OrdinalIgnoreCase)
+                    && (now - e.StartedAt).TotalSeconds < DupRejectWindowSec)
+                {
+                    busyResponse = BuildBusyResponse(canonicalName);
+                    return false;
+                }
+            }
+            token = Interlocked.Increment(ref _inFlightSeq);
+            _inFlight[token] = new InFlightEntry { Name = canonicalName, StartedAt = now };
+            return true;
+        }
+
+        /// <summary>Remove a command from the in-flight registry once it finishes. Any thread.</summary>
+        public static void EndCommand(long token)
+        {
+            if (token != 0) _inFlight.TryRemove(token, out _);
+        }
+
+        /// <summary>
+        /// Busy report returned when a same-type duplicate is rejected. Names what's running (so the
+        /// caller doesn't re-submit / double up) and main-thread health. Any thread.
+        /// </summary>
+        public static string BuildBusyResponse(string attemptedCommand)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"Error: '{attemptedCommand}' is already running and was NOT started again (no double-up).");
+            foreach (var line in GetInFlightInfo())
+                sb.AppendLine($"running: {line}");
+            double staleness = _timerTickCount > 0 ? (DateTime.Now - _lastTimerTick).TotalSeconds : -1;
+            if (staleness < 0)
+                sb.AppendLine("mainThread: no heartbeat yet (initializing)");
+            else
+                sb.AppendLine($"mainThread: {(staleness < 1 ? "responsive" : staleness < 5 ? "slow" : "NOT RESPONDING")} (heartbeat {staleness:F1}s ago)");
+            if (staleness > 5)
+                sb.AppendLine("It appears wedged and cannot be interrupted — restart Unity (KILL) to recover.");
+            else
+                sb.AppendLine("Poll DIAG (always answers) to watch it; a different command can run meanwhile, and a re-fire is allowed after 5s.");
+            return sb.ToString().TrimEnd();
         }
 
         /// <summary>
@@ -1056,6 +1201,11 @@ namespace clibridge4unity
             int pendingCount = snapshot.Count(w => !w.CompletionSource.Task.IsCanceled && !w.CompletionSource.Task.IsCompleted);
             if (pendingCount > 0)
                 sb.AppendLine($"pendingMainThreadWork: {pendingCount}");
+            var executingInfo = GetExecutingWorkInfo();
+            if (executingInfo != null)
+                sb.AppendLine($"executingMainThreadWork: {executingInfo}");
+            foreach (var line in GetInFlightInfo())
+                sb.AppendLine($"inFlight: {line}");
 
             try
             {

@@ -27,7 +27,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.50";
+        public const string Version = "1.1.51";
 
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
@@ -35,9 +35,14 @@ namespace clibridge4unity
         private static string pipeName;
         private static volatile bool isStopping;
 
-        // Serializes all command execution: one command at a time, brief idle between each.
-        private static readonly SemaphoreSlim _commandSlot = new SemaphoreSlim(1, 1);
-        private const int CommandIdleMs = 100;
+        // Read-only diagnostics that must always answer — even while another command runs or the main
+        // thread is wedged. They run concurrently and skip the de-dup gate; gating them would make the
+        // bridge look dead exactly when you most need to ask what's wrong. (NEVER block comms for a
+        // status query.)
+        private static readonly HashSet<string> SlotBypassCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "PING", "DIAG", "PROBE", "LOG", "STATUS"
+        };
         private const int ListenerCount = 8;
 
         // Main thread context for Unity API calls
@@ -203,9 +208,9 @@ namespace clibridge4unity
                 serverCts = new CancellationTokenSource();
             }
 
-            // Run multiple concurrent server loops to handle simultaneous connections.
-            // Commands still execute serially via _commandSlot; extra listeners prevent
-            // short client-side connect timeouts during bursts of queued commands.
+            // Run multiple concurrent server loops to handle simultaneous connections. Commands of
+            // different types execute concurrently (main-thread work still serializes on the main-
+            // thread queue); extra listeners prevent short client-side connect timeouts during bursts.
             for (int i = 0; i < ListenerCount; i++)
             {
                 int listenerId = i + 1;
@@ -745,19 +750,37 @@ namespace clibridge4unity
                     catch { /* pipe closed or write failed — main flow will surface the error */ }
                 }, heartbeatCts.Token);
 
-                string response;
+                string response = null;
                 var commandToken = timeoutCts.Token;
-                bool slotAcquired = false;
+                bool bypassGate = SlotBypassCommands.Contains(cmdInfo?.Name ?? command);
+                long inflightToken = 0;
+                bool registered = false;
                 try
                 {
-                    BridgeDiagnostics.Log("BridgeServer", $"slot wait: {command}");
-                    await _commandSlot.WaitAsync(commandToken);
-                    slotAcquired = true;
-                    BridgeDiagnostics.Log("BridgeServer", $"slot acquired: {command}");
+                    bool runIt = true;
+                    if (!bypassGate)
+                    {
+                        // Different command types run concurrently. Only a same-type duplicate fired
+                        // while the first is still young (<5s) is rejected — prevents the AI doubling
+                        // up while never blocking a different command behind a long-running one.
+                        if (!CommandRegistry.TryBeginCommand(cmdInfo?.Name ?? command, out inflightToken, out string busy))
+                        {
+                            BridgeDiagnostics.Log("BridgeServer", $"duplicate rejected: {command}");
+                            response = busy;
+                            runIt = false;
+                        }
+                        else
+                        {
+                            registered = true;
+                        }
+                    }
 
-                    BridgeDiagnostics.Log("BridgeServer", $"execute begin: {command}, timeoutSec={timeoutSec}");
-                    response = await CommandRegistry.ExecuteCommand(command, data, pipe, commandToken);
-                    BridgeDiagnostics.Log("BridgeServer", $"execute end: {command}, responseChars={response?.Length ?? 0}");
+                    if (runIt)
+                    {
+                        BridgeDiagnostics.Log("BridgeServer", $"execute begin: {command}, timeoutSec={timeoutSec}");
+                        response = await CommandRegistry.ExecuteCommand(command, data, pipe, commandToken);
+                        BridgeDiagnostics.Log("BridgeServer", $"execute end: {command}, responseChars={response?.Length ?? 0}");
+                    }
                 }
                 catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
                 {
@@ -769,14 +792,7 @@ namespace clibridge4unity
                     heartbeatCts.Cancel();
                     try { await heartbeatTask; } catch { }
                     heartbeatCts.Dispose();
-                    // Skip idle when shutting down so domain reload isn't delayed.
-                    if (!ct.IsCancellationRequested)
-                        try { await Task.Delay(CommandIdleMs, ct); } catch { }
-                    if (slotAcquired)
-                    {
-                        _commandSlot.Release();
-                        BridgeDiagnostics.Log("BridgeServer", $"slot released: {command}");
-                    }
+                    if (registered) CommandRegistry.EndCommand(inflightToken);
                 }
 
                 // Send final response (may be empty for streaming commands)

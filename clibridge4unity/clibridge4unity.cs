@@ -1277,11 +1277,17 @@ class Program
                     Console.Error.WriteLine("Error: -d requires a Unity project path");
                     return EXIT_USAGE_ERROR;
                 }
-                projectPath = args[++argIndex];
-                // Validate it's a Unity project
-                if (!Directory.Exists(Path.Combine(projectPath, "Assets")))
+                // Resolve to an absolute path up front. The pipe name is computed from the full
+                // path, but the .clibridge4unity dir, session ledger, history and daemon spawn use
+                // projectPath verbatim — a relative -d (".", "..\proj") would otherwise create
+                // .clibridge4unity next to the CWD instead of the Unity project root.
+                string dirArg = args[++argIndex];
+                try { projectPath = Path.GetFullPath(dirArg); }
+                catch { Console.Error.WriteLine($"Error: Invalid project path: {dirArg}"); return EXIT_USAGE_ERROR; }
+                // Confirm it's a real Unity project root before anything anchors .clibridge4unity here
+                if (!IsUnityProjectRoot(projectPath))
                 {
-                    Console.Error.WriteLine($"Error: Not a Unity project (no Assets folder): {projectPath}");
+                    Console.Error.WriteLine($"Error: Not a Unity project root (need Assets/ + ProjectSettings/ProjectVersion.txt): {projectPath}");
                     return EXIT_USAGE_ERROR;
                 }
                 argIndex++;
@@ -1396,6 +1402,8 @@ class Program
             Console.Error.WriteLine("       Run from a Unity project directory or use -d <path>.");
             return EXIT_USAGE_ERROR;
         }
+        // Anchor every .clibridge4unity path to the absolute project root, not the CWD.
+        projectPath = Path.GetFullPath(projectPath);
         _resolvedProjectPath = projectPath;
 
         // LAST: replay (or filter) the previous response without re-executing the command.
@@ -2044,16 +2052,26 @@ class Program
         Console.Error.WriteLine("Run with -h inside a Unity project for the full command list.");
     }
 
+    /// <summary>
+    /// True only for a genuine Unity project root. Requires both an Assets folder and
+    /// ProjectSettings/ProjectVersion.txt (the latter is unique to Unity) — a bare Assets folder
+    /// alone is not enough, since we must never scatter .clibridge4unity into a non-Unity directory.
+    /// </summary>
+    static bool IsUnityProjectRoot(string dir)
+    {
+        if (string.IsNullOrEmpty(dir)) return false;
+        return Directory.Exists(Path.Combine(dir, "Assets"))
+            && File.Exists(Path.Combine(dir, "ProjectSettings", "ProjectVersion.txt"));
+    }
+
     static string AutoDetectProjectPath()
     {
-        // Walk up directory tree looking for Unity project indicators
+        // Walk up directory tree looking for a confirmed Unity project root
         string dir = Directory.GetCurrentDirectory();
 
         while (!string.IsNullOrEmpty(dir))
         {
-            // Check for Assets folder (Unity project root indicator)
-            string assetsPath = Path.Combine(dir, "Assets");
-            if (Directory.Exists(assetsPath))
+            if (IsUnityProjectRoot(dir))
             {
                 return dir;
             }

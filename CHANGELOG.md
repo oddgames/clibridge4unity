@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.51 — 2026-05-28
+
+## v1.1.51
+
+### New
+- `CLIBridge` utility for CODE_EXEC / CODE_EXEC_RETURN snippets: `await CLIBridge.SwitchToBackground()` hops onto a threadpool thread for blocking work (HTTP, sockets, large file IO), `await CLIBridge.SwitchToMainThread()` returns to the Unity main thread for API calls, and `CLIBridge.Token` is a per-exec cancellation token to hand cancellable APIs. Any snippet that uses `await` is auto-compiled as async; sync snippets are unchanged.
+- Diagnostics now name what's blocking the bridge: `DIAG` (and busy responses) report `executingMainThreadWork` (the command currently running on the main thread + how long) and `inFlight` (every command in flight), so you can see exactly what's wedging Unity and avoid re-issuing it.
+
+### Fixed
+- Diagnostics no longer hang when a command wedges the main thread. `DIAG`/`PING`/`PROBE`/`LOG`/`STATUS` now bypass the execution gate and answer on a background thread within ~1s, instead of timing out behind the stuck command (which previously made the whole bridge look dead).
+- One long-running command no longer blocks every other command. Replaced the single global command slot (which serialized all execution) with per-command-type handling: different command types run concurrently. Main-thread work still serializes naturally on the main-thread queue.
+
+### Internal
+- Same-type de-dup to prevent the AI double-firing: a duplicate of a command already running for < 5s is rejected with a "already running, no double-up" report naming what's in flight; a re-fire after 5s is treated as an intentional retry and allowed.
+- HELP for CODE_EXEC / CODE_EXEC_RETURN documents the SwitchToBackground/SwitchToMainThread/Token pattern.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.50 — 2026-05-27
 
 ## v1.1.50
