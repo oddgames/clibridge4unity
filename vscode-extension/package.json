@@ -1,0 +1,57 @@
+{
+  "name": "clibridge",
+  "displayName": "Unity clibridge",
+  "description": "Status bar buttons to drive clibridge4unity against the running Unity Editor.",
+  "version": "0.0.2",
+  "publisher": "oddgames",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oddgames/clibridge4unity.git",
+    "directory": "vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "clibridge.compile",
+        "title": "Unity: Compile",
+        "category": "Unity Bridge"
+      },
+      {
+        "command": "clibridge.status",
+        "title": "Unity: Status",
+        "category": "Unity Bridge"
+      }
+    ],
+    "configuration": {
+      "title": "Unity clibridge",
+      "properties": {
+        "clibridge.executablePath": {
+          "type": "string",
+          "default": "clibridge4unity",
+          "description": "Path to the clibridge4unity executable. Defaults to looking it up on PATH."
+        },
+        "clibridge.projectPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the Unity project root (the folder containing Assets/ and ProjectSettings/). Leave empty to auto-detect from open workspace folders."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.4.0"
+  }
+}

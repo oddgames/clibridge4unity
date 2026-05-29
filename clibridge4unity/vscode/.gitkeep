@@ -1,0 +1,5 @@
+# Build-time staging folder for the embedded VSCode extension .vsix.
+# deploy.py drops clibridge-<version>.vsix here just before `dotnet publish`,
+# and the csproj <EmbeddedResource Include="vscode\*.vsix"/> bundles it into the exe.
+# The .vsix is a build artifact (git-ignored); this file keeps the folder present
+# for non-deploy `dotnet publish` runs (which then build with no embedded extension).

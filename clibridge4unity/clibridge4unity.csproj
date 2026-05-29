@@ -23,6 +23,16 @@
     </EmbeddedResource>
   </ItemGroup>
 
+  <!-- The VSCode extension .vsix is staged here by deploy.py just before publish and
+       embedded into the exe so `clibridge4unity VSCODE` can install it offline. The
+       folder may contain no .vsix on non-deploy builds (the glob then matches nothing,
+       and the VSCODE command reports "no bundled extension" gracefully). -->
+  <ItemGroup>
+    <EmbeddedResource Include="vscode\*.vsix">
+      <LogicalName>vscode/%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
     <PackageReference Include="Mono.Cecil" Version="0.11.5" />

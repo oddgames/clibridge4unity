@@ -739,6 +739,7 @@ class Program
             case "CLOSE":
             case "VERSION":
             case "LAST":
+            case "VSCODE":
                 return true;
             default:
                 return false;
@@ -1394,6 +1395,12 @@ class Program
             return HandleHook();
         }
 
+        // VSCODE: install the bundled editor extension — no Unity pipe and no project needed
+        if (cmdUpper == "VSCODE")
+        {
+            return HandleVscode(data);
+        }
+
         // Auto-detect project path if not specified
         projectPath = projectPath ?? AutoDetectProjectPath();
         if (projectPath == null)
@@ -2029,6 +2036,7 @@ class Program
         Console.Error.WriteLine("  LAST [N|-n N|-all|-list] [-head N|-tail N|-grep PAT]  Replay one of the last 10 responses (no re-run)");
         Console.Error.WriteLine("  OPEN                       Launch Unity (or restart if in Safe Mode)");
         Console.Error.WriteLine("  KILL                       Force-terminate Unity for this project (loses unsaved work)");
+        Console.Error.WriteLine("  VSCODE                     Install the bundled VSCode/Cursor status-bar extension");
         Console.Error.WriteLine();
         Console.Error.WriteLine("Key bridge commands (requires Unity):");
         Console.Error.WriteLine("  PING / STATUS / HELP       Connection and status");
@@ -5944,7 +5952,15 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
 
         // Step 6: Generate assistant docs
         Console.WriteLine();
-        return HandleInstallForSetup(pipeName, projectPath, data);
+        int docsResult = HandleInstallForSetup(pipeName, projectPath, data);
+
+        // Step 7: Surface (don't install) the optional editor extension. Installing is an
+        // editor-GLOBAL side effect, so it's left as an explicit opt-in command rather than
+        // a silent SETUP step.
+        Console.WriteLine();
+        Console.WriteLine("VSCode/Cursor user? Run `clibridge4unity VSCODE` to add Unity status-bar buttons.");
+
+        return docsResult;
     }
 
     static void ConfigureSandboxPipeAccess(string projectPath)
@@ -6445,6 +6461,252 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         var sb = new StringBuilder(hash.Length * 2);
         foreach (var b in hash) sb.Append(b.ToString("x2"));
         return sb.ToString();
+    }
+
+    // ─── VSCODE: install the bundled editor extension (no Unity needed) ─────
+    //
+    // The CLI embeds the matching `clibridge-<ver>.vsix` (see csproj). This command
+    // unpacks it to a temp file and installs it into every detected VSCode-family editor
+    // via `<editor> --install-extension <vsix> --force`. Idempotency is delegated to the
+    // editor's own registry (`--list-extensions --show-versions`), not a file marker — a
+    // .vsix is binary, so the skills SHA-trailer trick doesn't apply. The bundled version
+    // is lockstepped to the CLI version, so the embedded vsix always matches the STATUS
+    // output format this CLI emits (which the extension parses).
+    const string VscodeExtensionId = "oddgames.clibridge";
+
+    static int HandleVscode(string data)
+    {
+        Console.WriteLine($"clibridge4unity v{CLI_VERSION} — VSCode extension installer");
+        Console.WriteLine();
+
+        // 1. Locate the bundled vsix.
+        var bundled = FindBundledVsix();
+        if (bundled == null)
+        {
+            Console.WriteLine("[!!] No VSCode extension is bundled in this CLI build.");
+            Console.WriteLine("     (Built without Node/vsce available — see deploy.py. Nothing to install.)");
+            return EXIT_SUCCESS;
+        }
+        (string resourceName, string vsixFileName) = bundled.Value;
+        string bundledVersion = ExtractVsixVersion(vsixFileName) ?? CLI_VERSION;
+        Console.WriteLine($"Bundled extension: {VscodeExtensionId} v{bundledVersion}");
+
+        // 2. Detect editors (PATH first, then well-known install locations).
+        var editors = DetectVscodeEditors();
+        if (editors.Count == 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("[!!] No VSCode-family editor CLI found (looked for code, code-insiders, cursor,");
+            Console.WriteLine("     codium, windsurf on PATH and in default install locations).");
+            Console.WriteLine("     If your editor is installed, add its CLI to PATH and re-run. In VSCode:");
+            Console.WriteLine("     Command Palette → \"Shell Command: Install 'code' command in PATH\".");
+            return EXIT_SUCCESS; // nothing to do is not a failure
+        }
+
+        // 3. Unpack the vsix once to a temp file.
+        string tempVsix = Path.Combine(Path.GetTempPath(), vsixFileName);
+        try
+        {
+            var asm = typeof(Program).Assembly;
+            using var stream = asm.GetManifestResourceStream(resourceName);
+            if (stream == null) throw new IOException("embedded resource stream was null");
+            using var fileOut = File.Create(tempVsix);
+            stream.CopyTo(fileOut);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[!!] Could not unpack bundled extension: {ex.Message}");
+            return EXIT_COMMAND_ERROR;
+        }
+
+        // 4. Install / update per detected editor (idempotent via version check).
+        Console.WriteLine();
+        int installedCount = 0, upToDate = 0, failed = 0;
+        foreach (var (name, cli) in editors)
+        {
+            string installed = GetInstalledExtensionVersion(cli, VscodeExtensionId);
+            if (installed != null &&
+                Version.TryParse(installed, out var iv) &&
+                Version.TryParse(bundledVersion, out var bv) &&
+                iv >= bv)
+            {
+                Console.WriteLine($"  {name,-14} up to date ({VscodeExtensionId}@{installed})");
+                upToDate++;
+                continue;
+            }
+
+            var (code, so, se) = RunEditorCli(cli, new[] { "--install-extension", tempVsix, "--force" }, 60000);
+            if (code == 0)
+            {
+                Console.WriteLine($"  {name,-14} installed {VscodeExtensionId}@{bundledVersion}" +
+                                  (installed != null ? $" (was {installed})" : ""));
+                installedCount++;
+            }
+            else
+            {
+                Console.WriteLine($"  {name,-14} FAILED (exit {code})");
+                string detail = (so + " " + se).Replace("\r", " ").Replace("\n", " ").Trim();
+                if (detail.Length > 0)
+                    Console.WriteLine($"                 {Truncate(detail, 200)}");
+                failed++;
+            }
+        }
+
+        // 5. Cleanup + activation reminder.
+        try { File.Delete(tempVsix); } catch { }
+
+        Console.WriteLine();
+        if (installedCount > 0)
+            Console.WriteLine("Reload the editor window to activate it (Command Palette → \"Developer: Reload Window\").");
+
+        // Only a hard failure if every target failed and nothing else succeeded/was current.
+        if (failed > 0 && installedCount == 0 && upToDate == 0)
+            return EXIT_COMMAND_ERROR;
+        return EXIT_SUCCESS;
+    }
+
+    /// <summary>Locate the embedded VSCode extension resource, if any. Returns (resourceName, fileName).</summary>
+    static (string resourceName, string fileName)? FindBundledVsix()
+    {
+        var asm = typeof(Program).Assembly;
+        string name = asm.GetManifestResourceNames()
+            .Where(n => n.StartsWith("vscode/", StringComparison.Ordinal) &&
+                        n.EndsWith(".vsix", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .FirstOrDefault();
+        if (name == null) return null;
+        return (name, name.Substring("vscode/".Length));
+    }
+
+    /// <summary>Pull X.Y.Z out of a "clibridge-X.Y.Z.vsix" filename, or null if it doesn't match.</summary>
+    static string ExtractVsixVersion(string fileName)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(
+            fileName, @"-(\d+\.\d+\.\d+(?:\.\d+)?)\.vsix$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
+    /// <summary>
+    /// Detect installed VSCode-family editor CLIs, in priority order. Resolves each on PATH
+    /// first (the user's chosen launcher), then falls back to well-known install locations —
+    /// the `code.cmd` shim is only on PATH if the user ticked "Add to PATH" at install time,
+    /// which is the #1 reason `code --install-extension` "isn't found" despite VSCode being present.
+    /// Deduplicated by editor name. Returns (displayName, resolvedCliPath).
+    /// </summary>
+    static List<(string name, string cli)> DetectVscodeEditors()
+    {
+        string[] names = { "code", "code-insiders", "cursor", "codium", "windsurf" };
+        var byName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var n in names)
+        {
+            string p = ResolveExecutableOnPath(n);
+            if (p != null && !byName.ContainsKey(n)) byName[n] = p;
+        }
+        foreach (var (n, p) in WellKnownEditorPaths())
+            if (!byName.ContainsKey(n)) byName[n] = p;
+
+        var result = new List<(string, string)>();
+        foreach (var n in names)
+            if (byName.TryGetValue(n, out var cli)) result.Add((n, cli));
+        return result;
+    }
+
+    /// <summary>Search %PATH% for an executable, honoring Windows extensions (.cmd/.exe/.bat). Null if not found.</summary>
+    static string ResolveExecutableOnPath(string name)
+    {
+        string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+        char sep = OperatingSystem.IsWindows() ? ';' : ':';
+        string[] exts = OperatingSystem.IsWindows()
+            ? new[] { ".cmd", ".exe", ".bat", "" }
+            : new[] { "" };
+        foreach (var dir in pathEnv.Split(sep, StringSplitOptions.RemoveEmptyEntries))
+        {
+            foreach (var ext in exts)
+            {
+                try
+                {
+                    string candidate = Path.Combine(dir.Trim(), name + ext);
+                    if (File.Exists(candidate)) return candidate;
+                }
+                catch { /* malformed PATH entry */ }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Default Windows install locations for the editor CLI shims (fallback when not on PATH).</summary>
+    static IEnumerable<(string name, string path)> WellKnownEditorPaths()
+    {
+        if (!OperatingSystem.IsWindows()) yield break;
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var probes = new (string name, string full)[]
+        {
+            ("code",          Path.Combine(local, "Programs", "Microsoft VS Code", "bin", "code.cmd")),
+            ("code",          Path.Combine(pf, "Microsoft VS Code", "bin", "code.cmd")),
+            ("code-insiders", Path.Combine(local, "Programs", "Microsoft VS Code Insiders", "bin", "code-insiders.cmd")),
+            ("code-insiders", Path.Combine(pf, "Microsoft VS Code Insiders", "bin", "code-insiders.cmd")),
+            ("cursor",        Path.Combine(local, "Programs", "cursor", "resources", "app", "bin", "cursor.cmd")),
+            ("windsurf",      Path.Combine(local, "Programs", "Windsurf", "bin", "windsurf.cmd")),
+            ("codium",        Path.Combine(local, "Programs", "VSCodium", "bin", "codium.cmd")),
+            ("codium",        Path.Combine(pf, "VSCodium", "bin", "codium.cmd")),
+        };
+        foreach (var p in probes)
+        {
+            bool exists = false;
+            try { exists = File.Exists(p.full); } catch { }
+            if (exists) yield return (p.name, p.full);
+        }
+    }
+
+    /// <summary>Query an editor for the installed version of an extension, or null if absent/unknown.</summary>
+    static string GetInstalledExtensionVersion(string cli, string extId)
+    {
+        var (code, so, _) = RunEditorCli(cli, new[] { "--list-extensions", "--show-versions" }, 30000);
+        if (code != 0) return null;
+        foreach (var raw in so.Split('\n'))
+        {
+            string line = raw.Trim();
+            int at = line.LastIndexOf('@');
+            if (at > 0 && line.Substring(0, at).Equals(extId, StringComparison.OrdinalIgnoreCase))
+                return line.Substring(at + 1).Trim();
+        }
+        return null;
+    }
+
+    /// <summary>Run an editor CLI with captured output. Args passed individually (survives spaces in paths).</summary>
+    static (int code, string stdout, string stderr) RunEditorCli(string cli, string[] args, int timeoutMs)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = cli,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            foreach (var a in args) psi.ArgumentList.Add(a);
+
+            using var p = Process.Start(psi);
+            if (p == null) return (-1, "", "could not start process");
+
+            // Read both streams async to avoid a pipe-buffer deadlock on large extension lists.
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            var errTask = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(timeoutMs))
+            {
+                try { p.Kill(true); } catch { }
+                return (-1, "", "[timed out]");
+            }
+            return (p.ExitCode, outTask.GetAwaiter().GetResult(), errTask.GetAwaiter().GetResult());
+        }
+        catch (Exception ex)
+        {
+            return (-1, "", ex.Message);
+        }
     }
 
     static int EnsureUpmPackage(string projectPath)

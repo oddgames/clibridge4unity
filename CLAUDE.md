@@ -90,7 +90,9 @@ A suite of tools for communicating with Unity Editor via Named Pipes using moder
 ```
 tool_claude_unity_bridge/
 ├── clibridge4unity/           # Lightweight CLI tool (~1,545 lines, single-file)
-│   └── clibridge4unity.cs     # Single-command CLI with auto-detection
+│   ├── clibridge4unity.cs     # Single-command CLI with auto-detection
+│   ├── skills/                # Per-task skill .md files (embedded into the exe)
+│   └── vscode/                # Build-staging for the embedded extension .vsix (deploy-time)
 ├── clibridge4unity.Tests/     # Integration tests for CLI (21 tests)
 ├── ConsoleUnityBridge/        # Interactive console application
 ├── Package/                   # Unity Editor package (UPM)
@@ -111,7 +113,8 @@ tool_claude_unity_bridge/
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
 │   └── package.json           # UPM manifest (v1.1.51)
-└── UnityTestProject/          # Test Unity project
+├── UnityTestProject/          # Test Unity project
+└── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
 
 ## Using clibridge4unity
@@ -318,3 +321,4 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `WAKEUP refresh` - Bring to foreground + send Ctrl+R to force recompile
 - `DISMISS` - Close modal dialogs
 - `SCREENSHOT` - CLI-side window capture (see Screenshot section)
+- `VSCODE` - Install the bundled VSCode/Cursor status-bar extension into detected editors (`code`/`code-insiders`/`cursor`/`codium`/`windsurf`). The `.vsix` is embedded in the CLI exe (built from `vscode-extension/`, version-locked to the CLI) and installed via `<editor> --install-extension <vsix> --force`; idempotent (skips if the editor already has an equal-or-newer version). `SETUP` prints a hint pointing here but does not auto-install.

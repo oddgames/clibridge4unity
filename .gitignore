@@ -6,6 +6,8 @@
 !clibridge4unity/**
 !Package/
 !Package/**
+!vscode-extension/
+!vscode-extension/**
 !README.md
 !CLAUDE.md
 !SUMMARY.md
@@ -25,6 +27,13 @@
 # Build outputs
 clibridge4unity/bin/
 clibridge4unity/obj/
+
+# VSCode extension build artifacts (re-excluded after the allowlist above)
+vscode-extension/node_modules/
+vscode-extension/out/
+vscode-extension/*.vsix
+# Embedded-extension staging: the .vsix is a build artifact; .gitkeep keeps the folder
+clibridge4unity/vscode/*.vsix
 
 # Python generated
 __pycache__/

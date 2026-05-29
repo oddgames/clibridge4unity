@@ -59,6 +59,10 @@ The system uses a dedicated polling thread (10ms cycle) + `SynchronizationContex
 - Unity-side code commands are limited to `CODE_EXEC`, `CODE_EXEC_RETURN`, `TEST`, `DEBUG`
 - LINT works fully offline — never connects to Unity Editor
 
+### VSCode Extension
+- The repo ships a VSCode/Cursor status-bar extension at `vscode-extension/` (a repo-root sibling, NOT part of this UPM package). It is a thin client that shells the CLI and parses `STATUS` output, so it ships version-locked with the CLI.
+- It is built to a `.vsix` and embedded in the CLI exe at deploy time; users install it with the CLI-side `clibridge4unity VSCODE` command (no Unity connection needed).
+
 ### Lazy Log Capture
 - `Application.logMessageReceived` subscribed ONLY during command execution (not at startup)
 - `CommandRegistry.BeginCommandLogCapture` / `EndCommandLogCapture` wraps each command
