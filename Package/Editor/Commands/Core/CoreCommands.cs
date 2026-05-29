@@ -321,6 +321,22 @@ namespace clibridge4unity
             return sb.ToString().TrimEnd();
         }
 
+        [BridgeCommand("BRIDGEINFO", "Bridge handshake: version + minimum compatible extension version (no Unity state, no main thread)",
+            Category = "Core",
+            Usage = "BRIDGEINFO")]
+        public static string BridgeInfo()
+        {
+            // STABLE HANDSHAKE CONTRACT — consumed by the VSCode extension to decide compatibility.
+            // NEVER rename this command and NEVER remove/repurpose a field; only ADD new fields.
+            // It carries bridge-code metadata ONLY (no Unity/main-thread state), so it answers even
+            // while the Editor is compiling or its main thread is blocked.
+            var sb = new StringBuilder();
+            sb.AppendLine($"bridgeVersion: {BridgeServer.Version}");
+            sb.AppendLine($"minCompatibleExtensionVersion: {BridgeServer.MinCompatibleExtensionVersion}");
+            sb.AppendLine("bridgeProtocol: 1");
+            return sb.ToString().TrimEnd();
+        }
+
         [BridgeCommand("STATUS", "Get Unity Editor status (degrades gracefully when main thread is busy)",
             Category = "Core",
             Usage = "STATUS",

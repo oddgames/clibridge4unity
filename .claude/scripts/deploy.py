@@ -1,9 +1,17 @@
 #!/usr/bin/env python
 """Deploy clibridge4unity: build, package, push, tag, release, upload, verify."""
-import sys, os, subprocess, shutil, tempfile, time, re, shlex, zipfile
+import sys, os, subprocess, shutil, tempfile, time, re, shlex, zipfile, glob
 
 def format_cmd(args):
     return " ".join(shlex.quote(str(a)) for a in args)
+
+
+def node_cmd(tool, *tool_args):
+    """Build an arg list for an npm/npx invocation. On Windows these are `.cmd` shims that
+    CreateProcess can't launch directly (shell=False), so route them through `cmd /c`."""
+    if os.name == "nt":
+        return ["cmd", "/c", tool, *tool_args]
+    return [tool, *tool_args]
 
 def run(args, check=True, capture=False, timeout=120, cwd=None):
     """Run a shell command, print it, return result."""
@@ -151,6 +159,34 @@ def main():
     exe_path = os.path.join(root, "clibridge4unity/bin/Release/net8.0/win-x64/publish/clibridge4unity.exe")
     package_exe = os.path.join(root, "Package", "Tools", "win-x64", "clibridge4unity.exe")
 
+    # Step 0: Build + package the VSCode extension into a .vsix and stage it for embedding.
+    # MUST run before `dotnet publish` so the csproj `vscode\*.vsix` EmbeddedResource picks it up.
+    # Best-effort: a machine without Node still produces a working CLI (just no embedded extension).
+    print(f"\n=== Packaging VSCode extension v{version} ===")
+    embed_dir = os.path.join(root, "clibridge4unity", "vscode")
+    ext_dir = os.path.join(root, "vscode-extension")
+    os.makedirs(embed_dir, exist_ok=True)
+    for stale in glob.glob(os.path.join(embed_dir, "*.vsix")):
+        os.remove(stale)  # embed exactly one vsix
+    vsix_path = None
+    if shutil.which("npm") and shutil.which("npx") and os.path.isfile(os.path.join(ext_dir, "package.json")):
+        # Lockstep the extension version to the CLI version (updates package.json AND package-lock.json,
+        # so the subsequent `npm ci` sync check passes). No manual edit of the extension version needed.
+        run(node_cmd("npm", "version", version, "--no-git-tag-version", "--allow-same-version"), cwd=ext_dir, timeout=60)
+        run(node_cmd("npm", "ci"), cwd=ext_dir, timeout=300)
+        run(node_cmd("npm", "run", "compile"), cwd=ext_dir, timeout=120)
+        vsix_path = os.path.join(embed_dir, f"clibridge-{version}.vsix")
+        run(node_cmd("npx", "--yes", "@vscode/vsce", "package", "--out", vsix_path), cwd=ext_dir, timeout=180)
+        if not os.path.isfile(vsix_path):
+            print(f"ERROR: vsce reported success but {vsix_path} is missing", file=sys.stderr)
+            sys.exit(1)
+        print(f"  Built + staged: {vsix_path}")
+    else:
+        print("  WARNING: Node/npm/npx not found (or no vscode-extension/) — building the CLI WITHOUT",
+              file=sys.stderr)
+        print("           an embedded extension. `clibridge4unity VSCODE` will report none bundled.",
+              file=sys.stderr)
+
     # Step 1: Build
     print(f"\n=== Building v{version} ===")
     cli_project = os.path.join(root, "clibridge4unity")
@@ -213,6 +249,9 @@ def main():
     print(f"\n=== Uploading assets ===")
     run(["gh", "release", "upload", tag, zip_path, "--clobber"], timeout=180)
     run(["gh", "release", "upload", tag, exe_path, "--clobber"], timeout=180)
+    # The VSCode extension vsix — offline/manual install path; also matches this release's CLI.
+    if vsix_path and os.path.isfile(vsix_path):
+        run(["gh", "release", "upload", tag, vsix_path, "--clobber"], timeout=180, check=False)
 
     # Step 7: Verify
     print(f"\n=== Verifying release ===")

@@ -29,6 +29,13 @@ namespace clibridge4unity
     {
         public const string Version = "1.1.51";
 
+        // Minimum VSCode-extension version compatible with this bridge's interface — the command
+        // verbs the extension sends (COMPILE/STATUS/VSCODE) and the STATUS fields it reads.
+        // RAISE THIS ONLY in a release that BREAKS that interface — NOT on every version bump.
+        // Surfaced via the BRIDGEINFO handshake command so the extension can fail-closed (hide its
+        // buttons) when it is older than this floor. Starts at 0.0.0 (everything compatible).
+        public const string MinCompatibleExtensionVersion = "0.0.0";
+
         private static CancellationTokenSource serverCts;
         private static readonly object serverLock = new object();
         private static readonly List<NamedPipeServerStream> activePipeServers = new List<NamedPipeServerStream>();
