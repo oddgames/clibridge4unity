@@ -27,6 +27,11 @@
         "command": "clibridge.status",
         "title": "Unity: Status",
         "category": "Unity Bridge"
+      },
+      {
+        "command": "clibridge.updateExtension",
+        "title": "Unity: Update Extension (match bridge version)",
+        "category": "Unity Bridge"
       }
     ],
     "configuration": {
@@ -41,6 +46,11 @@
           "type": "string",
           "default": "",
           "description": "Absolute path to the Unity project root (the folder containing Assets/ and ProjectSettings/). Leave empty to auto-detect from open workspace folders."
+        },
+        "clibridge.versionCheck": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check (via the bridge's BRIDGEINFO handshake) whether this extension is compatible with the running Unity bridge. When incompatible, the Compile/Status buttons are hidden and a one-click 'update extension' warning is shown instead. Disable to always show the buttons."
         }
       }
     }

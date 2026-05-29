@@ -733,6 +733,7 @@ class Program
             case "PING":
             case "PROBE":
             case "DIAG":
+            case "BRIDGEINFO":
             case "WAKEUP":
             case "DISMISS":
             case "OPEN":

@@ -14,30 +14,45 @@ const STATUS_BUSY = "$(sync~spin) Status…";
 const RESULT_LINGER_MS = 3000;
 const SHOW_DETAILS = "Show details";
 const COMPILE_NOW = "Compile now";
+const UPDATE_EXT = "Update extension";
 
+type CompatState = "compatible" | "incompatible" | "unknown";
+
+let compileItem: vscode.StatusBarItem;
+let statusItem: vscode.StatusBarItem;
+let versionItem: vscode.StatusBarItem;
+let extVersion = "0.0.0";
 let compileRunning = false;
 
 export function activate(ctx: vscode.ExtensionContext) {
     const channel = vscode.window.createOutputChannel("Unity Bridge");
+    extVersion = (ctx.extension.packageJSON.version as string) ?? "0.0.0";
 
-    const compileItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    compileItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     compileItem.text = COMPILE_IDLE;
     compileItem.command = "clibridge.compile";
     compileItem.tooltip = "Run clibridge4unity COMPILE";
     compileItem.show();
 
-    const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+    statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
     statusItem.text = STATUS_IDLE;
     statusItem.command = "clibridge.status";
     statusItem.tooltip = "Run clibridge4unity STATUS";
     statusItem.show();
 
-    const compileCmd = vscode.commands.registerCommand("clibridge.compile", () => {
+    // Hidden until a confirmed version mismatch is detected. When shown, it replaces the
+    // Compile/Status buttons (fail-closed) and offers a one-click self-update.
+    versionItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
+    versionItem.command = "clibridge.updateExtension";
+    versionItem.hide();
+
+    const compileCmd = vscode.commands.registerCommand("clibridge.compile", async () => {
         if (compileRunning) {
             channel.appendLine("[clibridge] COMPILE already in progress — ignoring click.");
             channel.show(true);
             return;
         }
+        if (await guardCompat(channel)) return;
         compileRunning = true;
         compileItem.text = COMPILE_BUSY;
         channel.show(true);
@@ -48,7 +63,8 @@ export function activate(ctx: vscode.ExtensionContext) {
         });
     });
 
-    const statusCmd = vscode.commands.registerCommand("clibridge.status", () => {
+    const statusCmd = vscode.commands.registerCommand("clibridge.status", async () => {
+        if (await guardCompat(channel)) return;
         statusItem.text = STATUS_BUSY;
         runBridge(channel, "STATUS", (code, output) => {
             statusItem.text = STATUS_IDLE;
@@ -56,7 +72,34 @@ export function activate(ctx: vscode.ExtensionContext) {
         });
     });
 
-    ctx.subscriptions.push(compileItem, statusItem, compileCmd, statusCmd, channel);
+    // One-click self-update: install the version-matched .vsix bundled in the CLI, then reload.
+    const updateExtCmd = vscode.commands.registerCommand("clibridge.updateExtension", () => {
+        channel.show(true);
+        runBridge(channel, "VSCODE", async (code) => {
+            if (code === 0) {
+                const choice = await vscode.window.showInformationMessage(
+                    "Installed the matching Unity clibridge extension. Reload the window to apply.",
+                    "Reload Window"
+                );
+                if (choice === "Reload Window") {
+                    vscode.commands.executeCommand("workbench.action.reloadWindow");
+                }
+            } else {
+                const choice = await vscode.window.showErrorMessage(
+                    `Failed to install the matching extension (exit ${code}).`,
+                    SHOW_DETAILS
+                );
+                if (choice === SHOW_DETAILS) channel.show(true);
+            }
+        });
+    });
+
+    ctx.subscriptions.push(compileItem, statusItem, versionItem, compileCmd, statusCmd, updateExtCmd, channel);
+
+    // Initial compatibility probe (status-bar only, no popup).
+    if (vscode.workspace.getConfiguration("clibridge").get<boolean>("versionCheck", true)) {
+        void checkCompat();
+    }
 }
 
 function runBridge(
@@ -97,6 +140,111 @@ function runBridge(
         channel.appendLine(`[clibridge] exit code ${code ?? "(none)"}`);
         onClose(code, buffered);
     });
+}
+
+/**
+ * Run a clibridge command and resolve with its exit code + buffered output, without streaming to
+ * the channel. Used for the silent BRIDGEINFO handshake. Never rejects: a spawn failure / error
+ * resolves to { code: -1 }.
+ */
+function runBridgeCapture(cmd: string): Promise<{ code: number; output: string }> {
+    const config = vscode.workspace.getConfiguration("clibridge");
+    const exe = config.get<string>("executablePath", "clibridge4unity");
+    const projectPath = resolveProjectPath(config);
+    return new Promise((resolve) => {
+        let out = "";
+        let proc: child_process.ChildProcess;
+        try {
+            proc = child_process.spawn(exe, [cmd], { shell: true, cwd: projectPath });
+        } catch {
+            resolve({ code: -1, output: "" });
+            return;
+        }
+        proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+        proc.stderr?.on("data", (d: Buffer) => { out += d.toString(); });
+        proc.on("error", () => resolve({ code: -1, output: "" }));
+        proc.on("close", (code) => resolve({ code: code ?? -1, output: out }));
+    });
+}
+
+/**
+ * Ask the bridge (BRIDGEINFO) whether this extension is still compatible, update the status-bar
+ * UI, and return the resulting state. BRIDGEINFO needs no Unity main thread, so it answers even
+ * while the Editor is compiling — but it still needs Unity running (else: "unknown").
+ */
+async function checkCompat(): Promise<CompatState> {
+    const { code, output } = await runBridgeCapture("BRIDGEINFO");
+    if (code !== 0) {
+        applyCompatState("unknown", null, null);
+        return "unknown";
+    }
+    const fields = parseStatus(output);
+    const floor = fields.minCompatibleExtensionVersion ?? null;
+    const bridgeV = fields.bridgeVersion ?? null;
+    const state = compareCompat(extVersion, floor);
+    applyCompatState(state, bridgeV, floor);
+    return state;
+}
+
+/**
+ * Re-validate compatibility right before a user-triggered action. Returns true if the action
+ * should be ABORTED (confirmed incompatible). Compatible/unknown both proceed (never block on
+ * uncertainty). No-op pass-through when the version check is disabled.
+ */
+async function guardCompat(channel: vscode.OutputChannel): Promise<boolean> {
+    if (!vscode.workspace.getConfiguration("clibridge").get<boolean>("versionCheck", true)) {
+        return false;
+    }
+    const state = await checkCompat();
+    if (state !== "incompatible") return false;
+    channel.appendLine(
+        `[clibridge] extension v${extVersion} is older than this Unity bridge requires — update before running commands.`
+    );
+    void vscode.window.showWarningMessage(
+        "The Unity clibridge extension is out of date for the running bridge. Update it to continue.",
+        UPDATE_EXT
+    ).then((choice) => {
+        if (choice === UPDATE_EXT) vscode.commands.executeCommand("clibridge.updateExtension");
+    });
+    return true;
+}
+
+/** Apply a compatibility state to the status bar. Incompatible => fail-closed (hide the buttons). */
+function applyCompatState(state: CompatState, bridgeV: string | null, floor: string | null) {
+    if (state === "incompatible") {
+        compileItem.hide();
+        statusItem.hide();
+        versionItem.text = "$(warning) Unity: update extension";
+        versionItem.tooltip =
+            `Extension v${extVersion} is older than this Unity bridge requires ` +
+            `(needs ≥ v${floor ?? "?"}; bridge is v${bridgeV ?? "?"}).\n` +
+            `Commands are disabled until the extension matches. Click to install the matching version.`;
+        versionItem.color = new vscode.ThemeColor("statusBarItem.warningForeground");
+        versionItem.show();
+    } else {
+        // compatible or unknown — never hide on uncertainty
+        versionItem.hide();
+        compileItem.show();
+        statusItem.show();
+    }
+}
+
+/** Compare extension version against the bridge's minimum-compatible floor (X.Y.Z, numeric). */
+function compareCompat(extV: string, floor: string | null): CompatState {
+    const a = parseSemver(extV);
+    const b = parseSemver(floor);
+    if (!a || !b) return "unknown";
+    for (let i = 0; i < 3; i++) {
+        if (a[i] > b[i]) return "compatible";
+        if (a[i] < b[i]) return "incompatible";
+    }
+    return "compatible"; // equal
+}
+
+function parseSemver(v: string | null | undefined): [number, number, number] | null {
+    if (!v) return null;
+    const m = /(\d+)\.(\d+)\.(\d+)/.exec(v);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
 }
 
 async function showStatusNotification(

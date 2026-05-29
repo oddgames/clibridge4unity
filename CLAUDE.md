@@ -228,6 +228,7 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `HELP` - List all available commands
 - `PROBE` - Quick main thread health check
 - `DIAG` - Diagnostic info (no main thread needed)
+- `BRIDGEINFO` - Stable handshake (no main thread): `bridgeVersion`, `minCompatibleExtensionVersion`, `bridgeProtocol`. **Frozen contract** — consumed by the VSCode extension to decide compatibility; never rename it or repurpose a field (append only). Raise `BridgeServer.MinCompatibleExtensionVersion` only in a release that breaks the extension's interface.
 - `STATUS` - Get Unity Editor status, including C# compile and UI Toolkit import errors
 - `LINT [warnings]` - **Default: offline syntax + UXML/USS well-formedness check (~1s).** Catches missing braces, unclosed strings, bad keywords, malformed C#/UXML/USS. Daemon FileSystemWatcher → catches errors in NEW files Unity hasn't seen. Fails fast at 20s on huge projects.
 - `LINT unity [warnings]` - Unity-faithful **per-asmdef** compile (~5-60s). Asmdef-aware (avoids cross-asmdef type collision false positives). Catches missing methods, type errors, missing usings. 60s budget — falls back to COMPILE if exceeded.
