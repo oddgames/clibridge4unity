@@ -2,7 +2,7 @@
 
 ## What We Built
 
-A Unity Editor automation framework with **45 Unity bridge commands** plus CLI-side tools such as `CODE_ANALYZE`, designed for AI-powered development (Claude integration), CI/CD pipelines, and scripted workflows.
+A Unity Editor automation framework with **46 Unity bridge commands** plus CLI-side tools such as `CODE_ANALYZE`, designed for AI-powered development (Claude integration), CI/CD pipelines, and scripted workflows.
 
 ## Project Structure
 
@@ -70,4 +70,4 @@ clibridge4unity LOG --filter "MyClass"
 
 ## Version
 
-Current: 1.1.51
+Current: 1.1.52

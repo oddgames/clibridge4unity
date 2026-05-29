@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.1.52 — 2026-05-29
+
+## v1.1.52
+
+### New
+- **VSCode/Cursor status-bar extension** (`vscode-extension/`, PR #5 by @JPerryOddGames): shows bridge status with a version check + one-click update button when the CLI is stale, plus COMPILE and STATUS buttons. Built to a `.vsix` and embedded in the CLI exe (version-locked to the CLI).
+- `VSCODE` command (CLI-side, no Unity needed) — installs the bundled extension into detected editors (`code`/`code-insiders`/`cursor`/`codium`/`windsurf`) via `--install-extension … --force`. Idempotent: skips if an equal-or-newer version is already installed. `SETUP` now points users here.
+- `BRIDGEINFO` command — a stable, no-main-thread handshake exposing `bridgeVersion`, `minCompatibleExtensionVersion`, and `bridgeProtocol`. The extension reads it to fail-closed (hide its buttons + offer re-install) when it's older than the bridge's compatibility floor. Treated as a frozen, append-only contract.
+
+### Internal
+- `BridgeServer.MinCompatibleExtensionVersion` (starts at `0.0.0`) gates extension compatibility; raise it only in a release that breaks a verb the extension sends or a `STATUS`/`BRIDGEINFO` field it reads.
+- `deploy.py` now builds the VSCode extension `.vsix` and stages it into `clibridge4unity/vscode/` for embedding before publish.
+- Bridge command count: 45 → 46 (BRIDGEINFO).
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.51 — 2026-05-28
 
 ## v1.1.51
