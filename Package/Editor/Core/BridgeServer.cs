@@ -27,7 +27,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.52";
+        public const string Version = "1.1.53";
 
         // Minimum VSCode-extension version compatible with this bridge's interface — the command
         // verbs the extension sends (COMPILE/STATUS/VSCODE) and the STATUS fields it reads.
@@ -48,7 +48,7 @@ namespace clibridge4unity
         // status query.)
         private static readonly HashSet<string> SlotBypassCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "PING", "DIAG", "PROBE", "LOG", "STATUS"
+            "PING", "DIAG", "PROBE", "LOG", "STATUS", "CANCEL"
         };
         private const int ListenerCount = 8;
 
@@ -739,6 +739,14 @@ namespace clibridge4unity
                         {
                             await Task.Delay(1000, heartbeatCts.Token);
                             if (heartbeatCts.IsCancellationRequested) break;
+                            // If the client has gone away (Ctrl+C / kill), abort the command's token
+                            // so any queued main-thread work is skipped instead of waiting the full
+                            // per-command timeout. The same path covers a CANCEL from another client.
+                            if (!pipe.IsConnected)
+                            {
+                                try { timeoutCts.Cancel(); } catch { }
+                                break;
+                            }
                             double staleness = CommandRegistry.GetHeartbeatStaleness();
                             byte[] hb = Encoding.UTF8.GetBytes($"__hb:{staleness:F1}\n");
                             await pipeWriteLock.WaitAsync(heartbeatCts.Token);
@@ -746,8 +754,17 @@ namespace clibridge4unity
                             {
                                 if (pipe.IsConnected)
                                 {
-                                    await pipe.WriteAsync(hb, 0, hb.Length, heartbeatCts.Token);
-                                    await pipe.FlushAsync(heartbeatCts.Token);
+                                    try
+                                    {
+                                        await pipe.WriteAsync(hb, 0, hb.Length, heartbeatCts.Token);
+                                        await pipe.FlushAsync(heartbeatCts.Token);
+                                    }
+                                    catch
+                                    {
+                                        // Write failed — client disconnect mid-cycle. Cancel + exit.
+                                        try { timeoutCts.Cancel(); } catch { }
+                                        return;
+                                    }
                                 }
                             }
                             finally { pipeWriteLock.Release(); }
@@ -770,7 +787,7 @@ namespace clibridge4unity
                         // Different command types run concurrently. Only a same-type duplicate fired
                         // while the first is still young (<5s) is rejected — prevents the AI doubling
                         // up while never blocking a different command behind a long-running one.
-                        if (!CommandRegistry.TryBeginCommand(cmdInfo?.Name ?? command, out inflightToken, out string busy))
+                        if (!CommandRegistry.TryBeginCommand(cmdInfo?.Name ?? command, timeoutCts, out inflightToken, out string busy))
                         {
                             BridgeDiagnostics.Log("BridgeServer", $"duplicate rejected: {command}");
                             response = busy;

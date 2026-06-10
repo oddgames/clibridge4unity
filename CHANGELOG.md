@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.53 — 2026-06-10
+
+## v1.1.53
+
+### New
+- **`CANCEL` bridge command** — `CANCEL <NAME>` cancels in-flight commands by name, `CANCEL --all` cancels every non-self entry. Bypasses the gate so it always answers, even while the main thread is wedged. Trips each entry's CancellationTokenSource — InvokeOnMainThread sees the cancellation on its next polling tick and TrySetCanceled's the queued work, which ProcessAllPendingWork then skips. Frees queued main-thread work; an action already mid-execute can't be interrupted (the response says so and points at `KILL`).
+
+### Fixed
+- **Abrupt CLI exit no longer leaves Unity's main thread queued behind a dead client.** The heartbeat task now watches `pipe.IsConnected` and the write path; either signal trips `timeoutCts` on the command, so a Ctrl+C / killed CLI immediately frees that command's queued main-thread work instead of waiting the full per-command timeout (10–30s).
+- **"Unity isn't open" fast-fail is now near-instant (~0.16s, ~190× faster than before).** New `BridgePipeAlive` probe (sub-ms `File.Exists \\.\pipe\<name>`) runs before any state detection — pipe-using commands fast-fail with a 3-line actionable message ("pipe not responding / Unity may not be open / OPEN or DIAG") and skip the ~5s `DetectUnityProcess` call entirely. CLI-side commands (DISMISS, OPEN, KILL, WAKEUP, LAST, LINT, CODE_ANALYZE, SCREENSHOT) bypass the gate and keep working.
+
+### Internal
+- `PIPE_CONNECT_TIMEOUT_MS` 10000 → 2000. With the new pipe probe doing the up-front gating, the connect-retry budget only needs to cover legit "bridge just-started" cases — 2s is plenty.
+- `DetectUnityProcess` early-outs: ① if THIS project's bridge pipe is alive, return `Running` immediately (skip Restart-Manager lookup + cross-machine window enumeration — typically ~5s saved); ② if the lockfile exists but is *stale* (not held), skip the Restart-Manager RPC (the slowest piece — it serializes against the Windows SCM).
+- `CommandRegistry.InFlightEntry` now carries the command's `CancellationTokenSource` so `CANCEL` and disconnect-detection can trip it directly.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.52 — 2026-05-29
 
 ## v1.1.52

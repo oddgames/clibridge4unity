@@ -119,7 +119,7 @@ namespace clibridge4unity
         // Every command currently executing (id -> name+start). Different command types run
         // concurrently; this drives same-type de-dup (so the AI can't accidentally double-fire) and
         // the "what's running" diagnostics. A long-running command never blocks a different one.
-        private sealed class InFlightEntry { public string Name; public DateTime StartedAt; }
+        private sealed class InFlightEntry { public string Name; public DateTime StartedAt; public CancellationTokenSource Cts; }
         private static readonly ConcurrentDictionary<long, InFlightEntry> _inFlight = new ConcurrentDictionary<long, InFlightEntry>();
         private static long _inFlightSeq;
         // A duplicate of a command already running for less than this is rejected (accidental
@@ -1122,7 +1122,7 @@ namespace clibridge4unity
         /// accidental double-fire); after that, a re-fire is treated as an intentional retry. Returns
         /// false + a busy response when rejected. Diagnostics bypass this entirely. Any thread.
         /// </summary>
-        public static bool TryBeginCommand(string canonicalName, out long token, out string busyResponse)
+        public static bool TryBeginCommand(string canonicalName, CancellationTokenSource cts, out long token, out string busyResponse)
         {
             token = 0;
             busyResponse = null;
@@ -1137,7 +1137,7 @@ namespace clibridge4unity
                 }
             }
             token = Interlocked.Increment(ref _inFlightSeq);
-            _inFlight[token] = new InFlightEntry { Name = canonicalName, StartedAt = now };
+            _inFlight[token] = new InFlightEntry { Name = canonicalName, StartedAt = now, Cts = cts };
             return true;
         }
 
@@ -1145,6 +1145,31 @@ namespace clibridge4unity
         public static void EndCommand(long token)
         {
             if (token != 0) _inFlight.TryRemove(token, out _);
+        }
+
+        /// <summary>
+        /// Cancel in-flight commands by name (case-insensitive) or all of them if name is null/empty.
+        /// Trips each entry's CancellationTokenSource — the next polling tick of InvokeOnMainThread sees
+        /// it and TrySetCanceled's the queued work, so ProcessAllPendingWork skips it before invoking
+        /// the action. Frees queued main-thread work; a work item already mid-Action() cannot be
+        /// interrupted. Returns the list of cancelled descriptors (name + elapsed). Any thread.
+        /// </summary>
+        public static List<string> CancelInFlight(string nameOrNull)
+        {
+            var cancelled = new List<string>();
+            var now = DateTime.Now;
+            bool all = string.IsNullOrWhiteSpace(nameOrNull);
+            foreach (var e in _inFlight.Values)
+            {
+                if (!all && !string.Equals(e.Name, nameOrNull, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                // Skip self: never cancel the CANCEL request that's currently running this code.
+                if (string.Equals(e.Name, "CANCEL", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                try { e.Cts?.Cancel(); } catch { /* already disposed/cancelled */ }
+                cancelled.Add($"{e.Name} (was running {(now - e.StartedAt).TotalSeconds:F1}s)");
+            }
+            return cancelled;
         }
 
         /// <summary>

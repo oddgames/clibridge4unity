@@ -321,6 +321,28 @@ namespace clibridge4unity
             return sb.ToString().TrimEnd();
         }
 
+        [BridgeCommand("CANCEL",
+            "Cancel in-flight command(s) by name or --all. Frees QUEUED main-thread work; an action " +
+            "already mid-execute can't be interrupted — use KILL for that. Bypasses the gate; always answers.",
+            Category = "Core",
+            Usage = "CANCEL <NAME>\n  CANCEL --all\n" +
+                    "  Examples: CANCEL STATUS   CANCEL --all\n" +
+                    "  Use DIAG to see the inFlight list before cancelling.")]
+        public static string Cancel(string data)
+        {
+            string arg = (data ?? string.Empty).Trim();
+            bool all = arg.Equals("--all", System.StringComparison.OrdinalIgnoreCase) || arg.Length == 0;
+            string target = all ? null : arg.ToUpperInvariant();
+            var cancelled = CommandRegistry.CancelInFlight(target);
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine(cancelled.Count == 0
+                ? (all ? "No in-flight commands to cancel." : $"No in-flight command matching '{target}'.")
+                : $"Cancelled {cancelled.Count} command(s):");
+            foreach (var line in cancelled) sb.AppendLine($"  - {line}");
+            sb.Append("Note: only QUEUED main-thread work is freed. An action already running on the main thread keeps going — restart Unity (KILL) if it's wedged.");
+            return sb.ToString();
+        }
+
         [BridgeCommand("BRIDGEINFO", "Bridge handshake: version + minimum compatible extension version (no Unity state, no main thread)",
             Category = "Core",
             Usage = "BRIDGEINFO")]

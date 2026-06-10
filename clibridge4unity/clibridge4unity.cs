@@ -194,7 +194,9 @@ class Program
     const int EXIT_PLAY_MODE = 12;        // Play mode conflict (need STOP first)
     const int EXIT_SAFE_MODE = 13;        // Unity in Safe Mode (scripts can't run)
     const int EXIT_TIMEOUT = 14;          // Command response timed out
-    const int PIPE_CONNECT_TIMEOUT_MS = 10000;
+    // 2s is plenty for a live bridge ([InitializeOnLoad] sub-second). Going higher just makes
+    // the "Unity isn't open / bridge isn't responding" case feel like the CLI is hung.
+    const int PIPE_CONNECT_TIMEOUT_MS = 2000;
 
     // Track if last response indicated main thread timeout
     private static bool _lastResponseContainedMainThreadTimeout;
@@ -1495,6 +1497,17 @@ class Program
             return HandleReferencesCommand(projectPath, data);
         }
 
+        // Fast-fail: if this command needs the bridge and the pipe clearly isn't being served,
+        // skip ~5s of DetectUnityProcess (window enum + Restart-Manager lockfile lookup) and just
+        // say so. CLI-side commands in NoPipeNeeded keep working as before.
+        if (!NoPipeNeeded.Contains(cmdUpper) && !BridgePipeAlive(pipeName))
+        {
+            Console.Error.WriteLine($"Error: Unity bridge pipe is not responding.");
+            Console.Error.WriteLine($"       Unity may not be open for '{Path.GetFileName(Path.GetFullPath(projectPath))}'.");
+            Console.Error.WriteLine($"       Use 'clibridge4unity OPEN' to launch Unity, or 'DIAG' for detailed state.");
+            return EXIT_CONNECTION;
+        }
+
         // DISMISS: close dialogs or click specific buttons — works on ANY Unity process, no pipe needed
         // Usage: DISMISS          — list dialogs, send WM_CLOSE to all
         //        DISMISS Yes      — click button labeled "Yes"
@@ -2331,6 +2344,25 @@ class Program
                 try { File.Delete(files[i]); } catch { }
         }
         catch { }
+    }
+
+    // CLI-side commands that DON'T need the bridge pipe — they work via Win32 / offline analysis.
+    // Anything outside this set short-circuits when the pipe isn't being served.
+    static readonly HashSet<string> NoPipeNeeded = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "DISMISS", "LAST", "OPEN", "KILL", "WAKEUP", "CODE_ANALYZE", "LINT", "SCREENSHOT"
+    };
+
+    /// <summary>
+    /// Sub-millisecond probe: is anything actually serving this pipe? Named pipes live in the
+    /// Win32 \\.\pipe\ namespace, so File.Exists answers without opening a connection. The whole
+    /// point is to avoid paying ~5s for DetectUnityProcess (window enum + Restart-Manager file
+    /// lookup) when the bridge clearly isn't listening.
+    /// </summary>
+    static bool BridgePipeAlive(string pipeName)
+    {
+        try { return File.Exists($@"\\.\pipe\{pipeName}"); }
+        catch { return false; }
     }
 
     static string GeneratePipeName(string projectPath)
@@ -4260,6 +4292,15 @@ class Program
         string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
         string lockfilePath = Path.Combine(Path.GetFullPath(projectPath), "Temp", "UnityLockfile");
 
+        // Early-out: if THIS project's bridge pipe is being served, state is unambiguously Running.
+        // Skip the slow path (Restart-Manager lookup + per-window SendMessageTimeout enumeration
+        // across every Unity on the machine) — each can take seconds. ~1ms instead of ~5s.
+        if (BridgePipeAlive(GeneratePipeName(projectPath)))
+        {
+            info.State = UnityProcessState.Running;
+            return info;
+        }
+
         // Read heartbeat file for advisory info (compile time estimates, state hints)
         // Don't use it to block commands — it can be slightly stale
         var heartbeat = ReadHeartbeatFile(projectPath);
@@ -4296,7 +4337,9 @@ class Program
         // AUTHORITATIVE: ask Windows Restart Manager which PIDs hold Temp/UnityLockfile.
         // Works regardless of project-name collisions, path casing, or command-line quirks.
         // Done first so subsequent passes can skip if RM already nailed it.
-        var lockfileOwners = lockfileExists ? GetPidsHoldingFile(lockfilePath) : new List<uint>();
+        // Skip Restart Manager when the lockfile is stale (exists but no one holds it). RM is the
+        // slowest piece (serializes against the Windows SCM RPC) and would return nothing anyway.
+        var lockfileOwners = (lockfileExists && lockfileHeld) ? GetPidsHoldingFile(lockfilePath) : new List<uint>();
         foreach (uint pid in lockfileOwners)
         {
             try
