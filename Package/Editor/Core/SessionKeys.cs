@@ -14,5 +14,12 @@ namespace clibridge4unity
         public static readonly string PlayModeStartTime = "Bridge_PlayModeStartTime";
         public static readonly string LastBuildPath = "Bridge_LastBuildPath";
         public static readonly string LastBuildTarget = "Bridge_LastBuildTarget";
+
+        // Test-run state — survives the PlayMode entry/exit domain reloads so we can re-register
+        // the TestRunnerApi callbacks in the new domain and keep persisting results.
+        public static readonly string TestRunId = "Bridge_TestRunId";
+        public static readonly string TestLogPath = "Bridge_TestLogPath";
+        public static readonly string TestStatusPath = "Bridge_TestStatusPath";
+        public static readonly string TestMode = "Bridge_TestMode";
     }
 }

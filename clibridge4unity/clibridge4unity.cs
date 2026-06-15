@@ -1996,6 +1996,14 @@ class Program
             return EXIT_SUCCESS;
         }
 
+        // TEST: server writes results to Temp/clibridge4unity_test.log with a sibling .status
+        // file (running/done/error). We tail the file from disk so PlayMode entering/exiting
+        // the domain reload (which kills the pipe) doesn't eat the result stream.
+        if (command.Equals("TEST", StringComparison.OrdinalIgnoreCase))
+        {
+            return HandleTest(pipeName, projectPath, data);
+        }
+
         int result = SendCommand(pipeName, projectPath, command, data);
 
         // Auto-retry once on main thread timeout — Unity may have just been momentarily busy
@@ -2105,6 +2113,138 @@ class Program
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// TEST handler. The server writes streaming results to <c>Temp/clibridge4unity_test.log</c>
+    /// and a status file (running/done/error: …). We trigger the test run via the pipe (best-
+    /// effort — the pipe will die when PlayMode reloads the domain), then tail the log file
+    /// from disk. Status transitions to "done" end the wait; "error: …" surfaces and exits non-zero.
+    /// </summary>
+    static int HandleTest(string pipeName, string projectPath, string data)
+    {
+        string tempDir = Path.Combine(Path.GetFullPath(projectPath), "Temp");
+        string logPath = Path.Combine(tempDir, "clibridge4unity_test.log");
+        string statusPath = Path.Combine(tempDir, "clibridge4unity_test.status");
+
+        // Snapshot prior status so we can tell when the server has actually moved the run forward
+        // (vs. us seeing a stale "done" from a previous TEST). The server overwrites both files
+        // at the start of every run; we wait until status becomes "running" with a fresh logfile.
+        string priorStatus = TryReadAllTextTrim(statusPath);
+        DateTime preStartUtc = DateTime.UtcNow;
+
+        // Fire-and-forget the command on a background thread. We only need the server to receive
+        // it — output flows via the log file, not the pipe. The pipe will die mid-PlayMode-reload;
+        // that's fine, the disk file keeps capturing because the server's InitializeOnLoad resume
+        // re-registers callbacks after the reload.
+        var sendTask = Task.Run(() =>
+        {
+            try
+            {
+                using var pipe = ConnectPipeWithProjectFallback(pipeName, projectPath, "TEST",
+                    PIPE_CONNECT_TIMEOUT_MS, out _);
+                string msg = string.IsNullOrEmpty(data) ? "TEST" : $"TEST|{data}";
+                byte[] bytes = Encoding.UTF8.GetBytes(msg + "\n");
+                pipe.Write(bytes, 0, bytes.Length);
+                pipe.Flush();
+                // Drain the pipe so the server doesn't backpressure. We don't print these bytes —
+                // the log file is the source of truth and avoids duplication.
+                byte[] discard = new byte[8192];
+                while (true)
+                {
+                    int n;
+                    try { n = pipe.Read(discard, 0, discard.Length); } catch { break; }
+                    if (n == 0) break;
+                }
+            }
+            catch { /* pipe broken — log file is still authoritative */ }
+        });
+
+        // Wait for the server to actually start the run: status should move to "running" AND the
+        // log file should have been (re)created since we kicked off. Caps at 30s — if the bridge
+        // never accepts the command, surface that clearly.
+        int waitMs = 0;
+        bool started = false;
+        while (waitMs < 30000)
+        {
+            string s = TryReadAllTextTrim(statusPath);
+            if (s == "running")
+            {
+                // If we already saw "running" before this run, look at the log file's mtime to
+                // confirm the server has actually written something fresh.
+                if (priorStatus != "running") { started = true; break; }
+                try
+                {
+                    if (File.Exists(logPath) && File.GetLastWriteTimeUtc(logPath) > preStartUtc) { started = true; break; }
+                }
+                catch { }
+            }
+            Thread.Sleep(100);
+            waitMs += 100;
+        }
+        if (!started)
+        {
+            Console.Error.WriteLine("Error: TEST run did not start within 30s — bridge may not have accepted the command.");
+            return EXIT_TIMEOUT;
+        }
+
+        // Tail the log file. Print new bytes as they appear; exit when status flips to
+        // done/error. 10-minute cap matches the server-side TimeoutSeconds.
+        long offset = 0;
+        int elapsedMs = 0;
+        const int pollMs = 200;
+        const int maxMs = 600000;
+        while (elapsedMs < maxMs)
+        {
+            offset = DrainLog(logPath, offset);
+
+            string status = TryReadAllTextTrim(statusPath);
+            if (status == "done")
+            {
+                // One last drain in case bytes were written between our read and status flip.
+                Thread.Sleep(100);
+                DrainLog(logPath, offset);
+                return EXIT_SUCCESS;
+            }
+            if (status != null && status.StartsWith("error"))
+            {
+                DrainLog(logPath, offset);
+                Console.Error.WriteLine($"\nTest run failed: {status}");
+                return EXIT_COMMAND_ERROR;
+            }
+
+            Thread.Sleep(pollMs);
+            elapsedMs += pollMs;
+        }
+
+        Console.Error.WriteLine("\n--- TEST tail timed out (10 min) ---");
+        return EXIT_TIMEOUT;
+    }
+
+    /// <summary>Reads any new bytes appended to <paramref name="path"/> since <paramref name="offset"/> and writes them to stdout. Returns the new offset.</summary>
+    static long DrainLog(string path, long offset)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            if (fs.Length <= offset) return offset;
+            fs.Seek(offset, SeekOrigin.Begin);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = fs.Read(buf, 0, buf.Length)) > 0)
+            {
+                Console.Write(Encoding.UTF8.GetString(buf, 0, n));
+                offset += n;
+            }
+        }
+        catch { /* file not yet created, transient lock, etc. — try again next tick */ }
+        return offset;
+    }
+
+    static string TryReadAllTextTrim(string path)
+    {
+        try { return File.ReadAllText(path).Trim(); } catch { return null; }
     }
 
     /// <summary>
@@ -6350,16 +6490,13 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
     }
 
     // ─── Skill installation ────────────────────────────────────────────
-    // Embeds curated per-task skill files (skills/*.md) into the CLI exe and
-    // unpacks them into <project>/.claude/skills/ on SETUP. Each installed
-    // file gets a hidden trailer:
-    //     <!-- clibridge4unity:installed-sha=<hex> -->
-    // where <hex> is sha1 of the file's body (everything before the marker,
-    // \r\n normalized to \n, trailing whitespace trimmed, single trailing \n).
-    // On re-install, we recompute the hash for the existing file:
-    //   - hash matches  → user hasn't edited it, safe to overwrite
-    //   - hash differs  → user edited, leave alone with a warning
-    //   - no marker     → user-authored, never touch
+    // Embeds curated per-task skill files (skills/*.md) into the CLI exe and unpacks them into
+    // <project>/.claude/skills/ on SETUP. Every shipped skill is named clibridge4unity-<topic>.md
+    // and SETUP wipes the whole prefix-matched set before re-installing — so the on-disk copy is
+    // always exactly what the current CLI ships. If a user wants to keep a customised version of a
+    // shipped skill, they rename it (drop the prefix); files not matching `clibridge4unity-*` are
+    // never touched. Legacy files installed by an older CLI (no prefix, but with our SHA marker)
+    // are also wiped — both as a one-time cleanup.
     static void InstallSkills(string projectPath)
     {
         string skillsDir = Path.Combine(projectPath, ".claude", "skills");
@@ -6371,6 +6508,40 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             return;
         }
 
+        // 1. Wipe every shipped skill: files matching `clibridge4unity-*.md` (current naming) AND
+        //    files that carry the legacy `<!-- clibridge4unity:installed-sha=… -->` marker (older
+        //    CLI versions). Files outside both buckets are user-authored and never touched —
+        //    rename a shipped skill to keep a customised copy.
+        int wiped = 0;
+        try
+        {
+            foreach (var path in Directory.GetFiles(skillsDir, "*.md"))
+            {
+                string fileName = Path.GetFileName(path);
+                bool shipped = fileName.StartsWith("clibridge4unity-", StringComparison.OrdinalIgnoreCase);
+                if (!shipped)
+                {
+                    // Legacy marker check — old installs wrote the SHA marker inside the file body.
+                    try
+                    {
+                        string body = File.ReadAllText(path);
+                        if (body.IndexOf("clibridge4unity:installed-sha=", StringComparison.OrdinalIgnoreCase) >= 0)
+                            shipped = true;
+                    }
+                    catch { /* unreadable — leave alone */ }
+                }
+                if (!shipped) continue;
+                try { File.Delete(path); wiped++; }
+                catch (Exception ex) { Console.Error.WriteLine($"     skipped delete .claude/skills/{fileName} ({ex.Message})"); }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Warning: Could not scan .claude/skills ({ex.Message})");
+        }
+
+        // 2. Install every embedded skill resource fresh — no marker, no hash check, no "kept"
+        //    branch. Always exactly what this CLI ships.
         var asm = typeof(Program).Assembly;
         var resourceNames = asm.GetManifestResourceNames()
             .Where(n => n.StartsWith("skills/", StringComparison.Ordinal) &&
@@ -6384,7 +6555,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             return;
         }
 
-        int installed = 0, updated = 0, unchanged = 0, skipped = 0;
+        int installed = 0, skipped = 0;
 
         foreach (var resourceName in resourceNames)
         {
@@ -6406,73 +6577,10 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
                 continue;
             }
 
-            string canonical = CanonicalizeSkillBody(body);
-            string newHash = Sha1Hex(canonical);
-            string toWrite = canonical + $"<!-- clibridge4unity:installed-sha={newHash} -->\n";
-
-            if (!File.Exists(targetPath))
-            {
-                try
-                {
-                    File.WriteAllText(targetPath, toWrite);
-                    Console.WriteLine($"     installed   .claude/skills/{fileName}");
-                    installed++;
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"     skipped     .claude/skills/{fileName} (write error: {ex.Message})");
-                    skipped++;
-                }
-                continue;
-            }
-
-            string existing;
-            try { existing = File.ReadAllText(targetPath); }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"     skipped     .claude/skills/{fileName} (read error: {ex.Message})");
-                skipped++;
-                continue;
-            }
-
-            // Match the entire marker line (with surrounding newlines) so we can excise it
-            // and hash the rest of the file. Catches edits both before AND after the marker.
-            var markerMatch = System.Text.RegularExpressions.Regex.Match(
-                existing,
-                @"(^|\n)[ \t]*<!--\s*clibridge4unity:installed-sha=([0-9a-fA-F]+)\s*-->[ \t]*(\r?\n|$)",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
-            if (!markerMatch.Success)
-            {
-                Console.WriteLine($"     kept        .claude/skills/{fileName} (user-authored, no clibridge4unity marker)");
-                skipped++;
-                continue;
-            }
-
-            string existingShippedHash = markerMatch.Groups[2].Value.ToLowerInvariant();
-            string remainder = existing.Substring(0, markerMatch.Index) +
-                               existing.Substring(markerMatch.Index + markerMatch.Length);
-            string existingBody = CanonicalizeSkillBody(remainder);
-            string actualHash = Sha1Hex(existingBody);
-
-            if (actualHash != existingShippedHash)
-            {
-                Console.WriteLine($"     kept        .claude/skills/{fileName} (locally modified — delete to re-install)");
-                skipped++;
-                continue;
-            }
-
-            if (existingShippedHash == newHash)
-            {
-                unchanged++;
-                continue;
-            }
-
             try
             {
-                File.WriteAllText(targetPath, toWrite);
-                Console.WriteLine($"     updated     .claude/skills/{fileName}");
-                updated++;
+                File.WriteAllText(targetPath, body);
+                installed++;
             }
             catch (Exception ex)
             {
@@ -6482,10 +6590,9 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         }
 
         var summary = new List<string>();
+        if (wiped > 0)     summary.Add($"{wiped} wiped");
         if (installed > 0) summary.Add($"{installed} installed");
-        if (updated > 0)   summary.Add($"{updated} updated");
-        if (unchanged > 0) summary.Add($"{unchanged} up-to-date");
-        if (skipped > 0)   summary.Add($"{skipped} kept");
+        if (skipped > 0)   summary.Add($"{skipped} skipped");
         if (summary.Count == 0) summary.Add($"{resourceNames.Count} processed");
 
         Console.WriteLine($"[OK] .claude/skills: {string.Join(", ", summary)}");

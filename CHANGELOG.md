@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.1.54 — 2026-06-15
+
+## v1.1.54
+
+### New
+- **14 generic Unity-workflow skills** ship in the CLI exe and unpack via `SETUP` into every project's `.claude/skills/`. Each follows the same shape (frontmatter with auto-trigger keywords → "the one rule" → pitfall catalog with `Real bug` / `Rule` per item → workflow checklist → quick reference). Topics:
+  - `clibridge4unity-async-mainthread` — Task / async / UniTask, main-thread hops, blocking-IO traps, deadlock by `.Result`, hooks the `CLIBridge.SwitchToMainThread/Background/Token` work shipped in 1.1.53.
+  - `clibridge4unity-domain-reload` — what survives a reload (SessionState/EditorPrefs/asset files) vs what dies (static fields, async tasks, callbacks, pipe handles), the `[InitializeOnLoad]` defer-to-first-tick pattern, PlayMode-spanning state on disk.
+  - `clibridge4unity-serialization` — `[SerializeField]`, `[SerializeReference]` polymorphism, `ISerializationCallbackReceiver`, `[FormerlySerializedAs]` migrations, `SerializableDictionary` template, Sirenix/Odin trade-offs.
+  - `clibridge4unity-prefab-workflow` — asset vs instance vs prefab-mode contexts, `PrefabUtility.LoadPrefabContents` + `UnloadPrefabContents` in try/finally, variants and nested-prefab override semantics, missing-script recovery.
+  - `clibridge4unity-performance` — `Profiler.BeginSample` / `ProfilerMarker` discipline, custom `ObjectPool<T>` + scoped `Disposable`, cached `LayerMask.GetMask` / string-format avoidance, `Physics.RaycastNonAlloc`, `MaterialPropertyBlock`, Burst+NativeArray patterns.
+  - `clibridge4unity-editor-tools` — `SerializedObject.ApplyModifiedProperties`, `Undo.RecordObject`, `[CanEditMultipleObjects]`, UI Toolkit `CreateGUI` skeleton, safe `AssetPostprocessor.OnPostprocessAllAssets`.
+  - `clibridge4unity-input-system` — old `Input.*` vs new `InputAction*`, action enable/disable + subscribe/unsubscribe symmetry, action-map switching, `EnhancedTouch`, when to use `PlayerInput` vs explicit subscriptions.
+  - `clibridge4unity-addressables` — `SafeRelease(handle)` discipline, `Addressables.InstantiateAsync` + `ReleaseInstance` vs `LoadAssetAsync` + `Release`, refcounted owner pattern, `WaitForCompletion` deadlock inside continuations.
+  - `clibridge4unity-shaders` — Built-in RP / CGPROGRAM authoring (skeleton + `#pragma` block), editor-vs-device pitfall catalog (per-platform texture size, lossy compression on categorical textures, `fixed`/`half` precision, multi-SubShader high/low paths, shader-tag → C# string contract).
+  - `clibridge4unity-compute-shaders` — `[numthreads]` mobile ceiling, `RWStructuredBuffer` binding limits on gles3/Metal, `ComputeBuffer` lifetime + GPU-memory leaks, `AsyncGPUReadback` vs blocking `GetData`, kernel skeleton.
+  - `clibridge4unity-command-buffers` — Built-in (`Camera.AddCommandBuffer` once in OnEnable) vs URP (`ScriptableRendererFeature`), Frame Debugger workflow, `cmd.GetTemporaryRT` vs C# pool (don't mix), compute dispatch inside a CommandBuffer.
+  - `clibridge4unity-render-textures` — `GetTemporary`/`ReleaseTemporary` vs `new RT() + Create()`, `enableRandomWrite`, depth attachment choices, sRGB vs linear, save/restore `RenderTexture.active`, format cheat sheet.
+  - `clibridge4unity-ui-toolkit` — USS first, then `[UxmlElement]`, then inline C# last resort; `EnableInClassList("hidden", …)` over `style.display`; `schedule.Execute(...).Every(ms)` over `EditorApplication.update`; tracked-subscription `UXMLController` base; sanctioned exceptions (aspect-ratio polyfill, safe-area inset).
+  - `clibridge4unity-icons` — react-icons.github.io as the catalogue, render upstream SVG → white PNG @ 4× via `magick -density 600`, tint via USS `-unity-background-image-tint-color`, `AssetPostprocessor` to lock import settings.
+
+### Internal
+- **`SETUP` always refreshes shipped skills now.** All shipped skills are renamed to `clibridge4unity-<topic>.md` (the 11 existing usage skills + the 14 new knowledge skills = 25 total). `SETUP` wipes every `.claude/skills/clibridge4unity-*.md` file *and* any legacy file carrying the old `<!-- clibridge4unity:installed-sha=… -->` marker, then re-installs the embedded set fresh. Files without the prefix or marker are user-authored — never touched. To keep a customised copy of a shipped skill, rename it.
+- The previous per-file SHA-marker / "locally modified — keep" logic is gone. Reinstall is unconditional; the source of truth is whatever the current CLI ships.
+- Old `unity-*.md` files installed by pre-1.1.54 versions are wiped on first run of the new `SETUP` (one-time legacy cleanup).
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.53 — 2026-06-10
 
 ## v1.1.53

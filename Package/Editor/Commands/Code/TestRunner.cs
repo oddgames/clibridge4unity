@@ -13,8 +13,15 @@ namespace clibridge4unity
 {
     /// <summary>
     /// Unity Test Framework runner with streaming results, ETA, and cancellation.
-    /// Results stream to the CLI as each test completes — no waiting for the full run.
+    ///
+    /// Results stream to the CLI as each test completes — no waiting for the full run. They're
+    /// also written to a log file under <c>Temp/clibridge4unity_test.log</c>, with a sibling
+    /// <c>.status</c> file (<c>running</c>/<c>done</c>/<c>error: …</c>). PlayMode test runs survive
+    /// the entering/exiting domain reloads because <c>[InitializeOnLoad]</c> re-registers a
+    /// callback that keeps appending to the same log file when a run is mid-flight. The CLI tails
+    /// that file from disk, so the pipe-death from entering PlayMode no longer eats the stream.
     /// </summary>
+    [InitializeOnLoad]
     public static class TestRunner
     {
         private static TestRunnerApi api;
@@ -23,11 +30,110 @@ namespace clibridge4unity
         private static readonly string[] TestFlags = { "playmode", "editmode", "all", "list" };
         private static readonly string[] TestOptions = { "category", "tests" };
 
-        [BridgeCommand("TEST", "Run Unity tests",
+        static TestRunner()
+        {
+            // Defer to first editor update — InitializeOnLoad is too early to create
+            // ScriptableObject instances safely on every Unity version.
+            EditorApplication.update += ResumeAfterFirstTick;
+        }
+
+        private static void ResumeAfterFirstTick()
+        {
+            EditorApplication.update -= ResumeAfterFirstTick;
+            TryResumeCallbacks();
+        }
+
+        /// <summary>
+        /// If a test run was in flight when this domain came up (i.e. we just survived the
+        /// PlayMode entry or exit reload), re-register a callback that keeps appending results
+        /// to the same log/status files. The original CLI pipe is gone — disk is the only sink.
+        /// </summary>
+        private static void TryResumeCallbacks()
+        {
+            try
+            {
+                string runId = SessionState.GetString(SessionKeys.TestRunId, "");
+                string logPath = SessionState.GetString(SessionKeys.TestLogPath, "");
+                string statusPath = SessionState.GetString(SessionKeys.TestStatusPath, "");
+                if (string.IsNullOrEmpty(runId) || string.IsNullOrEmpty(logPath) || string.IsNullOrEmpty(statusPath))
+                    return;
+
+                // Already finished before we got here — nothing to resume.
+                string status = SafeReadStatus(statusPath);
+                if (status == "done" || status.StartsWith("error"))
+                {
+                    ClearRunState();
+                    return;
+                }
+
+                if (api == null) api = ScriptableObject.CreateInstance<TestRunnerApi>();
+
+                var state = new RunState
+                {
+                    Writer = null, // pipe is gone — file is the only sink
+                    StartTime = DateTime.Now,
+                    Ct = CancellationToken.None,
+                    RunId = runId,
+                    LogFilePath = logPath,
+                    StatusFilePath = statusPath,
+                    TotalTests = SessionState.GetInt(SessionKeys.TestRunId + "_total", 0),
+                    CompletedTests = SessionState.GetInt(SessionKeys.TestRunId + "_completed", 0),
+                    PassedTests = SessionState.GetInt(SessionKeys.TestRunId + "_passed", 0),
+                    FailedTests = SessionState.GetInt(SessionKeys.TestRunId + "_failed", 0),
+                    SkippedTests = SessionState.GetInt(SessionKeys.TestRunId + "_skipped", 0),
+                };
+                var callbacks = new StreamingTestCallbacks(state);
+
+                if (currentCallbacks != null)
+                {
+                    try { api.UnregisterCallbacks(currentCallbacks); } catch { }
+                }
+                currentCallbacks = callbacks;
+                api.RegisterCallbacks(callbacks);
+
+                TryAppendToLogFile(logPath, $"[resumed after assembly reload at {DateTime.Now:HH:mm:ss}]");
+            }
+            catch (Exception ex)
+            {
+                BridgeDiagnostics.LogException("TestRunner.TryResumeCallbacks", ex);
+            }
+        }
+
+        private static string SafeReadStatus(string path)
+        {
+            try { return File.ReadAllText(path).Trim(); } catch { return ""; }
+        }
+
+        private static void TryAppendToLogFile(string path, string text)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            try { File.AppendAllText(path, text + "\n"); } catch { }
+        }
+
+        private static void TrySetStatus(string statusPath, string value)
+        {
+            if (string.IsNullOrEmpty(statusPath)) return;
+            try { File.WriteAllText(statusPath, value); } catch { }
+        }
+
+        private static void ClearRunState()
+        {
+            SessionState.SetString(SessionKeys.TestRunId, "");
+            SessionState.SetString(SessionKeys.TestLogPath, "");
+            SessionState.SetString(SessionKeys.TestStatusPath, "");
+            SessionState.SetString(SessionKeys.TestMode, "");
+            SessionState.SetInt(SessionKeys.TestRunId + "_total", 0);
+            SessionState.SetInt(SessionKeys.TestRunId + "_completed", 0);
+            SessionState.SetInt(SessionKeys.TestRunId + "_passed", 0);
+            SessionState.SetInt(SessionKeys.TestRunId + "_failed", 0);
+            SessionState.SetInt(SessionKeys.TestRunId + "_skipped", 0);
+        }
+
+        [BridgeCommand("TEST", "Run Unity tests (results also persisted to Temp/clibridge4unity_test.log so PlayMode survives the domain reload)",
             Category = "Code",
             Usage = "TEST [mode] [group ...] [--category X,Y] [--tests Full.Name,Other.Name]\n" +
                     "  TEST                              - Run EditMode tests\n" +
-                    "  TEST playmode                     - Run PlayMode tests\n" +
+                    "  TEST playmode                     - Run PlayMode tests (survives domain reload)\n" +
                     "  TEST all                          - Run all tests\n" +
                     "  TEST list                         - List all available tests\n" +
                     "  TEST list MyClass                 - List tests matching filter\n" +
@@ -36,7 +142,10 @@ namespace clibridge4unity
                     "  TEST PlayerTests CameraTests      - Same (multiple positional args also OR)\n" +
                     "  TEST --category Physics,AI        - Run by [Category(\"X\")] attribute (multiple OR)\n" +
                     "  TEST --tests Foo.TestA,Foo.TestB  - Run exact test names (multiple OR)\n" +
-                    "  TEST MyTest --category Physics playmode  - Combine filters + mode",
+                    "  TEST MyTest --category Physics playmode  - Combine filters + mode\n" +
+                    "  Result lines stream to the CLI AND to Temp/clibridge4unity_test.log; the\n" +
+                    "  status is Temp/clibridge4unity_test.status (running/done/error). The CLI\n" +
+                    "  tails those files when the pipe dies, so PlayMode results survive the reload.",
             RequiresMainThread = true,
             Streaming = true,
             TimeoutSeconds = 600,
@@ -44,6 +153,9 @@ namespace clibridge4unity
         public static async Task Run(string data, NamedPipeServerStream pipe, CancellationToken ct)
         {
             var writer = new StreamWriter(pipe, Encoding.UTF8, 4096, leaveOpen: true) { AutoFlush = true };
+            string runId = null;
+            string logPath = null;
+            string statusPath = null;
 
             try
             {
@@ -53,14 +165,9 @@ namespace clibridge4unity
                     api = await CommandRegistry.RunOnMainThreadAsync(() =>
                         ScriptableObject.CreateInstance<TestRunnerApi>());
 
-                // Determine test mode
                 var testMode = args.Has("all") ? TestMode.EditMode | TestMode.PlayMode
                     : args.Has("playmode") ? TestMode.PlayMode : TestMode.EditMode;
 
-                // Build filter arrays. Unity's Filter OR's entries within each array.
-                // Group patterns come from positional AND "warning" tokens — CommandArgs.Parse
-                // routes unrecognized tokens to Warnings when a schema (flags/options) is defined,
-                // so `TEST MyClass` lands in Warnings, not Positional.
                 var groupTokens = new List<string>();
                 groupTokens.AddRange(args.Positional);
                 groupTokens.AddRange(args.Warnings);
@@ -68,7 +175,6 @@ namespace clibridge4unity
                 var categoryNames = SplitCommaList(args.Get("category"));
                 var testNames = SplitCommaList(args.Get("tests"));
 
-                // LIST mode: enumerate tests without running (uses first group pattern as substring filter).
                 if (args.Has("list"))
                 {
                     string listFilter = groupNames.Length > 0 ? groupNames[0] : null;
@@ -76,14 +182,33 @@ namespace clibridge4unity
                     return;
                 }
 
-                // Run tests with streaming output
-                await RunTests(writer, testMode, groupNames, categoryNames, testNames, ct);
+                // Durable log + status files. CLI tails these so the pipe dying mid-PlayMode-reload
+                // doesn't eat the results. Path is relative to Unity's working directory (project
+                // root). Application.dataPath is main-thread-only; Environment.CurrentDirectory is not.
+                runId = DateTime.UtcNow.Ticks.ToString("X");
+                string tempDir = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "Temp"));
+                try { Directory.CreateDirectory(tempDir); } catch { }
+                logPath = Path.Combine(tempDir, "clibridge4unity_test.log");
+                statusPath = Path.Combine(tempDir, "clibridge4unity_test.status");
+                try { File.WriteAllText(logPath, ""); } catch { }
+                TrySetStatus(statusPath, "running");
+
+                SessionState.SetString(SessionKeys.TestRunId, runId);
+                SessionState.SetString(SessionKeys.TestLogPath, logPath);
+                SessionState.SetString(SessionKeys.TestStatusPath, statusPath);
+                SessionState.SetString(SessionKeys.TestMode, testMode.ToString());
+
+                // Headers so the CLI knows the durable paths (and confirms the run started).
+                await SafeWriteLineAsync(writer, $"TEST_LOG_FILE: {logPath}");
+                await SafeWriteLineAsync(writer, $"TEST_STATUS_FILE: {statusPath}");
+                await SafeWriteLineAsync(writer, $"TEST_RUN_ID: {runId}");
+
+                await RunTests(writer, testMode, groupNames, categoryNames, testNames, ct, runId, logPath, statusPath);
             }
             catch (ObjectDisposedException)
             {
-                // Client disconnected mid-run (pipe closed). Tests may still be running
-                // server-side — TestRunnerApi has no Cancel. Just exit quietly; the
-                // streaming callbacks already swallow further pipe writes.
+                // Client disconnected mid-run (pipe closed) — tests keep running, log file keeps
+                // capturing, post-reload callbacks resume. The CLI is tailing the file.
             }
             catch (IOException)
             {
@@ -92,32 +217,37 @@ namespace clibridge4unity
             catch (OperationCanceledException)
             {
                 await SafeWriteLineAsync(writer, "\n--- Test run cancelled by client ---");
+                TrySetStatus(statusPath, "error: cancelled");
             }
             catch (Exception ex)
             {
                 await SafeWriteLineAsync(writer, $"\nError: {ex.Message}");
+                TrySetStatus(statusPath, $"error: {ex.Message}");
             }
             finally
             {
-                // Always detach our callbacks so a test-framework crash mid-run doesn't keep
-                // firing into a dead RunState after the pipe is gone.
+                // DON'T blindly unregister callbacks here — for PlayMode runs they need to keep
+                // firing across the reload. The InitializeOnLoad resume re-registers anyway. Only
+                // unregister if the run already finished (status==done) or we hit a definite error.
                 try
                 {
-                    if (currentCallbacks != null && api != null)
+                    string status = SafeReadStatus(statusPath);
+                    bool runFinished = status == "done" || status.StartsWith("error");
+                    if (runFinished && currentCallbacks != null && api != null)
                     {
                         await CommandRegistry.RunOnMainThreadAsync(() =>
                         {
-                            api.UnregisterCallbacks(currentCallbacks);
+                            try { api.UnregisterCallbacks(currentCallbacks); } catch { }
                             return 0;
                         });
                         currentCallbacks = null;
+                        ClearRunState();
                     }
                 }
                 catch { /* best-effort cleanup */ }
             }
         }
 
-        /// <summary>Writes a line to the pipe, swallowing pipe-closed/IO errors.</summary>
         private static async Task SafeWriteLineAsync(StreamWriter w, string text)
         {
             try { await w.WriteLineAsync(text); }
@@ -150,7 +280,6 @@ namespace clibridge4unity
 
             var allTests = await tcs.Task;
 
-            // Apply substring filter
             if (!string.IsNullOrEmpty(nameFilter))
             {
                 var filterLower = nameFilter.ToLowerInvariant();
@@ -163,67 +292,66 @@ namespace clibridge4unity
         }
 
         private static async Task RunTests(StreamWriter writer, TestMode testMode,
-            string[] groupNames, string[] categoryNames, string[] testNames, CancellationToken ct)
+            string[] groupNames, string[] categoryNames, string[] testNames, CancellationToken ct,
+            string runId, string logPath, string statusPath)
         {
-            var state = new RunState { Writer = writer, StartTime = DateTime.Now, Ct = ct };
+            var state = new RunState
+            {
+                Writer = writer,
+                StartTime = DateTime.Now,
+                Ct = ct,
+                RunId = runId,
+                LogFilePath = logPath,
+                StatusFilePath = statusPath
+            };
             var callbacks = new StreamingTestCallbacks(state);
 
-            // Surface the filter so the user can confirm what's being run.
             if (groupNames.Length > 0 || categoryNames.Length > 0 || testNames.Length > 0)
             {
                 var parts = new List<string>();
                 if (groupNames.Length > 0) parts.Add($"groups=[{string.Join(",", groupNames)}]");
                 if (categoryNames.Length > 0) parts.Add($"categories=[{string.Join(",", categoryNames)}]");
                 if (testNames.Length > 0) parts.Add($"tests=[{string.Join(",", testNames)}]");
-                await SafeWriteLineAsync(writer, $"Filter: {string.Join(" ", parts)}  mode={testMode}");
+                state.WriteLine($"Filter: {string.Join(" ", parts)}  mode={testMode}");
             }
 
             await CommandRegistry.RunOnMainThreadAsync(() =>
             {
-                // Unregister previous callbacks
                 if (currentCallbacks != null)
                     api.UnregisterCallbacks(currentCallbacks);
 
                 currentCallbacks = callbacks;
                 api.RegisterCallbacks(callbacks);
 
-                // Create filter. Each array is OR'd within, so passing multiple entries
-                // runs every test matching any of them.
                 var testFilter = new Filter { testMode = testMode };
                 if (groupNames.Length > 0) testFilter.groupNames = groupNames;
                 if (categoryNames.Length > 0) testFilter.categoryNames = categoryNames;
                 if (testNames.Length > 0) testFilter.testNames = testNames;
 
-                // Start the run
                 api.Execute(new ExecutionSettings(testFilter));
                 return 0;
             });
 
-            // Wait for completion, cancellation, or 10 minute timeout
             var timeoutTask = Task.Delay(600000, ct);
             var completedTask = await Task.WhenAny(state.CompletionSource.Task, timeoutTask);
 
             if (ct.IsCancellationRequested)
             {
-                // Client disconnected — cancel the test run
-                // TestRunnerApi doesn't have a Cancel method, but we stop reporting
-                await SafeWriteLineAsync(writer, "\n--- Cancelled ---");
+                state.WriteLine("\n--- Cancelled ---");
             }
             else if (completedTask == timeoutTask)
             {
-                await SafeWriteLineAsync(writer, "\n--- Test run timed out (10 min) ---");
+                state.WriteLine("\n--- Test run timed out (10 min) ---");
             }
 
-            // Write final summary
-            await SafeWriteLineAsync(writer, "");
-            await SafeWriteLineAsync(writer,
+            state.WriteLine("");
+            state.WriteLine(
                 $"=== {state.PassedTests}/{state.CompletedTests} passed" +
                 (state.FailedTests > 0 ? $", {state.FailedTests} failed" : "") +
                 (state.SkippedTests > 0 ? $", {state.SkippedTests} skipped" : "") +
                 $" in {(DateTime.Now - state.StartTime).TotalSeconds:F1}s ===");
         }
 
-        /// <summary>Split each entry into comma-separated segments and flatten.</summary>
         private static string[] SplitFilterList(IEnumerable<string> tokens)
         {
             var result = new List<string>();
@@ -236,7 +364,6 @@ namespace clibridge4unity
             return result.ToArray();
         }
 
-        /// <summary>Split a single comma-separated string; empty/null → empty array.</summary>
         private static string[] SplitCommaList(string value)
         {
             if (string.IsNullOrEmpty(value)) return Array.Empty<string>();
@@ -260,10 +387,10 @@ namespace clibridge4unity
                 CollectTestNames(child, names);
         }
 
-        /// <summary>Shared mutable state for the streaming callbacks.</summary>
+        /// <summary>Mutable run state shared between Run/RunTests and the callbacks.</summary>
         private class RunState
         {
-            public StreamWriter Writer;
+            public StreamWriter Writer; // pipe — best-effort; may be null after a reload-resume
             public DateTime StartTime;
             public CancellationToken Ct;
             public TaskCompletionSource<bool> CompletionSource = new TaskCompletionSource<bool>();
@@ -275,6 +402,24 @@ namespace clibridge4unity
             public int SkippedTests;
             public List<double> Durations = new List<double>();
             public DateTime? CurrentTestStart;
+
+            // Durable state — survives domain reloads via SessionState (counts) + disk files (log).
+            public string RunId;
+            public string LogFilePath;
+            public string StatusFilePath;
+
+            /// <summary>Write to pipe (best-effort) AND the durable log file (must succeed).</summary>
+            public void WriteLine(string text)
+            {
+                if (Writer != null)
+                {
+                    try { Writer.WriteLine(text); } catch { /* pipe closed — fall through to file */ }
+                }
+                if (!string.IsNullOrEmpty(LogFilePath))
+                {
+                    try { File.AppendAllText(LogFilePath, text + "\n"); } catch { }
+                }
+            }
         }
 
         private class StreamingTestCallbacks : ICallbacks
@@ -286,12 +431,21 @@ namespace clibridge4unity
 
             public void RunStarted(ITestAdaptor testsToRun)
             {
-                _state.TotalTests = CountLeafTests(testsToRun);
-                WriteLine($"Running {_state.TotalTests} tests...\n");
+                if (_state.TotalTests == 0)
+                    _state.TotalTests = CountLeafTests(testsToRun);
+                if (_state.TotalTests > 0)
+                    SessionState.SetInt(SessionKeys.TestRunId + "_total", _state.TotalTests);
+                _state.WriteLine($"Running {_state.TotalTests} tests...\n");
             }
 
             public void RunFinished(ITestResultAdaptor result)
             {
+                // Mark status BEFORE clearing SessionState — the CLI is polling the status file.
+                if (!string.IsNullOrEmpty(_state.StatusFilePath))
+                {
+                    try { File.WriteAllText(_state.StatusFilePath, "done"); } catch { }
+                }
+                ClearRunState();
                 _state.CompletionSource.TrySetResult(true);
             }
 
@@ -329,33 +483,35 @@ namespace clibridge4unity
                         break;
                 }
 
-                // Progress: [3/17] PASS TestName (0.5s)
+                // Persist running totals so a reload-resume can pick up where we left off.
+                SessionState.SetInt(SessionKeys.TestRunId + "_completed", _state.CompletedTests);
+                SessionState.SetInt(SessionKeys.TestRunId + "_passed", _state.PassedTests);
+                SessionState.SetInt(SessionKeys.TestRunId + "_failed", _state.FailedTests);
+                SessionState.SetInt(SessionKeys.TestRunId + "_skipped", _state.SkippedTests);
+
                 var remaining = _state.TotalTests - _state.CompletedTests;
                 var progress = $"[{_state.CompletedTests}/{_state.TotalTests}]";
                 var line = $"{progress} {icon} {result.Test.Name} ({result.Duration:F1}s)";
 
-                // ETA based on average duration
                 if (remaining > 0 && _state.Durations.Count > 0)
                 {
                     double avg = 0;
                     foreach (var d in _state.Durations) avg += d;
                     avg /= _state.Durations.Count;
                     var eta = remaining * avg;
-                    if (eta > 2.0) // Only show ETA if >2s remaining
+                    if (eta > 2.0)
                         line += $"  ~{eta:F0}s left";
                 }
 
-                // Slow test warning
                 if (result.Duration > SlowTestThresholdSeconds)
                     line += "  [SLOW]";
 
-                WriteLine(line);
+                _state.WriteLine(line);
 
-                // Failure details
                 if (result.TestStatus == TestStatus.Failed)
                 {
                     if (!string.IsNullOrEmpty(result.Message))
-                        WriteLine($"      {result.Message.Trim()}");
+                        _state.WriteLine($"      {result.Message.Trim()}");
                     if (!string.IsNullOrEmpty(result.StackTrace))
                     {
                         var stackLines = result.StackTrace.Split('\n');
@@ -365,17 +521,11 @@ namespace clibridge4unity
                             var trimmed = sl.Trim();
                             if (string.IsNullOrEmpty(trimmed)) continue;
                             if (trimmed.Contains("NUnit.") || trimmed.Contains("UnityEngine.TestRunner")) continue;
-                            WriteLine($"      at {trimmed}");
+                            _state.WriteLine($"      at {trimmed}");
                             if (++shown >= 3) break;
                         }
                     }
                 }
-            }
-
-            private void WriteLine(string text)
-            {
-                try { _state.Writer.WriteLine(text); }
-                catch { /* pipe closed — client cancelled */ }
             }
 
             private int CountLeafTests(ITestAdaptor test)
