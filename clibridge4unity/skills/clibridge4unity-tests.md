@@ -5,7 +5,7 @@ description: Run Unity's EditMode and PlayMode tests through clibridge4unity. Us
 
 # Tests
 
-`TEST` streams test results as they run. Output includes per-test pass/fail and final summary.
+Standard Unity test-runner knowledge applies; below is the clibridge4unity-specific surface. `TEST` streams per-test pass/fail plus a final summary.
 
 ## Modes
 
@@ -41,16 +41,15 @@ clibridge4unity TEST list
 clibridge4unity TEST list Player    # substring filter
 ```
 
-## Common gotchas
+## Gotchas
 
-- **PlayMode tests** require entering play mode. Don't run them while you're already paused/stepping through play mode for something else.
-- **A failing test isn't always a code regression** — Unity may not have recompiled. Check `STATUS` first; if compile is dirty, let it settle.
-- Use `LAST -tail 80` to re-read the end of the last test run (summary + failures) without re-running the suite.
+- Don't run PlayMode tests while already paused/stepping through play mode for something else.
+- A failing test may mean Unity hasn't recompiled — check `STATUS` first; if compile is dirty, let it settle.
+- `LAST -tail 80` re-reads the end of the last run (summary + failures) without re-running.
 
-## Run a test then inspect failures
+## Inspect failures after a run
 
 ```bash
-clibridge4unity TEST PlayerTests
-clibridge4unity LAST -grep FAIL    # filter the cached output for failure lines
+clibridge4unity LAST -grep FAIL    # filter cached output for failure lines
 clibridge4unity LAST -tail 40      # tail of the run for context
 ```

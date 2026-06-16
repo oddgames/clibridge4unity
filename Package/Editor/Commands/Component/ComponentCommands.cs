@@ -706,8 +706,60 @@ namespace clibridge4unity
             if (targetType == typeof(double))
                 return valueToken.ToObject<double>();
 
+            // Vectors and colors accept a compact string form in addition to the JSON object form
+            // ({"x":1,"y":2,"z":3}). Plain-args values arrive as JSON strings, so "1,2,3" / "#FF0000"
+            // would otherwise fail Newtonsoft's struct binding (the documented plain-args examples).
+            if (valueToken.Type == JTokenType.String)
+            {
+                string s = valueToken.ToString().Trim();
+
+                if (targetType == typeof(Color) || targetType == typeof(Color32))
+                {
+                    if (TryParseColor(s, out Color color))
+                        return targetType == typeof(Color32) ? (object)(Color32)color : color;
+                    throw new FormatException($"Cannot parse '{s}' as {targetType.Name}. Use a hex string (#RRGGBB or #RRGGBBAA), a named color (red, white, cyan, …), or comma floats (r,g,b[,a]).");
+                }
+                if (targetType == typeof(Vector2) || targetType == typeof(Vector3) || targetType == typeof(Vector4))
+                {
+                    float[] c = ParseFloatList(s);
+                    if (targetType == typeof(Vector2) && c.Length >= 2) return new Vector2(c[0], c[1]);
+                    if (targetType == typeof(Vector3) && c.Length >= 3) return new Vector3(c[0], c[1], c[2]);
+                    if (targetType == typeof(Vector4) && c.Length >= 4) return new Vector4(c[0], c[1], c[2], c[3]);
+                    throw new FormatException($"Cannot parse '{s}' as {targetType.Name}. Expected comma-separated floats, e.g. \"1,2,3\".");
+                }
+            }
+
             // For other types, try to deserialize
             return valueToken.ToObject(targetType);
+        }
+
+        // Parses "#RRGGBB"/"#RRGGBBAA" hex, a named color (red/white/cyan/…) via Unity, or "r,g,b[,a]" floats (0-1).
+        private static bool TryParseColor(string s, out Color color)
+        {
+            if (ColorUtility.TryParseHtmlString(s, out color))
+                return true;
+            if (s.IndexOf(',') >= 0)
+            {
+                var c = ParseFloatList(s);
+                if (c.Length >= 3)
+                {
+                    color = new Color(c[0], c[1], c[2], c.Length >= 4 ? c[3] : 1f);
+                    return true;
+                }
+            }
+            color = default;
+            return false;
+        }
+
+        // Splits "1,2,3" (optionally wrapped in parens/brackets) into invariant-culture floats.
+        private static float[] ParseFloatList(string s)
+        {
+            s = s.Trim().TrimStart('(', '[').TrimEnd(')', ']');
+            var parts = s.Split(',');
+            var result = new float[parts.Length];
+            for (int i = 0; i < parts.Length; i++)
+                result[i] = float.Parse(parts[i].Trim(), System.Globalization.CultureInfo.InvariantCulture);
+            return result;
         }
 
         /// <summary>

@@ -1069,6 +1069,9 @@ class Program
             // Remove the session ledger entry so other agents stop seeing us as active.
             try { if (_sessionFile != null) File.Delete(_sessionFile); } catch { }
 
+            // Clear the peer "in-flight" marker so other windows stop seeing this command as running.
+            try { if (_resolvedProjectPath != null) PeerLedger.ClearActive(_resolvedProjectPath); } catch { }
+
             // Save the full response so `LAST` can replay/slice without re-execution.
             // Done before the update banner so the cached output stays focused on the command.
             // Skip the noisy auto-poll commands (Unity's setup wizard / heartbeat scripts spam
@@ -1442,6 +1445,19 @@ class Program
                 string intentTag = string.IsNullOrEmpty(s.Intent) ? "" : $" — {s.Intent}";
                 Console.Error.WriteLine($"[sessions] {s.SessionId} active {s.Age.TotalSeconds:F0}s: {s.Command} {s.DataSummary}{intentTag}");
             }
+        }
+        catch { }
+
+        // Peer coordination: stable per-window identity + advisory conflict warnings. Unity is one
+        // shared editor, so warn BEFORE a command that would stomp another window (COMPILE breaking a
+        // pipe, PLAY/STOP trampling play mode, BUILD locking everyone out, same-asset edits). Purely
+        // advisory — never blocks. See PeerLedger.
+        try
+        {
+            PeerLedger.Touch(projectPath, command, data);
+            PeerLedger.MarkActive(projectPath, command, data);
+            foreach (var w in PeerLedger.CheckConflicts(projectPath, cmdUpper, data))
+                Console.Error.WriteLine($"[conflict] WARNING: {w}");
         }
         catch { }
 
@@ -4976,6 +4992,24 @@ class Program
         md.AppendLine("- Menu / profiler: `MENU Window/General/Console` | `PROFILE [enable|disable|clear|hierarchy]`");
         md.AppendLine("- Window mgmt: `WAKEUP` (bring Unity to front) | `WAKEUP refresh` (front + Ctrl+R) | `DISMISS` (close modal dialogs)");
         md.AppendLine();
+        md.AppendLine("## Coordinating with other Claude windows (peers)");
+        md.AppendLine();
+        md.AppendLine("**One Unity editor is shared by every window/agent on this project.** That makes some actions");
+        md.AppendLine("destructive to *other* windows even when they look local to you:");
+        md.AppendLine();
+        md.AppendLine("- `COMPILE` / `REFRESH` domain-reload Unity → **breaks any other window's in-flight command** and resets play mode.");
+        md.AppendLine("- `PLAY` / `STOP` / `PAUSE` / `STEP` change the **shared** play state for everyone.");
+        md.AppendLine("- `BUILD` **blocks ALL bridge commands** for every window until it finishes.");
+        md.AppendLine("- Editing the same asset/file from two windows → silent last-writer-wins clobber.");
+        md.AppendLine();
+        md.AppendLine("The CLI detects other live windows automatically and prints `[conflict] WARNING:` on stderr");
+        md.AppendLine("**before** a command that would stomp someone. It also tracks file edits (via the Edit/Write");
+        md.AppendLine("hook) so it can warn about concurrent edits to the same file. These are advisory — they never block.");
+        md.AppendLine();
+        md.AppendLine("**When you see a `[conflict]` warning, stop and coordinate** — don't blindly COMPILE/BUILD/PLAY over");
+        md.AppendLine("another window's work. Let the other window finish its in-flight command before you stomp it, and");
+        md.AppendLine("avoid editing a file another window touched recently. These warnings are advisory — they never block.");
+        md.AppendLine();
         md.AppendLine("## Diagnosing a stuck command");
         md.AppendLine();
         md.AppendLine("If a command hangs or returns a main-thread timeout: run `DIAG` first (always responds, no main thread). It tells you whether Unity is compiling, importing, has open dialogs, or is just slow. `LOG errors` shows what's broken. `WAKEUP` brings Unity forward if it's been backgrounded.");
@@ -6290,6 +6324,37 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         int toolInputIdx = input.IndexOf("\"tool_input\"");
         string toolInput = toolInputIdx >= 0 ? input.Substring(toolInputIdx) : input;
 
+        // Edit/Write tools: record the file edit against this window's peer record so the conflict
+        // detector can see direct file edits (not just CLI asset commands). The hook runs as a child
+        // of the editing window, so PeerLedger resolves the same anchor and attributes it correctly.
+        string toolName = HookExtractJsonString(input, "tool_name");
+        if (toolName is "Edit" or "Write" or "MultiEdit" or "NotebookEdit")
+        {
+            try
+            {
+                string filePath = HookExtractJsonString(toolInput, "file_path")
+                               ?? HookExtractJsonString(toolInput, "notebook_path");
+                string proj = DetectProjectFromPath(filePath);
+                if (proj != null && !string.IsNullOrEmpty(filePath))
+                {
+                    // Warn about a concurrent edit BEFORE recording our own touch (don't self-match).
+                    var warns = PeerLedger.CheckEditConflict(proj, filePath);
+                    PeerLedger.RecordExternalEdit(proj, filePath);
+                    if (warns.Count > 0)
+                    {
+                        foreach (var w in warns)
+                            Console.Error.WriteLine($"[conflict] WARNING: {w}");
+                        // exit 2 surfaces stderr to the model so it can coordinate; it must then
+                        // re-issue the edit. Opt-in — default is advise-only (exit 0) to avoid churn.
+                        if (string.Equals(Environment.GetEnvironmentVariable("CLIBRIDGE_BLOCK_ON_CONFLICT"), "1", StringComparison.Ordinal))
+                            return 2;
+                    }
+                }
+            }
+            catch { }
+            return EXIT_SUCCESS;
+        }
+
         string pattern = HookExtractJsonString(toolInput, "pattern");
         string glob = HookExtractJsonString(toolInput, "glob");
         string type = HookExtractJsonString(toolInput, "type");
@@ -6359,12 +6424,15 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
 
         // The hook command — just calls the CLI itself, no Python needed
         string hookCommand = "clibridge4unity HOOK";
+        // One PreToolUse matcher covers both jobs the HOOK does: redirect C# Grep → CODE_ANALYZE,
+        // and record Edit/Write file edits into the peer ledger for cross-window conflict detection.
+        string matcher = "Edit|Write|MultiEdit|NotebookEdit|Grep";
 
         string hookEntry = "{\n" +
             "  \"hooks\": {\n" +
             "    \"PreToolUse\": [\n" +
             "      {\n" +
-            "        \"matcher\": \"Grep\",\n" +
+            $"        \"matcher\": \"{matcher}\",\n" +
             "        \"hooks\": [\n" +
             "          {\n" +
             "            \"type\": \"command\",\n" +
@@ -6383,7 +6451,24 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
                 string existing = File.ReadAllText(settingsPath);
                 if (existing.Contains("clibridge4unity HOOK"))
                 {
-                    Console.WriteLine("[OK] Claude Code hooks already configured");
+                    if (existing.Contains(matcher))
+                    {
+                        Console.WriteLine("[OK] Claude Code hooks already configured");
+                        return;
+                    }
+                    // Upgrade a legacy Grep-only hook to also capture Edit/Write edits. Safe only when
+                    // there's a single Grep matcher (ours) — otherwise leave it and tell the user.
+                    int grepMatchers = System.Text.RegularExpressions.Regex.Matches(existing, "\"matcher\"\\s*:\\s*\"Grep\"").Count;
+                    if (grepMatchers == 1)
+                    {
+                        existing = System.Text.RegularExpressions.Regex.Replace(existing, "\"matcher\"\\s*:\\s*\"Grep\"", $"\"matcher\": \"{matcher}\"");
+                        File.WriteAllText(settingsPath, existing);
+                        Console.WriteLine("[OK] Upgraded hook matcher to capture Edit/Write edits (cross-window conflict detection)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[!!] Hook present but matcher is Grep-only. To enable edit conflict detection, set the PreToolUse matcher to: {matcher}");
+                    }
                     return;
                 }
 
@@ -6408,7 +6493,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
                         {
                             string entry =
                                 "\n      {\n" +
-                                "        \"matcher\": \"Grep\",\n" +
+                                $"        \"matcher\": \"{matcher}\",\n" +
                                 "        \"hooks\": [\n" +
                                 "          {\n" +
                                 "            \"type\": \"command\",\n" +
@@ -6430,7 +6515,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
                             string entry =
                                 "\n    \"PreToolUse\": [\n" +
                                 "      {\n" +
-                                "        \"matcher\": \"Grep\",\n" +
+                                $"        \"matcher\": \"{matcher}\",\n" +
                                 "        \"hooks\": [\n" +
                                 "          {\n" +
                                 "            \"type\": \"command\",\n" +
@@ -6454,7 +6539,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
                             "\n  \"hooks\": {\n" +
                             "    \"PreToolUse\": [\n" +
                             "      {\n" +
-                            "        \"matcher\": \"Grep\",\n" +
+                            $"        \"matcher\": \"{matcher}\",\n" +
                             "        \"hooks\": [\n" +
                             "          {\n" +
                             "            \"type\": \"command\",\n" +

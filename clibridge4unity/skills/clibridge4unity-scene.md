@@ -5,24 +5,19 @@ description: Manipulate the Unity scene and play mode — create/find/delete Gam
 
 # Scene & play mode
 
+Apply standard Unity/C# knowledge; only the `clibridge4unity` commands, flags, and workflow contracts below are project-specific.
+
 ## Hierarchy & objects
 
 ```bash
-# Whole-scene hierarchy (brief, all roots recursed)
-clibridge4unity INSPECTOR
-
-# One GameObject with its components + serialized fields
-clibridge4unity INSPECTOR Canvas/Panel
-
-# Recurse subtree, components only (no field dumps — concise)
-clibridge4unity INSPECTOR Canvas/Panel --children --brief
+clibridge4unity INSPECTOR                          # whole-scene hierarchy (brief, all roots recursed)
+clibridge4unity INSPECTOR Canvas/Panel             # one GameObject + components + serialized fields
+clibridge4unity INSPECTOR Canvas/Panel --children --brief   # subtree, components only, no field dumps
 clibridge4unity INSPECTOR Canvas/Panel --depth 2
-
-# Filter subtree by name OR component
-clibridge4unity INSPECTOR Canvas --filter Button
+clibridge4unity INSPECTOR Canvas --filter Button   # filter subtree by name OR component
 ```
 
-For prefab assets (not scene objects), `INSPECTOR Assets/Prefabs/Foo.prefab` works the same way — see `unity-prefab`.
+`INSPECTOR Assets/Prefabs/Foo.prefab` works the same on prefab assets — see `clibridge4unity-prefab`.
 
 ## Finding
 
@@ -37,14 +32,11 @@ clibridge4unity FIND prefab:Assets/UI/Menu.prefab/Button,Panel  # comma = OR
 
 ```bash
 clibridge4unity CREATE MyObject
-
-# JSON form for parented + componented creation
-clibridge4unity CREATE '{"name":"Panel","components":["Image","CanvasGroup"],"parent":"Canvas"}'
-
+clibridge4unity CREATE '{"name":"Panel","components":["Image","CanvasGroup"],"parent":"Canvas"}'  # parented + componented
 clibridge4unity DELETE Canvas/OldPanel
 ```
 
-For component changes after creation see `unity-components`.
+Component changes after creation: see `clibridge4unity-components`.
 
 ## Scene file ops
 
@@ -55,29 +47,25 @@ clibridge4unity LOAD Assets/Scenes/Main.unity # load a scene
 
 ## Editing objects that only exist in play mode
 
-An object that `FIND` locates while the game is running can vanish in edit mode — it was instantiated at runtime (from a prefab, Resources/Addressables) or lives in a scene loaded **additively** at play. Structural edits (reparenting, adding a layout group, new children) only persist if you make them on the **source asset in edit mode**, then `SAVE`. Anything changed during play mode is discarded on `STOP`.
-
-Locate the source, then edit it:
+A runtime-instantiated or additively-loaded object that `FIND` locates during play vanishes in edit mode; structural edits only persist if made on the source asset in edit mode then `SAVE`. Locate the source:
 
 ```bash
-# 1. In edit mode the runtime object is gone — sceneMatches is empty:
+# 1. FIND returns no sceneMatches in edit mode (error + sceneSuggestions instead):
 clibridge4unity FIND AILiveryGeneratorUI
 
-# 2. Is it baked into a prefab? Search every prefab via CODE_EXEC_RETURN:
+# 2. Baked into a prefab? Search via CODE_EXEC_RETURN:
 #    foreach AssetDatabase.FindAssets("t:Prefab") → LoadAssetAtPath<GameObject>
 #    → GetComponentInChildren<TheComponent>(true) != null  → print the path
 
-# 3. Not a prefab → it's in an additively-loaded scene. Grep scene files for a
-#    unique name (component type or a child GameObject), then LOAD it:
+# 3. Else it's in an additively-loaded scene — grep scene files for a unique name, then LOAD:
 #    foreach AssetDatabase.FindAssets("t:Scene") → File.ReadAllText(path).Contains("TyresButton")
 clibridge4unity LOAD Assets/Scenes/liverydesigner.unity
 clibridge4unity INSPECTOR AILiveryGeneratorUI/TopPanel --children --brief
 ```
 
-Make the structural change (reparenting + layout setup is easiest via `CODE_EXEC_RETURN` — see `unity-run-code`), then in the same script mark dirty and `SAVE`:
+Make structural changes (easiest via `CODE_EXEC_RETURN` — see `clibridge4unity-run-code`), mark dirty, then `SAVE`:
 
 ```csharp
-// after mutating the hierarchy:
 UnityEditor.EditorUtility.SetDirty(rootGO);
 UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(rootGO.scene);
 ```
@@ -85,9 +73,7 @@ UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(rootGO.scene);
 clibridge4unity SAVE
 ```
 
-**Verify layout numerically, not visually.** Runtime-set text/labels (anything assigned in `Awake`/`Start`) won't appear in an edit-mode screenshot, so a screenshot of the dormant scene is misleading. Instead call `LayoutRebuilder.ForceRebuildLayoutImmediate(container)` and read back each child's `anchoredPosition` / `rect.size`. To confirm a layout group collapses correctly, toggle the relevant children `SetActive(false)`, rebuild, read positions, then restore — all inside one `CODE_EXEC_RETURN` script (it leaves no trace once you restore).
-
-**Gotcha — overflowing labels wrap to vertical text under a layout group.** Legacy uGUI nav buttons are often wide boxes (e.g. 897px) with left-aligned text that simply *overflows* horizontally; they look evenly spaced only because each box is far wider than its label. Drop them into a `HorizontalLayoutGroup` with `childControlWidth` + a `LayoutElement.preferredWidth` sized to the *spacing* (not the box), and the now-narrow box forces the TMP to word-wrap — one letter per line, reading as vertical text. Fix: set each label `tmp.textWrappingMode = TextWrappingModes.NoWrap` (+ `overflowMode = Overflow`) so it overflows sideways like the original. Confirm with `tmp.preferredWidth` vs the box width — if `preferredWidth > rect.width` and wrap is on, it will stack.
+**Verify layout numerically, not visually** — runtime-set text/labels won't appear in an edit-mode screenshot. Inside one `CODE_EXEC_RETURN` script: `LayoutRebuilder.ForceRebuildLayoutImmediate(container)`, read each child's `anchoredPosition` / `rect.size`, toggle `SetActive(false)` + rebuild + read + restore to confirm collapse (leaves no trace).
 
 ## Play mode
 
@@ -115,4 +101,4 @@ clibridge4unity WINDOWS                     # list open editor windows + positio
 
 ## To see what the scene looks like
 
-Don't use `INSPECTOR` for that — use `unity-screenshot`. `SCREENSHOT camera` renders the main camera; `SCREENSHOT gameview` includes OnGUI / runtime UI.
+Use `clibridge4unity-screenshot`, not `INSPECTOR`. `SCREENSHOT camera` renders the main camera; `SCREENSHOT gameview` includes OnGUI / runtime UI.

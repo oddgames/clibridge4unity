@@ -1,13 +1,13 @@
 ---
 name: clibridge4unity-assets
-description: Search, discover, move, copy, delete, and label assets in a Unity project. Use whenever the task is about asset files on disk under Assets/ — finding them, organizing them, batch operations, fixing corrupted YAML. Not for prefab editing (unity-prefab) or scene objects (unity-scene).
+description: Search, discover, move, copy, delete, and label assets in a Unity project. Use whenever the task is about asset files on disk under Assets/ — finding them, organizing them, batch operations, fixing corrupted YAML. Not for prefab editing (clibridge4unity-prefab) or scene objects (clibridge4unity-scene).
 ---
 
 # Assets
 
-These operations are GUID-preserving where Unity supports it (`ASSET_MOVE`) — references in other assets/scenes are kept intact.
+Apply standard Unity asset knowledge; below is only what's specific to the clibridge4unity CLI. `ASSET_MOVE` is GUID-preserving (references in other assets/scenes stay intact).
 
-## Discover what's in the project
+## Discover
 
 ```bash
 clibridge4unity ASSET_DISCOVER             # summary of all categories
@@ -22,17 +22,15 @@ clibridge4unity ASSET_DISCOVER models
 clibridge4unity ASSET_DISCOVER variants    # prefab variants
 ```
 
-For UXML/USS/TSS specifically: `UI_DISCOVER` inventories UI Toolkit files + custom VisualElement registrations.
+For UXML/USS/TSS: `UI_DISCOVER` inventories UI Toolkit files + custom VisualElement registrations.
 
-## Search
+## Search (Unity Search syntax; "did you mean" suggestions on a miss)
 
 ```bash
 clibridge4unity ASSET_SEARCH t:prefab
 clibridge4unity ASSET_SEARCH t:material shader:URP
 clibridge4unity ASSET_SEARCH "PlayerCharacter"   # name match
 ```
-
-Uses Unity Search syntax. On a miss the CLI returns "did you mean" suggestions.
 
 ## Move / copy / delete (batch-capable)
 
@@ -57,15 +55,13 @@ clibridge4unity ASSET_LABEL Assets/Player.prefab +Character    # add
 clibridge4unity ASSET_LABEL Assets/Player.prefab -Old +V2      # add/remove
 ```
 
-## Fix corrupted asset YAML
+## Fix corrupted asset YAML (re-validate + re-import)
 
 ```bash
 clibridge4unity ASSET_RESERIALIZE Assets/Broken.prefab
 clibridge4unity REIMPORT Assets/Broken.prefab                  # alias
 ```
 
-Forces re-validation and re-import. Use this when an asset's YAML is malformed but the file is mostly intact.
-
 ## When to write code instead
 
-For complex queries ("find every Material whose albedo texture is null") `unity-run-code` with `AssetDatabase.FindAssets` + a filter loop is usually clearer than chaining ASSET_SEARCH queries.
+For complex queries (e.g. "find every Material whose albedo texture is null"), prefer `clibridge4unity-run-code` over chaining ASSET_SEARCH.

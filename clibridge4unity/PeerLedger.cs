@@ -26,8 +26,6 @@ namespace clibridge4unity;
 /// Storage: {projectPath}/.clibridge4unity/peers/
 ///   {peerId}.peer    durable presence + recent-activity ring (key=value, repeatable keys)
 ///   {peerId}.active  present only while a command is in flight (the "right now" signal)
-///   {peerId}.inbox   directed messages (append-only)
-///   {peerId}.cursor  count of inbox lines already surfaced via piggyback
 /// </summary>
 internal static class PeerLedger
 {
@@ -123,8 +121,6 @@ internal static class PeerLedger
     static string PeersDir(string projectPath) => Path.Combine(projectPath, ".clibridge4unity", "peers");
     static string PeerFile(string projectPath, string id) => Path.Combine(PeersDir(projectPath), id + ".peer");
     static string ActiveFile(string projectPath, string id) => Path.Combine(PeersDir(projectPath), id + ".active");
-    static string InboxFile(string projectPath, string id) => Path.Combine(PeersDir(projectPath), id + ".inbox");
-    static string CursorFile(string projectPath, string id) => Path.Combine(PeersDir(projectPath), id + ".cursor");
 
     // Commands worth recording in the activity ring (skip trivial diagnostics — they're just noise).
     static readonly HashSet<string> MeaningfulCommands = new(StringComparer.OrdinalIgnoreCase)
@@ -139,7 +135,7 @@ internal static class PeerLedger
     static readonly HashSet<string> TrivialCommands = new(StringComparer.OrdinalIgnoreCase)
     {
         "PING","PROBE","DIAG","BRIDGEINFO","STATUS","HELP","VERSION","SESSIONS",
-        "PEERS","PEER_SEND","PEER_INBOX","WAKEUP","DISMISS","SCREENSHOT","LAST","LINT","CODE_ANALYZE"
+        "WAKEUP","DISMISS","SCREENSHOT","LAST","LINT","CODE_ANALYZE"
     };
 
     static bool IsTrivial(string cmdUpper) => cmdUpper != null && TrivialCommands.Contains(cmdUpper);
@@ -199,6 +195,40 @@ internal static class PeerLedger
     public static void ClearActive(string projectPath)
     {
         try { File.Delete(ActiveFile(projectPath, SelfId)); } catch { }
+    }
+
+    /// <summary>Record a file edit made OUTSIDE the CLI — i.e. via the editor's Edit/Write tool,
+    /// reported through the PreToolUse hook. The hook process is a child of the editing window, so
+    /// the anchor resolves to that window and the edit is attributed correctly. This is how the
+    /// conflict detector sees direct file edits, not just CLI asset commands.</summary>
+    public static void RecordExternalEdit(string projectPath, string filePath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return;
+            string canon = Canonical(filePath);
+            if (string.IsNullOrEmpty(canon)) return;
+
+            string id = SelfId;
+            Directory.CreateDirectory(PeersDir(projectPath));
+            var p = ReadPeer(PeerFile(projectPath, id)) ?? new Peer { Id = id, FirstSeenUtc = DateTime.UtcNow };
+            p.AnchorPid = AnchorPid;
+            p.AnchorName = _anchorName;
+            p.Cwd = Environment.CurrentDirectory;
+            p.LastSeenUtc = DateTime.UtcNow;
+
+            // Dedupe consecutive edits of the same file so the ring isn't one path repeated.
+            if (p.Acts.Count == 0 || p.Acts[^1].cmd != "EDIT" || p.Acts[^1].summary != canon)
+            {
+                p.Acts.Add((DateTime.UtcNow, "EDIT", canon));
+                while (p.Acts.Count > 8) p.Acts.RemoveAt(0);
+            }
+            p.Touches.Add((DateTime.UtcNow, canon));
+            while (p.Touches.Count > 12) p.Touches.RemoveAt(0);
+
+            WritePeer(PeerFile(projectPath, id), p);
+        }
+        catch { }
     }
 
     // ───────────────────── Reading peers ─────────────────────
@@ -288,8 +318,6 @@ internal static class PeerLedger
     {
         TryDelete(PeerFile(projectPath, id));
         TryDelete(ActiveFile(projectPath, id));
-        TryDelete(InboxFile(projectPath, id));
-        TryDelete(CursorFile(projectPath, id));
     }
 
     // ───────────────────── Conflict detection ─────────────────────
@@ -357,121 +385,37 @@ internal static class PeerLedger
         return warns.Distinct().ToList();
     }
 
+    /// <summary>Warnings for editing <paramref name="filePath"/> right now — other live windows that
+    /// recently touched the same file (via CLI asset ops OR their own editor edits). Empty when clear.</summary>
+    public static List<string> CheckEditConflict(string projectPath, string filePath)
+    {
+        var warns = new List<string>();
+        try
+        {
+            string canon = Canonical(filePath);
+            if (string.IsNullOrEmpty(canon)) return warns;
+            foreach (var pr in List(projectPath, excludeSelf: true))
+            {
+                foreach (var (tts, tp) in pr.Touches)
+                {
+                    if (PathsOverlap(canon, tp) && (DateTime.UtcNow - tts).TotalMinutes < 10)
+                    {
+                        warns.Add($"{pr.Id} touched {tp} {Ago(tts)} — you're about to edit {canon}. Concurrent edit on a shared file; coordinate to avoid clobbering each other.");
+                        break;
+                    }
+                }
+            }
+        }
+        catch { }
+        return warns.Distinct().ToList();
+    }
+
     static readonly HashSet<string> AssetWriteCommands = new(StringComparer.OrdinalIgnoreCase)
     {
         "ASSET_MOVE","ASSET_COPY","ASSET_DELETE","ASSET_RESERIALIZE","REIMPORT","ASSET_LABEL","ASSET_MKDIR",
         "PREFAB_CREATE","PREFAB_SAVE","SAVE","LOAD"
     };
     static bool IsAssetWriteCmd(string cmdUpper) => cmdUpper != null && AssetWriteCommands.Contains(cmdUpper);
-
-    // ───────────────────── Directed messages (thin layer) ─────────────────────
-
-    public struct Msg { public DateTime Ts; public string From; public string Text; }
-
-    /// <summary>Send a message to a peer id (exact or unambiguous prefix) or "all" live peers.
-    /// Returns a human-readable result string; sets <paramref name="ok"/>.</summary>
-    public static string Send(string projectPath, string target, string text, out bool ok)
-    {
-        ok = false;
-        if (string.IsNullOrWhiteSpace(target)) return "no target specified";
-        if (string.IsNullOrWhiteSpace(text)) return "empty message";
-
-        var peers = List(projectPath, excludeSelf: true);
-        List<Peer> targets;
-        if (target.Equals("all", StringComparison.OrdinalIgnoreCase))
-            targets = peers;
-        else
-        {
-            string norm = target.StartsWith("peer-", StringComparison.OrdinalIgnoreCase) ? target : "peer-" + target;
-            targets = peers.Where(p => p.Id.Equals(norm, StringComparison.OrdinalIgnoreCase)).ToList();
-            if (targets.Count == 0)
-                targets = peers.Where(p => p.Id.StartsWith(norm, StringComparison.OrdinalIgnoreCase)).ToList();
-        }
-
-        if (targets.Count == 0)
-            return peers.Count == 0 ? "no other active windows to message" : $"no peer matches '{target}' (active: {string.Join(", ", peers.Select(p => p.Id))})";
-
-        string from = SelfId;
-        int sent = 0;
-        foreach (var t in targets)
-        {
-            try
-            {
-                File.AppendAllText(InboxFile(projectPath, t.Id), $"{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}|{Escape(from)}|{Escape(text)}\n");
-                sent++;
-            }
-            catch { }
-        }
-        ok = sent > 0;
-        return $"sent to {sent} window(s): {string.Join(", ", targets.Select(t => t.Id))}";
-    }
-
-    /// <summary>Read inbox lines not yet surfaced, advancing the cursor so each shows exactly once.</summary>
-    public static List<Msg> DeliverUnread(string projectPath)
-    {
-        var result = new List<Msg>();
-        try
-        {
-            string id = SelfId;
-            string inbox = InboxFile(projectPath, id);
-            if (!File.Exists(inbox)) return result;
-            var lines = File.ReadAllLines(inbox);
-            int cursor = ReadCursor(projectPath, id);
-            for (int i = cursor; i < lines.Length; i++)
-            {
-                var m = ParseMsg(lines[i]);
-                if (m.HasValue) result.Add(m.Value);
-            }
-            WriteCursor(projectPath, id, lines.Length);
-        }
-        catch { }
-        return result;
-    }
-
-    /// <summary>Show the most recent <paramref name="max"/> messages and mark all as read.</summary>
-    public static List<Msg> ReadInbox(string projectPath, int max)
-    {
-        var result = new List<Msg>();
-        try
-        {
-            string id = SelfId;
-            string inbox = InboxFile(projectPath, id);
-            if (!File.Exists(inbox)) return result;
-            var lines = File.ReadAllLines(inbox);
-            foreach (var line in lines.Reverse().Take(max).Reverse())
-            {
-                var m = ParseMsg(line);
-                if (m.HasValue) result.Add(m.Value);
-            }
-            WriteCursor(projectPath, id, lines.Length);
-        }
-        catch { }
-        return result;
-    }
-
-    static Msg? ParseMsg(string line)
-    {
-        if (string.IsNullOrEmpty(line)) return null;
-        var parts = line.Split('|');
-        if (parts.Length < 3) return null;
-        long.TryParse(parts[0], out long ts);
-        return new Msg
-        {
-            Ts = DateTimeOffset.FromUnixTimeSeconds(ts).UtcDateTime,
-            From = Unescape(parts[1]),
-            Text = Unescape(string.Join("|", parts.Skip(2)))
-        };
-    }
-
-    static int ReadCursor(string projectPath, string id)
-    {
-        try { return int.TryParse(File.ReadAllText(CursorFile(projectPath, id)), out int c) ? c : 0; }
-        catch { return 0; }
-    }
-    static void WriteCursor(string projectPath, string id, int count)
-    {
-        try { File.WriteAllText(CursorFile(projectPath, id), count.ToString()); } catch { }
-    }
 
     // ───────────────────── Formatting helpers ─────────────────────
 
@@ -489,22 +433,6 @@ internal static class PeerLedger
         if (p.Active != null) return $"running {p.Active.Command} now";
         if (p.Acts.Count > 0) { var a = p.Acts[^1]; return $"last: {a.cmd} {a.summary} {Ago(a.ts)}"; }
         return $"last seen {Ago(p.LastSeenUtc)}";
-    }
-
-    public static string Describe(Peer p)
-    {
-        var sb = new StringBuilder();
-        string state = p.PlayMode ? "IN PLAY MODE" : "edit mode";
-        sb.AppendLine($"  {p.Id}  (window pid {p.AnchorPid}, last seen {Ago(p.LastSeenUtc)}; {state})");
-        if (p.Active != null)
-            sb.AppendLine($"    NOW RUNNING: {p.Active.Command} {p.Active.Args} (started {Ago(p.Active.StartedUtc)})");
-        else if (p.Acts.Count > 0)
-        {
-            var a = p.Acts[^1];
-            sb.AppendLine($"    recent: {a.cmd} {a.summary} ({Ago(a.ts)})");
-        }
-        if (!string.IsNullOrEmpty(p.Cwd)) sb.Append($"    cwd: {p.Cwd}");
-        return sb.ToString().TrimEnd('\r', '\n');
     }
 
     // ───────────────────── Path extraction / overlap ─────────────────────
@@ -527,12 +455,24 @@ internal static class PeerLedger
             bool looksLikePath = lower.Contains("assets/") || lower.Contains("assets\\")
                 || lower.Contains("packages/") || lower.Contains("packages\\")
                 || AssetExts.Any(ext => lower.EndsWith(ext));
-            if (looksLikePath) paths.Add(NormPath(tok));
+            if (looksLikePath) paths.Add(Canonical(tok));
         }
-        return paths.Distinct().ToList();
+        return paths.Where(p => !string.IsNullOrEmpty(p)).Distinct().ToList();
     }
 
-    static string NormPath(string p) => p.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
+    /// <summary>Reduce any path (absolute or relative, either slash style) to a comparable form
+    /// rooted at "assets/" or "packages/" so a relative CLI arg and an absolute editor edit of the
+    /// same file compare equal. Paths outside the asset tree fall back to a lowercased full path.</summary>
+    static string Canonical(string p)
+    {
+        if (string.IsNullOrWhiteSpace(p)) return "";
+        string n = p.Replace('\\', '/').Trim().Trim('"', '\'').ToLowerInvariant().TrimEnd('/');
+        int i = n.IndexOf("assets/", StringComparison.Ordinal);
+        if (i >= 0) return n.Substring(i);
+        i = n.IndexOf("packages/", StringComparison.Ordinal);
+        if (i >= 0) return n.Substring(i);
+        return n;
+    }
 
     static bool PathsOverlap(string a, string b)
     {

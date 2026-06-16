@@ -11,19 +11,27 @@ description: Orientation for clibridge4unity — when to use it, how to connect,
 
 | Task | Skill |
 |---|---|
-| Run C# inside Unity (one-off snippet or get a value back) | `unity-run-code` |
-| Search/inspect code (definitions, usages, derived types) | `unity-find-code` |
-| Diagnose a suspected compile error | `unity-lint` |
-| Manipulate GameObjects / scene / play mode | `unity-scene` |
-| Add/remove/configure components on a GameObject | `unity-components` |
-| Create or modify prefab assets | `unity-prefab` |
-| Search/move/copy/delete project assets | `unity-assets` |
-| Capture a screenshot (editor, gameview, prefab, UXML, GameObject) | `unity-screenshot` |
-| Drive the running player via clicks/typing/swipes | `unity-ui-automation` |
-| Run EditMode / PlayMode tests | `unity-tests` |
-| Build a standalone player | `unity-build` |
+| Run C# inside Unity (one-off snippet or get a value back) | `clibridge4unity-run-code` |
+| Search/inspect code (definitions, usages, derived types) | `clibridge4unity-find-code` |
+| Diagnose a suspected compile error | `clibridge4unity-lint` |
+| Manipulate GameObjects / scene / play mode | `clibridge4unity-scene` |
+| Add/remove/configure components on a GameObject | `clibridge4unity-components` |
+| Create or modify prefab assets | `clibridge4unity-prefab` |
+| Search/move/copy/delete project assets | `clibridge4unity-assets` |
+| Capture a screenshot (editor, gameview, prefab, UXML, GameObject) | `clibridge4unity-screenshot` |
+| Iterate on UI Toolkit assets (UXML/USS/TSS): discover, render, fix import errors | `clibridge4unity-ui` |
+| Edit classic uGUI / Canvas UI (Button/Image/RectTransform/TMP) via prefab | `clibridge4unity-ugui` |
+| Run EditMode / PlayMode tests | `clibridge4unity-tests` |
+| Build a standalone player | `clibridge4unity-build` |
 
-The other commands (`PING`, `STATUS`, `DIAG`, `PROBE`, `LOG`, `WAKEUP`, `DISMISS`, `MENU`, `PROFILE`) are general-purpose — covered below.
+The other commands (`PING`, `STATUS`, `DIAG`, `PROBE`, `LOG`, `WAKEUP`, `DISMISS`, `MENU`, `PROFILE`, `CANCEL`) are general-purpose — covered below.
+
+`MENU` runs any Unity menu item by its path:
+
+```bash
+clibridge4unity MENU Window/General/Console   # open the Console window
+clibridge4unity MENU GameObject/3D Object/Cube
+```
 
 ## Project detection & connection
 
@@ -43,7 +51,7 @@ Use `clibridge4unity -h` to list every command the connected Unity instance curr
 - `PROBE` — quick main-thread liveness check (~2s).
 - `LOG errors` — current console errors. `LOG errors verbose` for stacks.
 
-**Don't run `COMPILE` or `LINT` reactively after every edit.** Unity auto-recompiles when it gains focus; `STATUS` is the right check. See `unity-lint` for when those commands earn their keep.
+**Don't run `COMPILE` or `LINT` reactively after every edit.** Unity auto-recompiles when it gains focus; `STATUS` is the right check. See `clibridge4unity-lint` for when those commands earn their keep.
 
 ## Output slicing — use LAST, not `| head`
 
@@ -63,7 +71,21 @@ clibridge4unity LAST -list    # table of all 10 cached responses
 2. `LOG errors` — what's broken.
 3. `WAKEUP` — bring Unity to the foreground if it's been backgrounded (its message pump may have stalled).
 4. `DISMISS` — close modal dialogs that are blocking the main thread.
+5. `CANCEL <NAME>` / `CANCEL --all` — abort an in-flight long-running command (frees queued main-thread work; bypasses the gate and always answers).
+
+## Install / update / open
+
+These run without a pipe connection:
+
+- `SETUP` (alias `INSTALL`) — install the UPM package + per-task skills into `.claude/skills/`, verify Unity, and generate `CLAUDE.md`/`AGENTS.md`. Re-running only overwrites files you haven't edited.
+- `UPDATE` — self-update the CLI exe and the UPM package tag.
+- `VSCODE` — install the bundled VSCode/Cursor status-bar extension into detected editors (idempotent).
+- `OPEN` — launch Unity with the project (auto-detects the Unity version from `ProjectVersion.txt`).
+
+## Other handshake commands
+
+- `BRIDGEINFO` — frozen handshake contract (bridge version + minimum compatible extension version, no main thread). Consumed by the VSCode extension to decide compatibility; not for day-to-day use.
 
 ## Multi-instance
 
-If multiple Unity Editors are open, the pipe name is per-project (`UnityBridge_{User}_{ProjectHash}`). Use `-d` to target the right project explicitly; otherwise the CLI uses cwd.
+If multiple Unity Editors are open, the pipe name is per-project (`UnityBridge_{User}_{ProjectHash}`). Use `-d` to target the right project explicitly; otherwise the CLI uses cwd. When several Claude/CLI windows share one editor, the CLI automatically prints `[conflict] WARNING:` on stderr before a command that would stomp another window (COMPILE/REFRESH/PLAY/STOP/BUILD/asset write) — advisory only; heed it before proceeding.

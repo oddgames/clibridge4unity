@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.1.55 — 2026-06-16
+
+## v1.1.55
+
+### New
+- `COMPONENT_SET` now parses compact compound values: `"x,y,z"` → `Vector2/3/4` and `"#RRGGBB"`/`#RRGGBBAA`/named colors → `Color`/`Color32`. The plain-args forms the docs (and the command's own Usage string) advertised previously failed Newtonsoft struct binding — they now work, with a clear error on malformed input.
+- New skill **`clibridge4unity-build`** — documents the `BUILD` command (active-target player builds, `--run`/`--dev`/`--output`, auto-block behavior, reading `[Preprocess Player]`/`[err]` failure lines).
+- New skill **`clibridge4unity-ugui`** — classic uGUI / Canvas editing via the bridge: author-as-prefab discipline, `COMPONENT_*`/`PREFAB_*` editing path, and the raycast-target + layout/TMP word-wrap gotchas.
+- `clibridge4unity-bridge` now documents `MENU`, `CANCEL`, `BRIDGEINFO`, and `SETUP`/`UPDATE`/`VSCODE`/`OPEN`; `clibridge4unity-performance` now documents the `PROFILE` command (subcommands + `min`/`depth`/`frame`/`thread` filters).
+
+### Changed / Removed
+- Removed the `PEERS` / `PEER_SEND` / `PEER_INBOX` CLI commands and the inter-window messaging layer (inbox/cursor, `[peers] MESSAGE` auto-surface). **Automatic cross-window safety is unchanged**: the `[conflict] WARNING` before COMPILE/REFRESH/PLAY/STOP/BUILD/asset-writes and the PreToolUse edit `HOOK` (`CLIBRIDGE_BLOCK_ON_CONFLICT`) remain. Removed the now-obsolete `clibridge4unity-peers` skill.
+
+### Fixed
+- Skill accuracy pass across the whole suite: corrected the `UI_DISCOVER` description (it is an alias of `ASSET_DISCOVER ui` and does not enumerate UXML/USS/TSS), the `SCREENSHOT` UXML render size + the scope of the 1280px cap, URP 17 / RenderGraph command-buffer guidance, the `MenuItem` validator syntax, and factual errors in the addressables / input-system / render-textures / compute-shaders / shaders skills.
+- Repaired ~57 broken inter-skill cross-references (legacy `unity-*` → `clibridge4unity-*`, plus links to skills that never existed).
+
+### Internal
+- Trimmed the installable skill set ~64% (≈2,900 → ≈1,100 lines) by removing general-Unity-knowledge content the consumer model already has, keeping only project-specific behavior, bridge mechanics, and house conventions. `SETUP` continues to wipe-and-refresh only `clibridge4unity-*` skills, leaving user-authored skills untouched.
+- Corrected the bridge-command count in `SUMMARY.md` (46 → 47).
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.54 — 2026-06-15
 
 ## v1.1.54

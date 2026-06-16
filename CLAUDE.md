@@ -112,7 +112,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (CODE_ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.54)
+│   └── package.json           # UPM manifest (v1.1.55)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -311,6 +311,13 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `SCREENSHOT Assets/UI/Foo.uxml` - Render UXML at 800x450 (force-reimports the UXML + its .uss/.tss deps first)
 - `SCREENSHOT Assets/UI/Foo.uxml --el #card-grid` - Render only a sub-element (--el: `#name`, `.class`, or bare name)
 - `SCREENSHOT path1.prefab path2.prefab` - Grid render (multi-asset)
+
+### Cross-window conflict warnings (CLI-side, automatic, no Unity needed)
+Multiple Claude/CLI windows share **one** Unity editor, so commands collide (COMPILE breaks others' pipes, PLAY/STOP trample shared play state, BUILD blocks everyone, same-asset edits clobber). The CLI tracks a stable per-window identity and prints an advisory warning before a stomping command — this is automatic; there are no peer commands to run. See [PeerLedger.cs](clibridge4unity/PeerLedger.cs).
+- **Identity**: anchored to the parent `claude`/terminal process (stable across CLI invocations, which are ephemeral). Override with `CLIBRIDGE_PEER_ID`. Two chat panels in ONE host process collapse to one id — use the override to disambiguate.
+- **Conflict warnings** print as `[conflict] WARNING:` on stderr before COMPILE/REFRESH/PLAY/STOP/BUILD/asset-writes when another live window is active. Advisory only — never blocks.
+- **Edit detection**: the PreToolUse `HOOK` (matcher `Edit|Write|MultiEdit|NotebookEdit|Grep`) records file edits per-window, so concurrent edits to the same file are caught — not just CLI asset commands. Set `CLIBRIDGE_BLOCK_ON_CONFLICT=1` to make the edit hook block (exit 2) on a fresh conflict instead of advising.
+- **Storage**: `{project}/.clibridge4unity/peers/` (`{id}.peer` presence+activity ring, `{id}.active` in-flight marker). Dead windows pruned by anchor-PID liveness check.
 
 ### CLI-side (no Unity connection needed)
 - `LINT` / `LINT semantic` - Offline syntax/semantic check (see Core section above)
