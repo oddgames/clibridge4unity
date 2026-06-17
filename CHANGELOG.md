@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.1.56 — 2026-06-17
+
+## v1.1.56
+
+### New
+- `clibridge4unity-editor-tools` skill: added two house conventions — **persistence by lifetime** (`EditorPrefs` for secrets / per-user info; `SessionState` for state that must survive a domain reload but not a Unity restart, with the don't-cross-them warning) and **virtualized lists** (many-item editor windows use a data-bound `ListView`, never a per-row `foreach`).
+- `clibridge4unity-bridge` routing table now links `clibridge4unity-peers` (responding to `[conflict] WARNING:` when several windows share one editor).
+
+### Fixed
+- Release-notes correction: v1.1.55 stated the `clibridge4unity-peers` skill was *removed*. It was actually **rewritten to passive-only** and shipped — it documents the automatic `[conflict]` warnings + the edit HOOK that remain (the `PEERS`/`PEER_SEND`/`PEER_INBOX` commands and the messaging layer are gone; the skill correctly describes no peer commands and only `.peer`/`.active` storage). This release adds its bridge routing row so it's discoverable.
+
+### Internal
+- Docs/skills only — no CLI or bridge-command changes this release (still 47 bridge commands).
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.55 — 2026-06-16
 
 ## v1.1.55

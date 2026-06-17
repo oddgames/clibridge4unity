@@ -23,6 +23,7 @@ description: Orientation for clibridge4unity — when to use it, how to connect,
 | Edit classic uGUI / Canvas UI (Button/Image/RectTransform/TMP) via prefab | `clibridge4unity-ugui` |
 | Run EditMode / PlayMode tests | `clibridge4unity-tests` |
 | Build a standalone player | `clibridge4unity-build` |
+| Respond to `[conflict] WARNING:` when sharing one editor across windows | `clibridge4unity-peers` |
 
 The other commands (`PING`, `STATUS`, `DIAG`, `PROBE`, `LOG`, `WAKEUP`, `DISMISS`, `MENU`, `PROFILE`, `CANCEL`) are general-purpose — covered below.
 
