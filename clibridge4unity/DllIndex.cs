@@ -212,8 +212,15 @@ internal sealed class DllIndex
         {
             Path.Combine(projectPath, "Assets"),
             Path.Combine(projectPath, "Packages"),
-            Path.Combine(projectPath, "Library", "PackageCache"),
         };
+        // PackageCache: only the dirs Unity actually resolved, so CODE_ANALYZE doesn't surface
+        // a type from a stale leftover `foo@<oldhash>` folder beside the live one. Fall back to
+        // the whole root pre-resolve. See LintAsmdef.ResolvedPackageCacheDirs.
+        var resolvedPkgDirs = LintAsmdef.ResolvedPackageCacheDirs(projectPath);
+        if (resolvedPkgDirs.Count > 0)
+            roots.AddRange(resolvedPkgDirs);
+        else
+            roots.Add(Path.Combine(projectPath, "Library", "PackageCache"));
 
         // Unity engine reference DLLs (UnityEngine.CoreModule.dll, etc.) live in the Unity install,
         // not the project. Without these, queries for built-in types like MonoBehaviour or Vector3

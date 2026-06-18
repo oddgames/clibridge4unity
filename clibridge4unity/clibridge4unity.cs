@@ -5665,6 +5665,24 @@ class Program
         }
         catch { }
 
+        // CLI-side filesystem fallback — runs when Unity is unavailable or times out.
+        // Uses file extensions + .meta files: no Unity connection needed, instant (<100ms).
+        if (!serverHadResults)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var fsPaths = FsAssetSearch(projectPath, searchTerm);
+            sw.Stop();
+            if (fsPaths.Count > 0)
+            {
+                Console.WriteLine($"[filesystem] Found {fsPaths.Count} result(s) for: {searchTerm} ({sw.ElapsedMilliseconds}ms)");
+                Console.WriteLine();
+                foreach (var p in fsPaths)
+                    Console.WriteLine($"  {p}");
+                serverHadResults = true;
+                serverResult = EXIT_SUCCESS;
+            }
+        }
+
         // CLI-side scene/prefab YAML search (always runs if there's a name to search for)
         if (!string.IsNullOrEmpty(sceneSearchTerm))
         {
@@ -5687,6 +5705,133 @@ class Program
         }
 
         return serverResult;
+    }
+
+    /// <summary>
+    /// CLI-side asset search using the filesystem and .meta files. No Unity connection needed.
+    /// Supports: t:Type (maps to file extensions), l:Label (reads .meta label lists),
+    /// and bare name terms (case-insensitive filename contains).
+    /// Unsupported Unity Search filters (ref:, shader:, area:) are silently ignored.
+    /// </summary>
+    static List<string> FsAssetSearch(string projectPath, string query, int maxResults = 50)
+    {
+        string assetsDir = Path.Combine(projectPath, "Assets");
+        if (!Directory.Exists(assetsDir)) return new List<string>();
+
+        // Parse query tokens
+        var typeFilters = new List<string>();
+        var labelFilters = new List<string>();
+        var nameTerms = new List<string>();
+        foreach (var token in query.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (token.StartsWith("t:", StringComparison.OrdinalIgnoreCase))
+                typeFilters.Add(token.Substring(2).ToLowerInvariant());
+            else if (token.StartsWith("l:", StringComparison.OrdinalIgnoreCase))
+                labelFilters.Add(token.Substring(2));
+            else if (!token.Contains(':') && !token.StartsWith("-"))
+                nameTerms.Add(token.TrimStart('*').TrimEnd('*'));
+        }
+
+        // If all tokens were unsupported filters with no name or type, nothing to search
+        if (typeFilters.Count == 0 && labelFilters.Count == 0 && nameTerms.Count == 0)
+            return new List<string>();
+
+        var extensions = FsTypeToExtensions(typeFilters);
+
+        IEnumerable<string> candidates;
+        if (extensions.Count > 0)
+        {
+            candidates = extensions
+                .SelectMany(ext => Directory.GetFiles(assetsDir, $"*{ext}", SearchOption.AllDirectories))
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+        }
+        else
+        {
+            // No type filter: all non-meta files under Assets/
+            candidates = Directory.GetFiles(assetsDir, "*.*", SearchOption.AllDirectories)
+                .Where(f => !f.EndsWith(".meta", StringComparison.OrdinalIgnoreCase));
+        }
+
+        var results = new List<string>();
+        foreach (var file in candidates)
+        {
+            if (results.Count >= maxResults) break;
+            if (file.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)) continue;
+
+            string fileName = Path.GetFileName(file);
+
+            // Name filter — all terms must match (AND)
+            if (nameTerms.Count > 0 &&
+                !nameTerms.All(t => fileName.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0))
+                continue;
+
+            // Label filter — read .meta file, all labels must be present
+            if (labelFilters.Count > 0 && !FsMetaHasLabels(file + ".meta", labelFilters))
+                continue;
+
+            results.Add(file.Substring(projectPath.Length + 1).Replace('\\', '/'));
+        }
+
+        return results;
+    }
+
+    static HashSet<string> FsTypeToExtensions(List<string> types)
+    {
+        var exts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var t in types)
+        {
+            switch (t)
+            {
+                case "prefab":                              exts.Add(".prefab"); break;
+                case "scene":                               exts.Add(".unity"); break;
+                case "material":                            exts.Add(".mat"); break;
+                case "script": case "monoscript":           exts.Add(".cs"); break;
+                case "shader":                              exts.Add(".shader"); exts.Add(".shadergraph"); exts.Add(".shadersubgraph"); break;
+                case "computeshader":                       exts.Add(".compute"); break;
+                case "animationclip": case "animation":     exts.Add(".anim"); break;
+                case "animatorcontroller": case "animator": exts.Add(".controller"); break;
+                case "audioclip": case "audio":             exts.Add(".wav"); exts.Add(".mp3"); exts.Add(".ogg"); exts.Add(".aif"); exts.Add(".aiff"); break;
+                case "texture": case "texture2d": case "sprite":
+                    exts.Add(".png"); exts.Add(".jpg"); exts.Add(".jpeg");
+                    exts.Add(".tga"); exts.Add(".psd"); exts.Add(".exr");
+                    exts.Add(".hdr"); exts.Add(".bmp"); break;
+                case "font":                                exts.Add(".ttf"); exts.Add(".otf"); exts.Add(".fontsettings"); break;
+                case "videoclip": case "video":             exts.Add(".mp4"); exts.Add(".mov"); exts.Add(".avi"); exts.Add(".webm"); break;
+                case "uxml":                                exts.Add(".uxml"); break;
+                case "uss":                                 exts.Add(".uss"); break;
+                case "tss":                                 exts.Add(".tss"); break;
+                case "scriptableobject":                    exts.Add(".asset"); break;
+                case "mesh":                                exts.Add(".fbx"); exts.Add(".obj"); exts.Add(".dae"); exts.Add(".mesh"); break;
+                case "physicmaterial":                      exts.Add(".physicMaterial"); break;
+                case "rendertexture":                       exts.Add(".renderTexture"); break;
+                default:
+                    // Unknown type: treat as literal extension (e.g. t:png → .png)
+                    exts.Add(t.StartsWith(".") ? t : "." + t); break;
+            }
+        }
+        return exts;
+    }
+
+    static bool FsMetaHasLabels(string metaPath, List<string> required)
+    {
+        if (!File.Exists(metaPath)) return false;
+        try
+        {
+            bool inLabels = false;
+            var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var line in File.ReadLines(metaPath))
+            {
+                string trimmed = line.TrimStart();
+                if (trimmed.StartsWith("labels:")) { inLabels = true; continue; }
+                if (inLabels)
+                {
+                    if (!trimmed.StartsWith("- ")) break;
+                    found.Add(trimmed.Substring(2).Trim());
+                }
+            }
+            return required.All(r => found.Contains(r));
+        }
+        catch { return false; }
     }
 
     /// <summary>

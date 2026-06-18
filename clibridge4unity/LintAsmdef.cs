@@ -82,8 +82,15 @@ internal static class LintAsmdef
         var roots = new List<string> {
             Path.Combine(projectPath, "Assets"),
             Path.Combine(projectPath, "Packages"),
-            Path.Combine(projectPath, "Library", "PackageCache"),
         };
+        // For PackageCache, scan only the dirs Unity actually resolved (avoids duplicate asmdef
+        // nodes from stale leftover `foo@<oldhash>` folders). Fall back to the whole root only
+        // when there's no ProjectCache yet (fresh checkout). See ResolvedPackageCacheDirs.
+        var resolvedPkgDirs = ResolvedPackageCacheDirs(projectPath);
+        if (resolvedPkgDirs.Count > 0)
+            roots.AddRange(resolvedPkgDirs);
+        else
+            roots.Add(Path.Combine(projectPath, "Library", "PackageCache"));
         roots.AddRange(ResolveFilePackagePaths(projectPath));
         var asmdefs = new List<string>();
         foreach (var r in roots)
@@ -258,6 +265,38 @@ internal static class LintAsmdef
         }
         catch { }
         return result;
+    }
+
+    /// <summary>The set of <c>Library/PackageCache/&lt;name&gt;@&lt;hash&gt;</c> directories Unity
+    /// ACTUALLY resolved, read from <c>Library/PackageManager/ProjectCache</c> (`resolvedPath:`
+    /// lines). Unity keeps stale leftover folders in PackageCache (e.g. an old `foo@&lt;oldhash&gt;`
+    /// beside the live `foo@&lt;newhash&gt;`) after a package updates; blindly enumerating every
+    /// subdir makes LINT/analysis bind types against a stale DLL and report phantom errors
+    /// (e.g. CS1739 for a parameter the live version added/removed). Returns an empty set if the
+    /// file is missing or unreadable — callers should fall back to enumerating all subdirs so a
+    /// fresh checkout (before Unity's first resolve) still works.</summary>
+    public static HashSet<string> ResolvedPackageCacheDirs(string projectPath)
+    {
+        var dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string cacheFile = Path.Combine(projectPath, "Library", "PackageManager", "ProjectCache");
+        if (!File.Exists(cacheFile)) return dirs;
+        string pkgCacheRoot = Path.Combine(projectPath, "Library", "PackageCache")
+            .Replace('\\', '/');
+        try
+        {
+            foreach (var line in File.ReadLines(cacheFile))
+            {
+                int idx = line.IndexOf("resolvedPath:", StringComparison.Ordinal);
+                if (idx < 0) continue;
+                string path = line.Substring(idx + "resolvedPath:".Length).Trim();
+                // Only PackageCache entries — `Packages/` embedded packages live in the tree and
+                // are already covered by the normal Packages/ scan.
+                if (path.Replace('\\', '/').StartsWith(pkgCacheRoot, StringComparison.OrdinalIgnoreCase))
+                    dirs.Add(path);
+            }
+        }
+        catch { }
+        return dirs;
     }
 
     /// <summary>Resolve a reference token (`GUID:xxx` or bare name) to a node, or null if unresolvable.</summary>

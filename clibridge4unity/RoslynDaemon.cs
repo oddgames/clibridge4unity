@@ -47,6 +47,24 @@ static class RoslynDaemon
     static string GetVersionFile(string projectPath)
         => Path.Combine(GetDaemonDir(projectPath), "daemon.version");
 
+    /// <summary>Token identifying the binary that should own the daemon. Combines the assembly
+    /// version (bumps every release) with the running exe's last-write time (changes on every
+    /// local rebuild, even when the version string is unchanged — e.g. iterating on daemon code
+    /// without a version bump). A daemon whose recorded token differs from the current process's
+    /// is stale and gets killed + respawned in <see cref="GetRunningPipe"/>.</summary>
+    static string DaemonVersionToken()
+    {
+        string ver = typeof(RoslynDaemon).Assembly.GetName().Version?.ToString() ?? "?";
+        try
+        {
+            string exe = Process.GetCurrentProcess().MainModule?.FileName;
+            if (exe != null && File.Exists(exe))
+                return $"{ver}:{File.GetLastWriteTimeUtc(exe).Ticks:X}";
+        }
+        catch { }
+        return ver;
+    }
+
     public static string GetRunningPipe(string projectPath)
     {
         string pidFile = GetPidFile(projectPath);
@@ -75,7 +93,7 @@ static class RoslynDaemon
 
             // Version check: if daemon was started by an older CLI, kill + restart.
             string versionFile = GetVersionFile(projectPath);
-            string currentVer = typeof(RoslynDaemon).Assembly.GetName().Version?.ToString() ?? "?";
+            string currentVer = DaemonVersionToken();
             if (File.Exists(versionFile))
             {
                 try
@@ -308,7 +326,7 @@ static class RoslynDaemon
         string daemonDir = GetDaemonDir(projectPath);
         Directory.CreateDirectory(daemonDir);
         File.WriteAllText(GetPidFile(projectPath), Process.GetCurrentProcess().Id.ToString());
-        try { File.WriteAllText(GetVersionFile(projectPath), typeof(RoslynDaemon).Assembly.GetName().Version?.ToString() ?? "?"); } catch { }
+        try { File.WriteAllText(GetVersionFile(projectPath), DaemonVersionToken()); } catch { }
 
         var trees = new ConcurrentDictionary<string, SyntaxTree>();
         var fileTexts = new ConcurrentDictionary<string, string>();

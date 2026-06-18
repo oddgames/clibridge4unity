@@ -70,4 +70,4 @@ clibridge4unity LOG --filter "MyClass"
 
 ## Version
 
-Current: 1.1.56
+Current: 1.1.57

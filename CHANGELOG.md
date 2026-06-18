@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.57 — 2026-06-18
+
+## v1.1.57
+
+### Fixed
+- **LINT/CODE_ANALYZE bound against stale PackageCache duplicates.** When a UPM package updated, Unity left the old `name@<oldhash>` folder in `Library/PackageCache` beside the live `name@<newhash>`. LINT scanned every cache subdir and deduped DLLs by filename, so the alphabetically-first folder won — often the stale one. Symptom: phantom errors like `CS1739: The best overload for 'Goal' does not have a parameter named 'category'` on source that was actually correct. LINT now scans only the package dirs Unity actually resolved (read from `Library/PackageManager/ProjectCache`), falling back to a full scan only on a fresh pre-resolve checkout. Fixes both `LINT unity` and `LINT semantic`, the asmdef graph, and the CODE_ANALYZE DLL index.
+- **Roslyn daemon served stale code after a rebuild without a version bump.** The daemon-staleness check compared only the assembly version string, so an in-place rebuild (same version) reused the old daemon and kept serving pre-fix results. The version token now combines the assembly version with the running exe's last-write time, so a local rebuild auto-kills and respawns the daemon. Released version bumps still trigger it as before; same-binary invocations still reuse the daemon (no thrashing).
+
+### Internal
+- New shared helper `LintAsmdef.ResolvedPackageCacheDirs()` parses `resolvedPath:` entries from Unity's `ProjectCache`; consumed by `LintSemantic`, `LintAsmdef.Build`, and `DllIndex`.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.56 — 2026-06-17
 
 ## v1.1.56

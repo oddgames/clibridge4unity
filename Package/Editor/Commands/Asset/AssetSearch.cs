@@ -40,6 +40,7 @@ namespace clibridge4unity
             Category = "Asset",
             Usage = "ASSET_SEARCH t:prefab",
             RequiresMainThread = true,
+            TimeoutSeconds = 8,   // CLI falls back to filesystem search on timeout
             RelatedCommands = new[] { "ASSET_DISCOVER", "ASSET_LABEL", "ASSET_MOVE" })]
         public static string Search(string data)
         {

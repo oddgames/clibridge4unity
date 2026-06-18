@@ -185,14 +185,11 @@ internal static class LintSemantic
             // 5) Package PRECOMPILED .dll refs — Library/PackageCache + any `file:` UPM packages
             //    declared in manifest.json (live outside the project tree). Skip native DLLs by
             //    architecture-suffix path heuristic + PE-header probe.
-            void ScanPackageDir(string pkgRoot)
+            void ScanPackageDirs(IEnumerable<string> pkgDirs)
             {
-                if (!Directory.Exists(pkgRoot)) return;
-                IEnumerable<string> pkgs;
-                try { pkgs = Directory.EnumerateDirectories(pkgRoot); }
-                catch { return; }
-                foreach (var pkgDir in pkgs)
+                foreach (var pkgDir in pkgDirs)
                 {
+                    if (!Directory.Exists(pkgDir)) continue;
                     IEnumerable<string> files;
                     try { files = Directory.EnumerateFiles(pkgDir, "*.dll", SearchOption.AllDirectories); }
                     catch { continue; }
@@ -210,7 +207,20 @@ internal static class LintSemantic
                     }
                 }
             }
-            ScanPackageDir(Path.Combine(projectPath, "Library", "PackageCache"));
+            // Scan only the package dirs Unity actually RESOLVED — not every subdir of
+            // Library/PackageCache. Stale leftover folders (e.g. an old `foo@<oldhash>` beside
+            // the live `foo@<newhash>`) otherwise get scanned too, and since the dedup above is
+            // by DLL filename, the alphabetically-first folder wins — which can be the stale one,
+            // binding types against an outdated DLL and producing phantom errors (e.g. CS1739 for
+            // a parameter the live package version changed). See LintAsmdef.ResolvedPackageCacheDirs.
+            string pkgCacheRoot = Path.Combine(projectPath, "Library", "PackageCache");
+            var resolvedPkgDirs = LintAsmdef.ResolvedPackageCacheDirs(projectPath);
+            if (resolvedPkgDirs.Count > 0)
+                ScanPackageDirs(resolvedPkgDirs);
+            else if (Directory.Exists(pkgCacheRoot)) // fallback: pre-resolve checkout, no ProjectCache yet
+            {
+                try { ScanPackageDirs(Directory.EnumerateDirectories(pkgCacheRoot)); } catch { }
+            }
             // `file:` UPM packages — manifest.json `"name": "file:C:/abs/path"` resolves to that
             // dir. Treat each as a single package (NOT a parent containing many packages).
             foreach (var filePkg in LintAsmdef.ResolveFilePackagePaths(projectPath))
