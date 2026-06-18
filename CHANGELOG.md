@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.58 — 2026-06-18
+
+## v1.1.58
+
+### New
+- New shipped skill **`clibridge4unity-imagemagick`** — installs ImageMagick if the `magick` command is missing (winget/brew/apt + decode-delegate notes) and documents the high-value editing operations: inspect/identify, resize/crop/extent, format conversion (png/jpg/webp/gif/heic/svg/pdf), compression, rotate/flip/auto-orient, color/transparency, composite + text annotation, batch (`mogrify`), montage/contact-sheet, and GIF assembly. Pairs with `SCREENSHOT` output for cropping/annotating/resizing. Embedded into the CLI exe and unpacked by `SETUP` like every other per-task skill.
+
+### Internal
+- Added a repo-only authoring skill (`.claude/skills/cli-skill/`) documenting the convention for creating a new shippable bridge skill (file location, `clibridge4unity-` prefix, csproj glob embedding, SETUP unpack, deploy-bumps-version). Not shipped to users.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.57 — 2026-06-18
 
 ## v1.1.57
