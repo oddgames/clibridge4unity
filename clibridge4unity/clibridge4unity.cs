@@ -804,6 +804,7 @@ class Program
                 // And still refresh assistant docs — content template may have shifted between
                 // CLI installs even when the version number stayed the same.
                 RefreshProjectAgentDocs();
+                RefreshProjectSkills();
                 return EXIT_SUCCESS;
             }
 
@@ -870,6 +871,7 @@ class Program
 
             UpdateManifestTag(latestVersion);
             RefreshProjectAgentDocs();
+            RefreshProjectSkills();
             return EXIT_SUCCESS;
         }
         catch (UnauthorizedAccessException ex)
@@ -926,6 +928,27 @@ class Program
         catch (Exception ex)
         {
             Console.Error.WriteLine($"  (Could not refresh assistant docs: {ex.GetType().Name}: {ex.Message})");
+        }
+    }
+
+    /// <summary>
+    /// Re-unpacks the embedded per-task skills into the current project's .claude/skills/ after a
+    /// self-update, so a single UPDATE refreshes the skills baked into the new exe — not just the
+    /// binary and the manifest tag. Same wipe-and-reinstall logic as SETUP (shipped clibridge4unity-*.md
+    /// files are replaced; renamed/user-authored skills are left untouched). Silent when run outside a
+    /// Unity project — RefreshProjectAgentDocs (called just before) already prints the SETUP hint.
+    /// </summary>
+    static void RefreshProjectSkills()
+    {
+        try
+        {
+            string projectPath = AutoDetectProjectPath();
+            if (projectPath == null) return;
+            InstallSkills(projectPath);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  (Could not refresh skills: {ex.GetType().Name}: {ex.Message})");
         }
     }
 

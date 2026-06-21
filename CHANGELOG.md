@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.60 — 2026-06-21
+
+## v1.1.60
+
+### New
+- **`UPDATE` now refreshes the per-task skills too.** Previously `UPDATE` self-updated the CLI exe and the UPM package tag but left the on-disk `.claude/skills/` stale, so new skill content baked into the exe never reached the project until the user re-ran `SETUP`. `UPDATE` now re-unpacks the embedded skills into `.claude/skills/` in both update paths (exe-updated and already-up-to-date), using the same wipe-and-reinstall as `SETUP` — shipped `clibridge4unity-*.md` files are replaced; renamed/user-authored skills are left untouched. Silent on skills when run outside a Unity project.
+
+### Internal
+- New `RefreshProjectSkills()` helper mirrors `RefreshProjectAgentDocs()` (auto-detects the project, calls `InstallSkills`); wired into both branches of `HandleSelfUpdate`.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.59 — 2026-06-21
 
 ## v1.1.59

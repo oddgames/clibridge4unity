@@ -112,7 +112,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (CODE_ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.59)
+│   └── package.json           # UPM manifest (v1.1.60)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -323,7 +323,7 @@ Multiple Claude/CLI windows share **one** Unity editor, so commands collide (COM
 - `LINT` / `LINT semantic` - Offline syntax/semantic check (see Core section above)
 - `CODE_ANALYZE query` - Roslyn-based code analysis (Roslyn daemon, persistent index)
 - `SETUP` - Install UPM package + install per-task skills into `.claude/skills/` + verify Unity + generate CLAUDE.md and AGENTS.md (alias: `INSTALL`). Skills are embedded in the CLI exe (`clibridge4unity/skills/*.md`) and unpacked with a SHA-1 trailer; re-running SETUP only overwrites files the user hasn't edited.
-- `UPDATE` - Self-update CLI exe + UPM package tag (no Unity connection needed)
+- `UPDATE` - Self-update CLI exe + UPM package tag + re-unpack the embedded per-task skills into `.claude/skills/` (no Unity connection needed). Refreshing the skills means a single `UPDATE` ships the new exe's skill content too, not just the binary — same wipe-and-reinstall as `SETUP` (renamed/user-authored skills untouched). Silent on skills when run outside a Unity project.
 - `OPEN` - Launch Unity with project (auto-detects Unity version via ProjectVersion.txt)
 - `WAKEUP` - Bring Unity to foreground (targets project via -d)
 - `WAKEUP refresh` - Bring to foreground + send Ctrl+R to force recompile
