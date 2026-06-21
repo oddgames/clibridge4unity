@@ -1983,6 +1983,86 @@ listView.reorderable = true;
 ```
 **USS Classes:** `.unity-scroll-view`, `.unity-scroll-view__content-container`
 
+### Drag-to-scroll (touch / mouse panning)
+
+`ScrollView` only scrolls via the scrollbar or mouse wheel by default. For touch-style
+"grab the content and pan it" — the expected gesture on touchscreens and for kiosk/console
+UIs — attach a drag-to-scroll `PointerManipulator`:
+
+```csharp
+scrollView.AddManipulator(new DragScrollManipulator { Threshold = 6f });
+```
+
+Prefer this over re-implementing pointer handling inline on every ScrollView. The hard parts
+aren't the panning — they're the four gotchas the pseudo-code below calls out. Get those wrong
+and you ship the classic bugs: child buttons fire on a drag, the scroll sticks when you release
+off-screen, or the list jitters at the bottom.
+
+**Pseudo-code — `DragScrollManipulator : PointerManipulator`:**
+
+```
+state: startPos, gestureActive, committedDrag, pointerId, overshoot(x,y)
+params: Threshold=6px, Sensitivity=1, ElasticResistance=0.4, MaxOvershoot=120px, SnapBackDuration=0.25s
+
+on register:
+    target must be a ScrollView
+    (optional) add BottomPadding to contentContainer so the last row can snap back without jitter
+    register Down/Move/Up + ClickEvent with TrickleDown   // observe BEFORE child Clickable
+    register PointerCaptureOut
+
+on PointerDown(evt):                       // GOTCHA 1: do NOT capture yet
+    gestureActive = true; committedDrag = false
+    startPos = evt.position; pointerId = evt.pointerId
+    cancel any in-flight snap-back         // let the user re-grab mid-animation
+    // capturing here would steal PointerUp from child cells and break their taps
+
+on PointerMove(evt):
+    if not gestureActive: return
+    if not committedDrag:                  // GOTCHA 2: click-vs-drag threshold
+        if distance(evt.position, startPos) < Threshold: return   // still a potential tap
+        committedDrag = true
+        target.CapturePointer(pointerId)   // NOW capture -> Up is guaranteed to reach us
+        set every interactive child's PickingMode = Ignore        // suppress click side-effects
+    for each active axis (respect scrollView.mode):
+        overshoot = applyScrollerDelta(scroller, -delta * Sensitivity, overshoot)
+    translate contentContainer by -overshoot               // rubber-band visual
+    evt.StopPropagation()
+
+applyScrollerDelta(scroller, delta, overshoot):            // GOTCHA 3: elastic bounds
+    spend existing overshoot first if delta reverses it    // pull-back feels responsive
+    desired = scroller.value + delta
+    clamped = clamp(desired, lowValue, highValue); scroller.value = clamped
+    unused  = desired - clamped                            // movement past the bound
+    if unused != 0:
+        headroom = 1 - min(1, |overshoot| / MaxOvershoot)  // resistance grows with stretch
+        overshoot += unused * ElasticResistance * headroom // asymptotic, never a hard wall
+        clamp overshoot to ±MaxOvershoot
+    return overshoot
+
+on PointerUp(evt):                         // GOTCHA 4: release-outside-bounds
+    if not gestureActive: return
+    if has capture: ReleasePointer(pointerId)
+    if committedDrag: evt.StopPropagation()
+    gestureActive = false
+    if overshoot != 0: startSnapBack()     // ease-out cubic lerp overshoot -> 0 over SnapBackDuration
+    // do NOT restore child PickingMode here — wait for the ClickEvent below
+
+on ClickEvent(evt):
+    if committedDrag:                       // the click is a drag artifact
+        evt.StopPropagation()               // swallow it so the child under the finger isn't triggered
+        committedDrag = false
+    restore every suppressed child's PickingMode
+
+on PointerCaptureOut: end gesture, restore child picking, snap back if overshooting
+on unregister: unregister all, restore child picking + original padding
+```
+
+**Why each gotcha matters:**
+1. **Deferred capture** — capture on Down routes `PointerUp` away from child cells, so a plain tap on a button never completes. Capture only once the gesture *commits* as a drag.
+2. **Threshold + picking-mode swap** — a tap (< Threshold) leaves children clickable; a drag (≥ Threshold) sets their `PickingMode = Ignore` so dragging *through* cells pans instead of clicking. Restore on the next `ClickEvent` (which is swallowed) or the next `PointerDown`.
+3. **Elastic overshoot** — clamp the scroller manually, turn the unused delta into a translate on the content container with resistance that rises toward `MaxOvershoot`. Gives the iOS spring with no hard stop, then snaps back on release.
+4. **Eager capture on commit + capture-out handling** — guarantees `PointerUp` arrives even when the user releases outside the scroll bounds, fixing the "scroll stays stuck" bug.
+
 ## Foldout
 ```xml
 <ui:Foldout text="Settings" value="true">

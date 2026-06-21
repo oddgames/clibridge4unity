@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.59 — 2026-06-21
+
+## v1.1.59
+
+### Skills
+- **`clibridge4unity-shaders`** — added a "Editing a shared material at runtime" section covering runtime grading/uniform-tweaking: never `Set*` a shared/Addressable material (instance it with `new Material(shared)` + `CopyPropertiesFromMaterial` + destroy in `OnDestroy`); `MaterialPropertyBlock` works for renderers but not skyboxes; expose a new neutral-default property instead of rebinding a non-neutral engine prop; and the direction-sampled-cubemap uniform-scale no-op. Reworked the keyword-gating guidance into a complexity-gated rule: run cheap always-on math unconditionally (1 variant), **always** gate an optional feature with real per-pixel complexity (compile it out when off — no unconditional run, no uniform `if`), and keep total variants low by coalescing related toggles into one `[KeywordEnum]` rather than N independent booleans (2ᴺ). Runtime-created materials use `multi_compile` (not `shader_feature`, which gets stripped). Frontmatter triggers extended for runtime-grading tasks.
+
+### Internal
+- (repo-only, not shipped) `ui-analyze` skill: added a drag-to-scroll `PointerManipulator` pseudo-code example to the UI Toolkit guide's ScrollView section — touch-style panning with click-vs-drag threshold, deferred pointer capture, elastic overshoot/snap-back, and release-outside-bounds handling.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.58 — 2026-06-18
 
 ## v1.1.58
