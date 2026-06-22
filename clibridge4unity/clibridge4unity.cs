@@ -1390,6 +1390,12 @@ class Program
             return EXIT_USAGE_ERROR;
         }
 
+        // CLI-side command aliases (server-side BridgeCommands use the Aliases attribute instead).
+        // Normalize to the canonical name here so every downstream dispatch/allowlist works unchanged.
+        // CODE_SEARCH was the former name of CODE_ANALYZE — keep it working.
+        if (command.Equals("CODE_SEARCH", StringComparison.OrdinalIgnoreCase))
+            command = "CODE_ANALYZE";
+
         string cmdUpper = command.ToUpperInvariant();
         // Background update fetch is kicked off from Main() before we get here; the
         // banner is printed from Main()'s finally block at the bottom of output.
@@ -2087,7 +2093,7 @@ class Program
         Console.Error.WriteLine("  SETUP                      Install UPM package + per-task skills + generate CLAUDE.md and AGENTS.md");
         Console.Error.WriteLine("  UPDATE                     Self-update CLI + UPM package");
         Console.Error.WriteLine("  SERVE [--port N] [--ttl M] [--public] [--cors] Start local file server (localhost:8420)");
-        Console.Error.WriteLine("  CODE_ANALYZE <query>       Offline Roslyn/source analysis");
+        Console.Error.WriteLine("  CODE_ANALYZE <query>       Offline Roslyn/source analysis (alias: CODE_SEARCH)");
         Console.Error.WriteLine("  LINT [warnings]            Syntax-only fast check (default, ~1s, catches braces/strings/typos/new files)");
         Console.Error.WriteLine("  LINT unity [warnings]      Per-asmdef Unity-faithful compile (~5-30s, asmdef-aware, type-binding; aborts on 10s no-progress)");
         Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");

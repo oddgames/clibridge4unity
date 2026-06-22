@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.61 — 2026-06-22
+
+## v1.1.61
+
+### New
+- `CODE_SEARCH` now works as a CLI-side alias for `CODE_ANALYZE` — the former command name is normalized to the canonical `CODE_ANALYZE` before dispatch, so old scripts and muscle memory keep working. The alias is surfaced in the CLI help text.
+
+### Internal
+- Added a "Code Organization" guidance section to `CLAUDE.md`: prefer extending existing types over creating a new class/file for small (one- or two-method) additions; split out only for genuine reusable utilities or when inlining would bloat the host class.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.60 — 2026-06-21
 
 ## v1.1.60

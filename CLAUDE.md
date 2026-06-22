@@ -206,6 +206,9 @@ Command methods can have these signatures:
 - `Task<string> Method(string data)` - Async with data
 - `Task Method(string data, NamedPipeServerStream pipe, CancellationToken ct)` - Streaming
 
+### Code Organization
+**Prefer extending existing types over creating new ones for small additions.** When a change needs only a method or two, add them to the static/partial class that already owns that area — do **not** create a new class or file just to hold one or two methods. The CLI (`clibridge4unity.cs`) is intentionally single-file/partial; keep it cohesive. Split into a new class/file only when (a) it's a genuine reusable **utility** with its own identity, or (b) the code is **large enough** that inlining would bloat the host class. When in doubt, extend what exists. (The Package's asmdef split below is the sanctioned "separate when it's a real module" case.)
+
 ### Assembly Definitions
 The Package is split into 8 asmdefs to minimize recompilation:
 - **clibridge4unity.Core** - BridgeServer, CommandRegistry, SessionKeys (stable, rarely changes)
