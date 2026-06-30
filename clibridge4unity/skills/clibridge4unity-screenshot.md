@@ -59,3 +59,25 @@ clibridge4unity SCREENSHOT gameview --output ./docs/screenshot.png
 | Several assets side-by-side | `SCREENSHOT a.prefab b.prefab c.prefab` |
 
 The result line includes `output: <path>`; Read it back to view the PNG. Editor-window modes are pipe-free, so use them as your fallback when other commands time out mid-compile.
+
+## Verify UI at multiple device resolutions (phone + tablet)
+When rendering **uGUI or UI Toolkit** for visual sign-off, never check a single resolution — the same layout that looks right on a tablet can clip, overlap, or strand controls out of thumb reach on a tall phone (and vice-versa). Render at least one **phone** and one **tablet** aspect, then **present both screenshots back to the user** side by side.
+
+`SCREENSHOT gameview` overwrites the same temp PNG each call, so give each device pass its own `--output` path or the first is lost. Drive the resolution with `GAMEVIEW WxH` first:
+
+```bash
+# iPhone (tall ~19.5:9). Use landscape for vehicle/twin-stick games, portrait for menus.
+clibridge4unity GAMEVIEW 2556x1179 && clibridge4unity SCREENSHOT gameview --output ./.ui/iphone.png
+# iPad (4:3 / 3:2)
+clibridge4unity GAMEVIEW 2732x2048 && clibridge4unity SCREENSHOT gameview --output ./.ui/ipad.png
+```
+
+Common targets (pick portrait or landscape to match the screen's orientation):
+| Device | Resolution (px) | Aspect |
+|---|---|---|
+| iPhone 15 / 14 Pro | 2556×1179 | 19.5:9 |
+| iPhone SE | 1334×750 | 16:9 |
+| iPad Pro 12.9" | 2732×2048 | 4:3 |
+| iPad Air / 10.9" | 2360×1640 | ~3:2 |
+
+For a **UXML asset** without entering play mode, `SCREENSHOT Assets/UI/Foo.uxml` renders at the root's declared size — set the UXML root width/height to the device size (or wrap in a sized container) and render once per device, each with `--output`, to compare. Read both PNGs back and show them together so the user can judge phone vs tablet at a glance.

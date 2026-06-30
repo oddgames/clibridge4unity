@@ -22,6 +22,29 @@ Standard Unity/HLSL precision, surface-shader, instancing, and texture-import ru
   `o.Albedo = lerp(o.Albedo, UNITY_ACCESS_INSTANCED_PROP(Props, _PartColor), IN.color.r);`
 - **An optional feature with real per-pixel complexity is a compiled-out keyword, not a runtime branch** (`[KeywordEnum]`/`[Toggle(_FEATURE)]` → `#pragma shader_feature`/`multi_compile` → `#if defined(_FEATURE)`) — **always** gate it default-off so the off state compiles the work *out*; mobile dynamic branching is avoided. **Keep the variant count low at the same time, but never by under-gating:** don't gate cheap always-on math (tint/exposure run unconditionally — branch-free, 1 variant), and fold related options into **one** `[KeywordEnum]` (N values = N variants, additive) rather than many independent `_ _A`/`_ _B` toggles (each boolean *doubles* the count → 2ᴺ). For a keyword toggled on a material created at **runtime**, use `multi_compile` not `shader_feature` (else the variant is stripped from the build) — see *Editing a shared material at runtime* below.
 
+## Micro-optimizing the inner loop (mobile ALU) — branch, unroll, vectorize
+
+Three knobs once the math is correct. Each trades against the mobile realities the rest of this skill assumes: scalar dynamic branches and dynamic-length loops are expensive, and the ALU is 4-wide so scalar code wastes ¾ of it.
+
+- **`UNITY_BRANCH` only on a *uniform* condition guarding *expensive* work.** It maps to `[branch]` (a real jump); `UNITY_FLATTEN` (`[flatten]`) runs both sides and selects. A real branch pays off **only** when the condition is coherent across the draw (same for every pixel — i.e. driven by a material/uniform value, not per-pixel data) **and** the skipped block is heavy (a loop, extra texture samples). Then it genuinely skips the cost. For a cheap or per-pixel-**divergent** condition, the branch costs more than the work it guards → use `UNITY_FLATTEN` or branch-free `lerp`/`step`/`saturate` math instead. Best of all, if the toggle is a build-time choice, compile it out with a keyword (the house rule above) — reach for `UNITY_BRANCH` only when the condition is a genuine **runtime uniform** that can't be a `shader_feature`.
+- **Unroll fixed-count loops; keep the count a compile-time constant.** `UNITY_UNROLL` (`[unroll]`) drops the per-iteration branch, enables constant-folding and static (not dynamic) register indexing, and lets the compiler batch texture fetches — a clear win for small fixed counts (blur taps, kernel samples). The count must be a literal / `#define` / keyword, **not** a uniform `int`, or it can't unroll. Don't unroll a *large* count: instruction count and register pressure explode and can blow the mobile instruction limit. For a genuinely variable count use `UNITY_LOOP` (`[loop]`) and accept the branch; if the variability is really 2–3 discrete cases, a keyword per case unrolls each.
+- **Vectorize scalar math; fold linear combinations into a `mul`.** The ALU is SIMD-4 — four scalar `float` ops occupy one lane and waste the other three, while one `float4` op does all four at the same cost. Operate on `float4`/swizzles, not four separate `float`s. A weighted sum of four terms is one `dot`; four such sums (a channel mix, color grade, or small linear transform) is one matrix `mul` — `mul(M, v)` lowers to hardware `mad`/dot instructions (≈4 MACs apiece), far cheaper than the hand-written scalar expansion. Compose transform/grade matrices **once** (on the CPU into a uniform `float4x4`, or once per vertex) and `mul` per pixel, rather than chaining scalar ops every pixel. Caveat: matrix uniforms consume constant registers — worth it when it replaces real per-pixel ALU, not to dress up a single scalar multiply.
+
+  Worked example — a terrain shader blending 4 layer colors by weight `cL`:
+  ```hlsl
+  // BEFORE — 12 scalar swizzles rebuild the matrix in every fragment
+  half3x4 mL = half3x4(
+      _LayerColor0.r, _LayerColor1.r, _LayerColor2.r, _LayerColor3.r,   // row 0 = the .r of each layer
+      _LayerColor0.g, _LayerColor1.g, _LayerColor2.g, _LayerColor3.g,   // row 1 = the .g
+      _LayerColor0.b, _LayerColor1.b, _LayerColor2.b, _LayerColor3.b);  // row 2 = the .b
+  albedo = mul(mL, cL) * 2;
+
+  // AFTER — rows pre-packed CPU-side into 3 half4 uniforms; the shader just muls
+  half3x4 mL = half3x4(_LayerColMatA0, _LayerColMatA1, _LayerColMatA2);
+  albedo = mul(mL, cL) * 2;
+  ```
+  Three things this requires (all silent-failure-prone): (a) C# must `SetVector` `_LayerColMatA0/1/2` **and** they must be declared in `Properties{}`/`uniform` in every active include — an unset/undeclared uniform is a no-op (#6), not an error. (b) Pack **per-channel, not per-layer**: row 0 is `(_LayerColor0.r, _LayerColor1.r, _LayerColor2.r, _LayerColor3.r)` — packing per-layer RGBA transposes the matrix and scrambles colors; confirm with a `SCREENSHOT`, not just a clean compile. (c) Once nothing reads the old `_LayerColor0..N`, drop them to reclaim constant registers — grep every SubShader/include first (#5), since a LOW SubShader on device may still reference them while HIGH uses the matrix.
+
 ## Editing a shared material at runtime (grading, runtime-tweaked uniforms)
 
 Runtime sliders/grading that write a material's uniforms hit a cluster of traps. The pattern below avoids all of them while keeping the shader/variant count low.
@@ -65,20 +88,23 @@ platformSettings:
 ```
 `overridden: 1` with a smaller `maxTextureSize` or a lossy `textureFormat` is the red flag.
 
-## Verification — fast first, COMPILE last (and rarely)
+## Verification — never `COMPILE` for a shader edit
 
-Same discipline as `clibridge4unity-lint`: **`STATUS` first, escalate only on evidence, do NOT `COMPILE` per edit.** Caveat: **offline `LINT` compiles C#, not HLSL** — it can't catch a typo inside a `.shader`/`.cginc`.
+**`COMPILE` does nothing for a shader.** It triggers C# *script* recompilation + a domain reload (and breaks the pipe) — it does **not** compile HLSL. A `.shader`/`.cginc`/`.hlsl` edit is an **asset import**: Unity reimports and recompiles the shader on save (auto-refresh, or force it with `REFRESH`), and shader compile errors surface in the console. So for shader-body edits, skip `COMPILE` entirely — `REFRESH` (if needed) + `STATUS`/`LOG errors` is the whole loop. Reserve `COMPILE` for when the *C# wiring* genuinely needs a rebuild, never to "make the shader take".
+
+Same discipline as `clibridge4unity-lint`: **`STATUS` first, escalate only on evidence.** Caveat: **offline `LINT` compiles C#, not HLSL** — it can't catch a typo inside a `.shader`/`.cginc`.
 
 - **C# material wiring (`Set*` / `MaterialPropertyBlock`):** `clibridge4unity LINT`, then confirm the uniform exists in every active include (#6). No COMPILE.
 - **Shader body (`.shader`/`.cginc`):** fast path is **reading and grepping** — every include path (#5), the keyword `#define` ladder (#8), and a C# grep for any renamed tag/property (#7).
 - **Texture / placement math:** inspect the `.meta` per-platform block above — no compile needed.
-- **Only then, once:** if several shader edits need true HLSL ground truth, run a single `COMPILE` then `LOG errors` to read per-variant failures. Batched at the end — never per-file.
+- **For true HLSL ground truth:** `REFRESH` to reimport the shader, then `LOG errors` to read per-variant shader compile failures. This is the shader equivalent of "compile" — `COMPILE` (script recompile) is the wrong tool and won't surface them.
 
 ```bash
-clibridge4unity STATUS               # is compile dirty / are there errors?  (always first)
+clibridge4unity STATUS               # are there errors?  (always first)
 clibridge4unity LINT                 # C# only, offline, sub-second
-clibridge4unity LOG ui errors        # current USS/UXML/TSS import errors
-# clibridge4unity COMPILE && clibridge4unity LOG errors   # last resort, batched, breaks pipe
+clibridge4unity REFRESH              # reimport changed shaders (what actually recompiles HLSL)
+clibridge4unity LOG errors           # read shader compile errors after reimport
+# COMPILE is for C# script changes — NOT needed for .shader/.cginc/.hlsl edits
 ```
 
 ## Related

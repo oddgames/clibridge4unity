@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.62 — 2026-06-30
+
+## v1.1.62
+
+### Internal
+This release is skill-content only — updates to the embedded per-task skills (unpacked into `.claude/skills/` on SETUP/UPDATE). No CLI or bridge behavior changes.
+
+- **UI skills — mobile input ergonomics.** `clibridge4unity-ugui` and `clibridge4unity-ui-toolkit` now cover sizing/placing touch input (vehicle controls, twin sticks, buttons) by physical distance via `Screen.dpi` rather than pixels: ≥9 mm tap targets, thumb-reach zones, ≥2 mm spacing, `Screen.safeArea` insets, and the caveat that `CanvasScaler`/`PanelSettings` scale resolution but not physical size.
+- **UI skills — verify at multiple device resolutions.** Render UI at ≥1 phone and ≥1 tablet aspect and present both screenshots back to the user. Added a device resolution table + the `GAMEVIEW WxH` → `SCREENSHOT gameview --output …` workflow to `clibridge4unity-screenshot` (with the gotcha that `gameview` overwrites its temp PNG, so each device pass needs its own `--output`); reinforced in the uGUI/UI-Toolkit/UI skills.
+- **UI skills — inherit the game's existing style.** uGUI: inspect a nearby panel/button/toggle prefab and reuse its sprites/fonts/colours/layout (or instantiate a shared prefab/variant). UI Toolkit: `Grep '<Style src='` to find the shared token/theme USS the rest of the game imports, import it first, and reuse its existing classes instead of writing a parallel style.
+- **Shader skill — never `COMPILE` for shader edits.** `clibridge4unity-shaders` now states plainly that `COMPILE` recompiles C# (domain reload, breaks pipe) and does NOT compile HLSL — `.shader`/`.cginc`/`.hlsl` edits are asset reimports, so `REFRESH` + `LOG errors` is the shader-compile loop. Corrected the prior contradicting "run a single COMPILE" guidance.
+- **Shader skill — mobile ALU micro-optimization.** New section on `UNITY_BRANCH`/`UNITY_FLATTEN` (real branch only on uniform conditions guarding expensive work), loop unrolling (`UNITY_UNROLL` for compile-time-constant counts, `UNITY_LOOP` otherwise), and vectorizing scalar math into matrix `mul`s for SIMD — with a worked terrain-layer before/after example (pre-pack matrix rows into uniforms CPU-side; per-channel packing + silent-no-op pitfalls called out).
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.61 — 2026-06-22
 
 ## v1.1.61
