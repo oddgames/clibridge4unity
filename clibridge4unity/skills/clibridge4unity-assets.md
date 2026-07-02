@@ -22,7 +22,7 @@ clibridge4unity ASSET_DISCOVER models
 clibridge4unity ASSET_DISCOVER variants    # prefab variants
 ```
 
-For UXML/USS/TSS: `UI_DISCOVER` inventories UI Toolkit files + custom VisualElement registrations.
+`UI_DISCOVER` is just an alias for `ASSET_DISCOVER ui`. No bridge command enumerates `.uxml`/`.uss`/`.tss` files or custom VisualElement registrations — use `Grep`/`Glob` or `CODE_ANALYZE` for those (see `clibridge4unity-ui`).
 
 ## Search (Unity Search syntax; "did you mean" suggestions on a miss)
 

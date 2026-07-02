@@ -7,6 +7,8 @@ description: Use for ANY field-on-MonoBehaviour-or-ScriptableObject question —
 
 The standard Unity serialization rules apply here — what does/doesn't serialize, `[SerializeField] private`, `[SerializeReference]` for polymorphism/null/cycles, `ISerializationCallbackReceiver` (off the main thread, no Unity API inside) for `Dictionary` via parallel key/value lists, `[FormerlySerializedAs]` for field renames, `[MovedFrom]` for `[SerializeReference]` type renames, enums-as-integers, and the 7/10 nesting-depth limit. Apply them as standard knowledge.
 
+Unity 6.4+ validates that a `[SerializeReference]` class **and all its ancestors** are `[Serializable]`, with Editor warnings — decorate the whole hierarchy, not just the leaf.
+
 House convention: prefer `[SerializeReference]` + `[Serializable]` over Odin/Sirenix when the YAML must stay text-mergeable — Odin stores a `byte[]` blob that breaks Plastic/Git diffs. Reach for Odin only when the domain genuinely needs what Unity can't do (multi-key dictionaries, deep generics, polymorphic graphs). Decide per-asset, not per-project.
 
 ## Verify from the bridge

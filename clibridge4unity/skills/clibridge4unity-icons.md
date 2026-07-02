@@ -15,6 +15,7 @@ Standard UI Toolkit / uGUI icon facts (white source + `-unity-background-image-t
 - **PRIMARY library:** Lucide (default). Material Design Icons if you need ~7000; Heroicons if Tailwind-aligned. Secondary libraries only when the primary lacks the icon. Document the choice in CLAUDE.md.
 - **Naming:** `Assets/Resources/UI/Icons/<library-prefix>_<icon-name>.png` — `lu_` Lucide, `fa_` Font Awesome, `mdi_` Material (e.g. `lu_settings.png`). Prefix makes the source library visible at the call site.
 - Edit the SVG to white (`#FFFFFF`) in a workspace folder *outside* the Unity project; keep that as the source.
+- **Unity 6.3+ UI Toolkit supports native SVG** (crisp at any scale) and USS filters (tint/grayscale/blur) — consider it for UI-Toolkit-only icons before rasterising. The white-PNG pipeline below remains required for uGUI sprites and pre-6.3 projects.
 
 ## Render command (white PNG at 4× display size)
 

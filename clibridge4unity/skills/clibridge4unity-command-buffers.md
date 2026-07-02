@@ -13,6 +13,7 @@ Standard CommandBuffer API, pipeline lifecycle, ping-pong, Release discipline, a
 - Pipeline check when unsure: `GraphicsSettings.currentRenderPipeline` null → Built-in, otherwise URP/HDRP.
 - A `ScriptableRendererFeature` must be added to the active Renderer asset (`Assets/Settings/URP-*-Renderer.asset` → Renderer Features → Add) or `Create()` runs but the pass never executes. If the project has multiple Renderers (mobile/desktop), add it to **each**.
 - Frame Debugger naming convention: name the sample/pass the same as the C# class for findability.
+- Unity 6.3+: the **Render Graph Viewer can connect to player builds on device** (mobile/XR) — use it over editor-only Frame Debugger guesses when a pass diverges on hardware. URP and HDRP share the same RG compiler from 6.3.
 
 ## Verification
 

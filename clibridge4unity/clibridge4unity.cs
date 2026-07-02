@@ -563,8 +563,8 @@ class Program
         {
             Console.Error.WriteLine("Usage: REFERENCES <asset-path-or-symbol>");
             Console.Error.WriteLine("  REFERENCES Assets/Prefabs/Foo.prefab   (find scenes/prefabs/SOs that reference this asset)");
-            Console.Error.WriteLine("  REFERENCES MyClass                     (delegated to CODE_ANALYZE)");
-            Console.Error.WriteLine("  REFERENCES MyClass.MyMethod            (delegated to CODE_ANALYZE)");
+            Console.Error.WriteLine("  REFERENCES MyClass                     (delegated to ANALYZE)");
+            Console.Error.WriteLine("  REFERENCES MyClass.MyMethod            (delegated to ANALYZE)");
             return EXIT_USAGE_ERROR;
         }
 
@@ -1392,8 +1392,11 @@ class Program
 
         // CLI-side command aliases (server-side BridgeCommands use the Aliases attribute instead).
         // Normalize to the canonical name here so every downstream dispatch/allowlist works unchanged.
-        // CODE_SEARCH was the former name of CODE_ANALYZE — keep it working.
-        if (command.Equals("CODE_SEARCH", StringComparison.OrdinalIgnoreCase))
+        // ANALYZE is the primary name — it covers code AND serialized asset wiring, so the
+        // CODE_ prefix undersells it. CODE_ANALYZE stays the internal canonical (allowlists,
+        // history) and CODE_SEARCH is the command's original name; both remain accepted.
+        if (command.Equals("ANALYZE", StringComparison.OrdinalIgnoreCase) ||
+            command.Equals("CODE_SEARCH", StringComparison.OrdinalIgnoreCase))
             command = "CODE_ANALYZE";
 
         string cmdUpper = command.ToUpperInvariant();
@@ -1735,6 +1738,35 @@ class Program
             string fallbackResult = RoslynAnalyzer.Analyze(projectPath, data ?? "");
             Console.WriteLine(fallbackResult);
             return fallbackResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+        }
+
+        // MAP: offline task-oriented project map. Given free task keywords, returns the scripts,
+        // scenes, prefabs, config assets, and UnityEvent wiring that relate to them — the
+        // "where do I start?" dossier before any symbol name is known. Daemon-served (code index
+        // + asset graph); never touches Unity, so it runs before the pre-flight state gates.
+        if (command.Equals("MAP", StringComparison.OrdinalIgnoreCase))
+        {
+            string daemonPipe = RoslynDaemon.GetRunningPipe(projectPath);
+            if (daemonPipe == null)
+            {
+                Console.Error.WriteLine("[roslyn] Starting daemon...");
+                daemonPipe = RoslynDaemon.StartBackground(projectPath);
+            }
+            if (daemonPipe != null)
+            {
+                string dResult = QueryDaemonWithIndexingHeartbeat(daemonPipe, "map", data ?? "");
+                if (dResult != null)
+                {
+                    Console.WriteLine(dResult);
+                    return dResult.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
+                }
+            }
+
+            Console.Error.WriteLine("[roslyn] Daemon unavailable, using single-pass map");
+            Task.Run(() => RoslynDaemon.StartBackground(projectPath));
+            string mapFallback = RoslynAnalyzer.Map(projectPath, data ?? "");
+            Console.WriteLine(mapFallback);
+            return mapFallback.StartsWith("Error:") ? EXIT_COMMAND_ERROR : EXIT_SUCCESS;
         }
 
         // LINT: offline syntax check via Roslyn daemon. Catches errors in newly-added .cs
@@ -2093,7 +2125,9 @@ class Program
         Console.Error.WriteLine("  SETUP                      Install UPM package + per-task skills + generate CLAUDE.md and AGENTS.md");
         Console.Error.WriteLine("  UPDATE                     Self-update CLI + UPM package");
         Console.Error.WriteLine("  SERVE [--port N] [--ttl M] [--public] [--cors] Start local file server (localhost:8420)");
-        Console.Error.WriteLine("  CODE_ANALYZE <query>       Offline Roslyn/source analysis (alias: CODE_SEARCH)");
+        Console.Error.WriteLine("  ANALYZE <query>            Offline code + asset-wiring analysis (aliases: CODE_ANALYZE, CODE_SEARCH)");
+        Console.Error.WriteLine("  ANALYZE usedby:<x>         Reverse lookup: scenes/prefabs/SOs referencing an asset path or script class");
+        Console.Error.WriteLine("  MAP <task keywords>        Task-oriented project map: scripts + scenes/prefabs/config wiring for a task");
         Console.Error.WriteLine("  LINT [warnings]            Syntax-only fast check (default, ~1s, catches braces/strings/typos/new files)");
         Console.Error.WriteLine("  LINT unity [warnings]      Per-asmdef Unity-faithful compile (~5-30s, asmdef-aware, type-binding; aborts on 10s no-progress)");
         Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");
@@ -2535,7 +2569,7 @@ class Program
     // Anything outside this set short-circuits when the pipe isn't being served.
     static readonly HashSet<string> NoPipeNeeded = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "DISMISS", "LAST", "OPEN", "KILL", "WAKEUP", "CODE_ANALYZE", "LINT", "SCREENSHOT"
+        "DISMISS", "LAST", "OPEN", "KILL", "WAKEUP", "CODE_ANALYZE", "MAP", "LINT", "SCREENSHOT"
     };
 
     /// <summary>
@@ -4980,14 +5014,29 @@ class Program
         md.AppendLine();
         md.AppendLine("Workflow: `LINT` first → fix any errors → `COMPILE` only if Unity-specific behavior needed (domain reload, source generators, post-compile callbacks) → `STATUS` to verify.");
         md.AppendLine();
-        md.AppendLine("## CODE_ANALYZE — offline code search (works without Unity)");
+        md.AppendLine("## ANALYZE — the main reference point (works without Unity)");
         md.AppendLine();
-        md.AppendLine("- `CODE_ANALYZE Foo` — deep view: definition, usages, derived types, GetComponent sites, own members");
-        md.AppendLine("- `CODE_ANALYZE Foo.Bar` — zoom into one member");
-        md.AppendLine("- `CODE_ANALYZE method:Name` — every method matching `Name` across the codebase (+ signatures)");
-        md.AppendLine("- `CODE_ANALYZE field:Name` / `property:Name` — same for fields/properties");
-        md.AppendLine("- `CODE_ANALYZE inherits:Type` — derived types");
-        md.AppendLine("- `CODE_ANALYZE attribute:Name` — attribute usage sites");
+        md.AppendLine("One query, both worlds: C# symbols (Roslyn index) and serialized asset wiring (GUID graph).");
+        md.AppendLine("Aliases: `CODE_ANALYZE`, `CODE_SEARCH` (same command).");
+        md.AppendLine();
+        md.AppendLine("- `ANALYZE Foo` — deep view: definition, usages, derived types, GetComponent sites, own members");
+        md.AppendLine("- `ANALYZE Foo.Bar` — zoom into one member");
+        md.AppendLine("- `ANALYZE method:Name` — every method matching `Name` across the codebase (+ signatures)");
+        md.AppendLine("- `ANALYZE field:Name` / `property:Name` — same for fields/properties");
+        md.AppendLine("- `ANALYZE inherits:Type` — derived types");
+        md.AppendLine("- `ANALYZE attribute:Name` — attribute usage sites");
+        md.AppendLine("- `ANALYZE usedby:Assets/Foo.prefab` (or `usedby:ClassName`) — reverse lookup: every scene/prefab/SO/UXML that references the asset via serialized GUID");
+        md.AppendLine("- Deep type views automatically append **Asset wiring**: which scenes/prefabs have the script attached, ScriptableObject instances, and UnityEvent targets");
+        md.AppendLine();
+        md.AppendLine("## MAP — task-oriented project map (works without Unity)");
+        md.AppendLine();
+        md.AppendLine("Start here when you have a TASK but no symbol name yet. `MAP <keywords>` fans out over the code index");
+        md.AppendLine("AND the serialized asset graph, returning one dossier: matching scripts (with attach sites), scenes");
+        md.AppendLine("(with build-settings index), prefabs, ScriptableObject config assets, UXML/input-action assets, and");
+        md.AppendLine("UnityEvent wiring. Then drill in with `ANALYZE <TopHit>`.");
+        md.AppendLine();
+        md.AppendLine("- `MAP double jump` — everything related to jumping: PlayerJump.cs, the prefabs it's attached to, JumpSettings.asset, Button→Jump() wiring");
+        md.AppendLine("- `MAP shop purchase ui` — shop scripts + shop scenes/prefabs/UXML in one shot");
         md.AppendLine();
         md.AppendLine("## SCREENSHOT — single command, smart routing");
         md.AppendLine();
@@ -6544,11 +6593,11 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             return EXIT_SUCCESS;
 
         // Always deny — Roslyn offline analysis works without Unity
-        string reason = $"For C# code searches, use clibridge4unity CODE_ANALYZE instead of grep:\n" +
-                        $"  clibridge4unity CODE_ANALYZE {pattern}\n" +
-                        $"CODE_ANALYZE returns the full connection graph: inheritance, who references it, " +
+        string reason = $"For C# code searches, use clibridge4unity ANALYZE instead of grep:\n" +
+                        $"  clibridge4unity ANALYZE {pattern}\n" +
+                        $"ANALYZE returns the full connection graph: inheritance, who references it, " +
                         $"who passes it as a parameter, who returns it, GetComponent calls, methods, fields, " +
-                        $"and raw grep matches — all in ~200ms. Always prefer CODE_ANALYZE over grep for C# code.";
+                        $"and raw grep matches — all in ~200ms. Always prefer ANALYZE over grep for C# code.";
 
         Console.Error.Write(reason);
         return 2; // exit 2 = deny/block
@@ -7321,7 +7370,16 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         {
             query = (query ?? "").Trim();
             if (query.Length == 0)
-                return "Error: No query. Usage: CODE_ANALYZE ClassName | method:Name | field:Name | inherits:Type | attribute:Name";
+                return "Error: No query. Usage: ANALYZE ClassName | method:Name | field:Name | inherits:Type | attribute:Name | usedby:Asset";
+
+            // usedby: is an asset-graph reverse lookup — one-shot build (same cost profile as
+            // the REFERENCES command's full scan; the daemon path answers this from its index).
+            if (query.StartsWith("usedby:", StringComparison.OrdinalIgnoreCase))
+            {
+                var oneShot = new AssetGraph(projectPath);
+                oneShot.Build();
+                return oneShot.FormatUsedBy(query.Substring("usedby:".Length).Trim());
+            }
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -7425,6 +7483,46 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
                 }
             }
             return resp;
+        }
+
+        /// <summary>Single-pass MAP fallback: parse .cs files containing any task keyword,
+        /// build a one-shot asset graph, and hand both to the shared dossier formatter.</summary>
+        public static string Map(string projectPath, string query)
+        {
+            query = (query ?? "").Trim();
+            if (query.Length == 0)
+                return "Error: No keywords. Usage: MAP <task keywords> (e.g. MAP double jump player input)";
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var tokens = query.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .Where(t => t.Length >= 2).ToArray();
+
+            string assetsDir = Path.Combine(projectPath, "Assets");
+            string packagesDir = Path.Combine(projectPath, "Packages");
+            var fileList = new List<string>();
+            if (Directory.Exists(assetsDir))
+                fileList.AddRange(Directory.EnumerateFiles(assetsDir, "*.cs", SearchOption.AllDirectories));
+            if (Directory.Exists(packagesDir))
+                fileList.AddRange(Directory.EnumerateFiles(packagesDir, "*.cs", SearchOption.AllDirectories));
+
+            var trees = new System.Collections.Concurrent.ConcurrentDictionary<string, Microsoft.CodeAnalysis.SyntaxTree>();
+            var texts = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
+            Parallel.ForEach(fileList, file =>
+            {
+                try
+                {
+                    string text = File.ReadAllText(file);
+                    if (!tokens.Any(t => text.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0)) return;
+                    trees[file] = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text, path: file);
+                    texts[file] = text;
+                }
+                catch { }
+            });
+
+            var graph = new AssetGraph(projectPath);
+            graph.Build();
+            sw.Stop();
+            return graph.FormatMap(trees, texts, projectPath, query, sw.ElapsedMilliseconds);
         }
     }
 

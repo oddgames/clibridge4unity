@@ -27,7 +27,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.62";
+        public const string Version = "1.1.63";
 
         // Minimum VSCode-extension version compatible with this bridge's interface — the command
         // verbs the extension sends (COMPILE/STATUS/VSCODE) and the STATUS fields it reads.

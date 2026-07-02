@@ -337,6 +337,11 @@ static class RoslynDaemon
         // when CODE_ANALYZE can't find a type in source (precompiled plugins, package DLLs).
         var dllIndex = new DllIndex(projectPath);
 
+        // Asset graph — serialized-YAML wiring (script attach sites, prefab/scene refs,
+        // UnityEvent calls). Powers `usedby:` queries, MAP, and the "Asset wiring" section
+        // appended to CODE_ANALYZE deep-type views.
+        var assetGraph = new AssetGraph(projectPath);
+
         // Asset change tracking (latest event per path; older events superseded).
         // Keyed by path; value = (kind, utcTicks, oldPath). Persisted to changes.log for Unity side.
         var changeLog = new ConcurrentDictionary<string, (string Kind, long UtcTicks, string OldPath)>();
@@ -458,6 +463,22 @@ static class RoslynDaemon
                     Console.Error.WriteLine($"\n[daemon] DLL index build failed: {ex.GetType().Name}: {ex.Message}");
                 }
             });
+
+        });
+
+        // Asset graph (scenes/prefabs/SO wiring) — no dependency on the syntax trees, so it
+        // builds in parallel with the source parse (I/O-bound vs the parse's CPU-bound work).
+        Task.Run(() =>
+        {
+            try
+            {
+                assetGraph.Build();
+                Console.Error.WriteLine($"Asset graph: {assetGraph.ContainerCount} containers, {assetGraph.GuidCount} guids ({assetGraph.BuildMs}ms)");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[daemon] asset graph build failed: {ex.GetType().Name}: {ex.Message}");
+            }
         });
 
         // Phase 2: File watcher (covers both Assets and Packages)
@@ -489,17 +510,26 @@ static class RoslynDaemon
                 NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName,
                 InternalBufferSize = 65536 // 64KB — handles bulk ops (git checkout, package install)
             };
+            // Asset-graph refresh mirrors the .cs reparse pattern: fire-and-forget with a short
+            // debounce so bursts (save-all, import) coalesce into cheap single-file rescans.
+            void GraphUpdate(string path, bool deleted, string oldPath = null)
+            {
+                if (!AssetGraph.IsGraphFile(path) && (oldPath == null || !AssetGraph.IsGraphFile(oldPath))) return;
+                Task.Run(() => { Thread.Sleep(150); assetGraph.OnFileEvent(path, deleted, oldPath); });
+            }
             w.Changed += (_, e) =>
             {
                 if (!IsTrackedPath(e.FullPath)) return;
                 RecordChange("M", e.FullPath);
                 if (IsCsFile(e.FullPath)) Task.Run(() => OnFileChanged(e.FullPath));
+                GraphUpdate(e.FullPath, deleted: false);
             };
             w.Created += (_, e) =>
             {
                 if (!IsTrackedPath(e.FullPath)) return;
                 RecordChange("C", e.FullPath);
                 if (IsCsFile(e.FullPath)) Task.Run(() => OnFileChanged(e.FullPath));
+                GraphUpdate(e.FullPath, deleted: false);
             };
             w.Renamed += (_, e) =>
             {
@@ -511,6 +541,7 @@ static class RoslynDaemon
                     fileTexts.TryRemove(e.OldFullPath, out string _);
                 }
                 if (IsCsFile(e.FullPath)) Task.Run(() => OnFileChanged(e.FullPath));
+                GraphUpdate(e.FullPath, deleted: false, oldPath: e.OldFullPath);
             };
             w.Deleted += (_, e) =>
             {
@@ -521,6 +552,7 @@ static class RoslynDaemon
                     trees.TryRemove(e.FullPath, out SyntaxTree _2);
                     fileTexts.TryRemove(e.FullPath, out string _3);
                 }
+                GraphUpdate(e.FullPath, deleted: true);
             };
             w.Error += (_, e) =>
             {
@@ -578,7 +610,7 @@ static class RoslynDaemon
                         response = indexReady.IsSet ? "ok" : "indexing";
                         break;
                     case "status":
-                        response = $"files: {trees.Count}/{Volatile.Read(ref totalFilesToIndex)}\nready: {indexReady.IsSet}\nreparses: {reParseCount}\ndlls: {dllIndex.DllCount} ({dllIndex.TypeCount} types, ready={dllIndex.Ready})\nuptime: {(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds:F0}s\nproject: {projectPath}";
+                        response = $"files: {trees.Count}/{Volatile.Read(ref totalFilesToIndex)}\nready: {indexReady.IsSet}\nreparses: {reParseCount}\ndlls: {dllIndex.DllCount} ({dllIndex.TypeCount} types, ready={dllIndex.Ready})\nassets: {assetGraph.ContainerCount} containers ({assetGraph.GuidCount} guids, ready={assetGraph.Ready})\nuptime: {(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds:F0}s\nproject: {projectPath}";
                         break;
                     case "analyze":
                         // Don't block the connection on indexing — return a progress sentinel
@@ -589,8 +621,37 @@ static class RoslynDaemon
                             response = $"__indexing:{trees.Count}/{Volatile.Read(ref totalFilesToIndex)}";
                             break;
                         }
+                        // `usedby:` is an asset-graph reverse lookup, not a code query.
+                        if (query.TrimStart().StartsWith("usedby:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!assetGraph.Ready)
+                            {
+                                response = $"__indexing:assets:{assetGraph.ContainerCount}";
+                                break;
+                            }
+                            response = assetGraph.FormatUsedBy(query.Trim().Substring("usedby:".Length).Trim());
+                            break;
+                        }
                         response = HandleAnalyze(trees, fileTexts, projectPath, query);
                         response = AugmentWithDllHits(response, dllIndex, query);
+                        response = AugmentWithAssetWiring(response, assetGraph, query);
+                        break;
+                    case "map":
+                        if (!indexReady.IsSet)
+                        {
+                            response = $"__indexing:{trees.Count}/{Volatile.Read(ref totalFilesToIndex)}";
+                            break;
+                        }
+                        if (!assetGraph.Ready)
+                        {
+                            // Progress sentinel — client polls with heartbeat, count grows as build proceeds.
+                            response = $"__indexing:assets:{assetGraph.ContainerCount}";
+                            break;
+                        }
+                        response = assetGraph.FormatMap(
+                            new Dictionary<string, SyntaxTree>(trees),
+                            new Dictionary<string, string>(fileTexts),
+                            projectPath, query, 0);
                         break;
                     case "compile-changes":
                     {
@@ -662,7 +723,7 @@ static class RoslynDaemon
                         shutdownCts.Cancel();
                         break;
                     default:
-                        response = "endpoints: health, status, analyze, search, lint, compile-changes, compile-mark, shutdown";
+                        response = "endpoints: health, status, analyze, map, lint, compile-changes, compile-mark, shutdown";
                         break;
                 }
 
@@ -760,6 +821,32 @@ static class RoslynDaemon
     // Real extraction + formatting lives in CodeAnalysisCore so the single-pass fallback
     // in clibridge4unity.cs can share the same logic. This wrapper filters the long-lived
     // trees/fileTexts cache to files matching the query and hands them to the core.
+
+    /// <summary>Append the serialized-wiring section (attach sites, SO instances, UnityEvent
+    /// targets) to a deep-type CODE_ANALYZE response. Plain type queries only — listings and
+    /// member zooms stay untouched. Silent no-op when the graph is empty for this type.</summary>
+    static string AugmentWithAssetWiring(string response, AssetGraph graph, string query)
+    {
+        if (graph == null || string.IsNullOrWhiteSpace(query)) return response;
+
+        string trimmed = query.Trim();
+        int colonIdx = trimmed.IndexOf(':');
+        if (colonIdx > 0 && trimmed.IndexOf(' ') < 0)
+        {
+            string prefix = trimmed.Substring(0, colonIdx).ToLowerInvariant();
+            if (prefix is "class" or "type") trimmed = trimmed.Substring(colonIdx + 1).Trim();
+            else return response; // kind-prefixed listing — not a type view
+        }
+        if (trimmed.Contains('.') || trimmed.Contains(' ')) return response; // member zoom / freeform
+
+        // Only augment an actual deep-type view (avoids decorating not-found errors).
+        if (!response.Contains($"=== {trimmed} ===", StringComparison.Ordinal)) return response;
+        if (!graph.Ready) return response; // don't block analyze on the graph
+
+        string wiring = graph.FormatWiring(trimmed);
+        if (wiring == null) return response;
+        return response.TrimEnd() + "\n\n" + wiring;
+    }
 
     /// <summary>If <paramref name="response"/> indicates source-only Analyze couldn't pin
     /// the type and the DLL index has a hit, prepend a DLL-defined report.

@@ -9,7 +9,8 @@ Standard Unity/HLSL precision, surface-shader, instancing, and texture-import ru
 
 ## Authoring (house style)
 
-- **Built-in RP, CGPROGRAM surface shaders only.** No URP, no HLSLPROGRAM, no ShaderGraph in authored code.
+- **Confirm the pipeline first** — `GraphicsSettings.currentRenderPipeline` null → Built-in, else URP. The authoring rules below assume a **Built-in RP** client; on a URP client (see `clibridge4unity-command-buffers` house facts) surface shaders don't exist — author HLSLPROGRAM/ShaderGraph instead, and only the precision/keyword/variant rules below still apply. Note: Built-in RP is **officially deprecated as of Unity 6.5** (June 2026; fixes continue through ~6.7 LTS) — fine on 6.3 LTS clients, but don't start *new* projects on it.
+- **Built-in RP: CGPROGRAM surface shaders only.** No HLSLPROGRAM, no ShaderGraph in authored code.
 - **Precision convention:** `float` for positions / world-space / any UV that feeds a sub-rect remap; `half` for lighting and interpolants; `fixed`/`fixed4` for colors.
 - **Standard pragma block** — strips the deferred/prepass/extra-light paths these clients never use:
   ```

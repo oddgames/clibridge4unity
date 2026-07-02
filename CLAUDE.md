@@ -109,10 +109,10 @@ tool_claude_unity_bridge/
 │   │       ├── Prefab/        # Prefab creation/instantiation
 │   │       ├── Component/     # Component inspection & modification
 │   │       ├── Asset/         # Asset search, move, copy, delete, labels
-│   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (CODE_ANALYZE + LINT are CLI-side)
+│   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.62)
+│   └── package.json           # UPM manifest (v1.1.63)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -220,7 +220,7 @@ The Package is split into 8 asmdefs to minimize recompilation:
 - **clibridge4unity.Commands.Code** - Runtime code execution and tests (CODE_EXEC, CODE_EXEC_RETURN, TEST)
 - **clibridge4unity.Commands.UI** - UI discovery, rendering
 
-`CODE_ANALYZE` is CLI-side only; it must not be registered as a Unity `[BridgeCommand]`.
+`ANALYZE` (aliases: `CODE_ANALYZE`, `CODE_SEARCH`) is CLI-side only; it must not be registered as a Unity `[BridgeCommand]`.
 
 ## Commands Available
 
@@ -244,10 +244,12 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `BUILD [--run] [--dev] [--output <path>]` - Build the Unity Player (active target). Streams progress + errors. `--run` launches Standalone after success. Default output: `Builds/<Target>/<ProductName>`. Other commands auto-block during the build.
 
 ### Code
-- `CODE_ANALYZE query` - Unified code analysis (works offline via Roslyn daemon):
-  - `CODE_ANALYZE ClassName` → deep view (definition, usages, derived types, GetComponent sites, own members)
-  - `CODE_ANALYZE ClassName.Member` → zoom into one member
-  - `CODE_ANALYZE method:Name` | `field:Name` | `property:Name` | `inherits:Type` | `attribute:Name` → kind-prefixed listing across the codebase
+- `ANALYZE query` - **The main reference point.** Unified code + asset-wiring analysis (offline, daemon-served; aliases: `CODE_ANALYZE`, `CODE_SEARCH`):
+  - `ANALYZE ClassName` → deep view (definition, usages, derived types, GetComponent sites, own members) + **Asset wiring** section (scenes/prefabs the script is attached to, SO instances, UnityEvent targets — from the daemon's serialized asset graph)
+  - `ANALYZE ClassName.Member` → zoom into one member
+  - `ANALYZE method:Name` | `field:Name` | `property:Name` | `inherits:Type` | `attribute:Name` → kind-prefixed listing across the codebase
+  - `ANALYZE usedby:Assets/Foo.prefab` (or `usedby:ClassName`) → reverse GUID lookup: every scene/prefab/SO/UXML referencing the asset (index-backed, instant)
+- `MAP task keywords` - Task-oriented project map (offline, daemon-served). Free keywords (e.g. `MAP double jump`) → one dossier: matching scripts with attach sites, scenes (with build index), prefabs, SO config assets, UXML/`.inputactions`, UnityEvent wiring. The "where do I start?" command. See [AssetGraph.cs](clibridge4unity/AssetGraph.cs)
 - `CODE_EXEC code` - Compile and execute C# code (fire-and-forget). Alias: `EXEC`
 - `CODE_EXEC_RETURN code` - Compile and execute C# code (waits for result, returns type). Alias: `EVAL`
 - `CODE_EXEC_RETURN code --inspect [depth] [--private]` - Execute and dump result object tree
@@ -297,7 +299,7 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 ### Asset
 - `ASSET_SEARCH query` - Search assets using Unity Search syntax (fuzzy "did you mean" suggestions on miss)
 - `ASSET_DISCOVER [category]` - Discover assets (ui, sprites, prefabs, scenes, fonts, shaders, materials, models, variants)
-- `UI_DISCOVER` - Inventory UXML/USS/TSS files + custom VisualElement registrations
+- `UI_DISCOVER` - Alias for `ASSET_DISCOVER ui` (no bridge command enumerates UXML/USS/TSS files — use Grep or ANALYZE)
 - `ASSET_MOVE src dst` - Move/rename assets (preserves GUIDs), supports multi-source to folder
 - `ASSET_COPY src dst` - Copy assets, supports multi-source to folder
 - `ASSET_DELETE path [path2...]` - Delete assets (batch)
@@ -324,7 +326,8 @@ Multiple Claude/CLI windows share **one** Unity editor, so commands collide (COM
 
 ### CLI-side (no Unity connection needed)
 - `LINT` / `LINT semantic` - Offline syntax/semantic check (see Core section above)
-- `CODE_ANALYZE query` - Roslyn-based code analysis (Roslyn daemon, persistent index)
+- `ANALYZE query` - Code + asset-wiring analysis (Roslyn daemon, persistent index); `usedby:` prefix for reverse asset lookups (aliases: CODE_ANALYZE, CODE_SEARCH)
+- `MAP task keywords` - Task-oriented project map (code index + serialized asset graph, no Unity needed)
 - `SETUP` - Install UPM package + install per-task skills into `.claude/skills/` + verify Unity + generate CLAUDE.md and AGENTS.md (alias: `INSTALL`). Skills are embedded in the CLI exe (`clibridge4unity/skills/*.md`) and unpacked with a SHA-1 trailer; re-running SETUP only overwrites files the user hasn't edited.
 - `UPDATE` - Self-update CLI exe + UPM package tag + re-unpack the embedded per-task skills into `.claude/skills/` (no Unity connection needed). Refreshing the skills means a single `UPDATE` ships the new exe's skill content too, not just the binary — same wipe-and-reinstall as `SETUP` (renamed/user-authored skills untouched). Silent on skills when run outside a Unity project.
 - `OPEN` - Launch Unity with project (auto-detects Unity version via ProjectVersion.txt)

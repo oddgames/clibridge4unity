@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.1.63 — 2026-07-02
+
+## v1.1.63
+
+### New
+- **`MAP <task keywords>`** — new CLI-side, offline task-orientation command (e.g. `MAP double jump`). Returns one dossier: matching scripts kind-tagged with the scenes/prefabs they're attached to, scenes with build-settings index, prefabs, ScriptableObject config assets, UXML/`.inputactions` assets, and UnityEvent wiring, ending with a suggested drill-down. Backed by a new serialized **asset-graph index** (AssetGraph.cs) alongside the Roslyn code index.
+- **`ANALYZE`** — `CODE_ANALYZE` renamed (old names `CODE_ANALYZE`/`CODE_SEARCH` still work as aliases). Now includes an **Asset wiring** section (attach sites, SO instances, UnityEvent targets) and a new `usedby:` prefix: `ANALYZE usedby:Assets/Foo.prefab` (or `usedby:ClassName`) does an instant reverse-GUID lookup of every scene/prefab/SO/UXML referencing it.
+
+### Fixed
+- Skill/docs: `UI_DISCOVER` was documented as inventorying UXML/USS/TSS + VisualElement registrations — it's actually just an alias for `ASSET_DISCOVER ui`. Corrected in the assets skill and CLAUDE.md.
+- Skill: compute-shaders mobile `groupshared` figure corrected from 32KB (D3D11 limit) to the 16KB GLES 3.1 guaranteed minimum — the old figure could ship kernels that pass in-editor and fail on Android.
+- Skill: resolved the render-pipeline contradiction between the shaders (Built-in-only) and command-buffers (URP 17.3) skills with an explicit `GraphicsSettings.currentRenderPipeline` check scoping each rule set.
+
+### Internal
+- Skills refreshed against Unity 6.3–6.5 research: USS `aspect-ratio` shipped in 6.3 (inline-C# workaround retired), Built-in RP deprecated as of 6.5, UI Toolkit native SVG + USS filters (6.3) noted in the icons pipeline, `[SerializeReference]` hierarchy validation (6.4), on-device Render Graph Viewer (6.3).
+- Skills: added `.compute`-edits-don't-need-COMPILE note, `CODE_SEARCH`/`ANALYZE` alias docs, `SERVE` in the bridge skill's pipe-free list; conciseness pass on the touch-controls and multi-device sections.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.62 — 2026-06-30
 
 ## v1.1.62

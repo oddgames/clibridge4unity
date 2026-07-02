@@ -5,9 +5,11 @@ description: Write, edit, or debug Unity Compute Shaders — `.compute` files, k
 
 # Unity Compute Shaders
 
-Standard Unity compute-shader rules (numthreads = group size, Dispatch group counts + CeilToInt + in-kernel bounds checks, mobile 128-thread / 32KB-groupshared ceilings, stride matching, `enableRandomWrite` before `Create`, `.Release()` lifetime, `AsyncGPUReadback` over `GetData`, GLES 3.1+ requirement, per-kernel binding) apply as normal — assume general knowledge. This project hits these on mask compositing / paint-decal accumulation, where a kernel that runs in the desktop editor exceeds GLES 3.1/Metal device limits (`Shader error … on gles3` never seen in editor). Verify with the CLI below.
+Standard Unity compute-shader rules (numthreads = group size, Dispatch group counts + CeilToInt + in-kernel bounds checks, mobile safe floors: 128 threads/group and 16KB `groupshared` (GLES 3.1 guaranteed minimum — 32KB is the D3D11 limit and overshoots many devices), stride matching, `enableRandomWrite` before `Create`, `.Release()` lifetime, `AsyncGPUReadback` over `GetData`, GLES 3.1+ requirement, per-kernel binding) apply as normal — assume general knowledge. This project hits these on mask compositing / paint-decal accumulation, where a kernel that runs in the desktop editor exceeds GLES 3.1/Metal device limits (`Shader error … on gles3` never seen in editor). Verify with the CLI below.
 
 ## Verification
+
+**Never `COMPILE` for a `.compute` edit** — `COMPILE` recompiles C# (domain reload, breaks the pipe) and does not touch HLSL. A `.compute` file is an asset: Unity reimports and recompiles it on save (or `REFRESH`), and kernel errors surface via `LOG errors`. Same rule as `clibridge4unity-shaders`.
 
 ```bash
 clibridge4unity STATUS                    # check no script errors

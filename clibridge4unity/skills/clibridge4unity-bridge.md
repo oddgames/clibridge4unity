@@ -82,6 +82,7 @@ These run without a pipe connection:
 - `UPDATE` — self-update the CLI exe and the UPM package tag.
 - `VSCODE` — install the bundled VSCode/Cursor status-bar extension into detected editors (idempotent).
 - `OPEN` — launch Unity with the project (auto-detects the Unity version from `ProjectVersion.txt`).
+- `SERVE [--port N] [--ttl M]` — local file server (default `localhost:8420`), e.g. for viewing HTML reports/screenshots in a browser.
 
 ## Other handshake commands
 

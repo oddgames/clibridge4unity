@@ -31,7 +31,7 @@ internal static class CodeAnalysisCore
         int totalCorpusSize)
     {
         if (string.IsNullOrWhiteSpace(query))
-            return "Error: No query. Usage: CODE_ANALYZE ClassName | ClassName.Member | method:Name | field:Name | inherits:Type | attribute:Name";
+            return "Error: No query. Usage: ANALYZE ClassName | ClassName.Member | method:Name | field:Name | inherits:Type | attribute:Name | usedby:Asset";
 
         query = query.Trim();
 
