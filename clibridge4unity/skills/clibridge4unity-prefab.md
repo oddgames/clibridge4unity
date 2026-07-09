@@ -41,7 +41,7 @@ clibridge4unity PREFAB_INSTANTIATE Assets/Prefabs/Enemy.prefab Canvas   # parent
 
 `COMPONENT_SET` and friends work on scene instances. To modify a prefab asset:
 - Instantiate (`PREFAB_INSTANTIATE`), modify via `clibridge4unity-components`, then `PREFAB_SAVE` back.
-- Or use `clibridge4unity-run-code` with `PrefabUtility.LoadPrefabContents(path)` → modify → `PrefabUtility.SaveAsPrefabAsset(contentsRoot, path)` → `PrefabUtility.UnloadPrefabContents(contentsRoot)`. The `UnloadPrefabContents` call is mandatory.
+- For a code edit, a YAML/GUID swap, or the `SavePrefabAsset` (in-place, preserves refs) vs `SaveAsPrefabAsset` (round-trip, can null refs) choice — see `clibridge4unity-prefab-workflow`.
 
 ## Related
 - `clibridge4unity-screenshot` — render prefabs

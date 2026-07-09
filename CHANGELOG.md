@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.1.64 — 2026-07-09
+
+## v1.1.64
+
+### New
+- **`EDITORLOG` command** (aliases `EDITORLOGS`, `ELOG`) — tails Unity's on-disk `Editor.log`, CLI-side with no pipe needed. Works when the bridge isn't running in an instance (ParrelSync-style **clones**, crashed/busy Unity) and surfaces import/compile/crash/load failures the in-console `LOG` (which reads Unity's in-memory console over the pipe) never held. Modes: bare tail, `EDITORLOG N` (last N lines), `errors` (error/exception/fail lines), `grep <regex>`, `path`. Resolves the per-instance log most-specific-first (`-logFile` arg → header-matched `Editor*.log` → default `%LOCALAPPDATA%\Unity\Editor\Editor.log`) and prints which file it read; reads with `FileShare.ReadWrite` so it works mid-import, and only ever tails the last ~256KB.
+- **`RELEASENOTES` command** (aliases `UNITYNOTES`, `RELNOTES`) — fetches Unity Editor release notes for a version range from `release-notes.ds.unity3d.com` (pure HTTP, no Unity/project needed). **Bare** = current project's Unity version (from `ProjectVersion.txt`) → latest available; from-only defaults `to` to latest; explicit `<from> <to>` for any range. `--list [substr]` browses the version catalog, `-c` filters categories, `-g` regex-filters note text, `--format md|json|text`, `-o <file>`, `--url`. Issue references (`UUM-####`) linkify to the issue tracker. Aimed at debugging: grep the notes to check whether a hard bug matches a known Unity fix or regression.
+
+### Fixed
+- Skill/docs: `UI_DISCOVER` was documented in the assets skill + CLAUDE.md as inventorying UXML/USS/TSS + VisualElement registrations — it's actually just an alias for `ASSET_DISCOVER ui`. Corrected.
+- Skill: compute-shaders mobile `groupshared` figure corrected from 32KB (D3D11 limit) to the 16KB GLES 3.1 guaranteed minimum — the old figure could ship kernels that pass in-editor and fail on Android.
+- Skill: resolved the render-pipeline contradiction between the shaders (Built-in-only) and command-buffers (URP 17.3) skills with an explicit `GraphicsSettings.currentRenderPipeline` scoping check.
+
+### Internal
+- **New skill `clibridge4unity-release-notes`** — debugging-focused: when a bug smells like Unity itself (post-upgrade regression, "worked before", long-standing glitch), grep the release notes for a matching known issue/fix; pairs with `EDITORLOG`/`LOG`.
+- **Rewrote `clibridge4unity-prefab-workflow`** into a real prefab-editing guide: three approaches (CLI instantiate/save, YAML GUID swap, code) and the `SavePrefabAsset` (in-place, preserves refs) vs `SaveAsPrefabAsset` (LoadPrefabContents round-trip, can null unresolved refs) footgun, with a worked terrain-layer matrix-packing example added to `clibridge4unity-shaders`.
+- Skills refreshed against Unity 6.3–6.5: USS `aspect-ratio` shipped in 6.3 (inline-C# workaround retired in the UI Toolkit skill), Built-in RP deprecated as of 6.5 (noted in shaders), UI Toolkit native SVG + USS filters (6.3) in the icons pipeline, `[SerializeReference]` hierarchy validation (6.4) in serialization, on-device Render Graph Viewer (6.3) in command-buffers.
+- Shader skill: added mobile-ALU micro-optimization section (`UNITY_BRANCH`/`UNITY_FLATTEN`, loop unrolling, SIMD/matrix `mul`) and the "never `COMPILE` for a shader edit — it recompiles C#, not HLSL" correction (same note added for `.compute`). UI skills gained mobile input ergonomics (size touch controls by physical mm via `Screen.dpi`), multi-device render verification (phone + tablet, present both), and game-style reuse (inherit nearby prefab / shared USS).
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.63 — 2026-07-02
 
 ## v1.1.63

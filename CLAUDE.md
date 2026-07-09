@@ -112,7 +112,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.63)
+│   └── package.json           # UPM manifest (v1.1.64)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -237,8 +237,9 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `LINT unity [warnings]` - Unity-faithful **per-asmdef** compile (~5-60s). Asmdef-aware (avoids cross-asmdef type collision false positives). Catches missing methods, type errors, missing usings. 60s budget — falls back to COMPILE if exceeded.
 - `COMPILE` - Force script recompilation (Unity-side, triggers domain reload, breaks pipe). The ground truth — use when LINT modes give false positives or you need source generators / post-compile callbacks. Bridge auto-blocks all commands during Unity Player Build (returns clear error instead of timing out).
 - `REFRESH` - Force asset database refresh
-- `LOG [filter]` - Get bridge-captured Unity logs; use `LOG ui errors` for current USS/UXML/TSS import errors
+- `LOG [filter]` - Get bridge-captured Unity **console** logs (over the pipe); use `LOG ui errors` for current USS/UXML/TSS import errors
   - Commands that reference `.uss`, `.uxml`, or `.tss` assets append matching UI Toolkit import errors automatically
+  - `LOG` needs the bridge running and reads Unity's in-memory console — when it's empty or the pipe is down, use `EDITORLOG` (CLI-side) to read the on-disk `Editor.log` instead
 - `MENU path` - Execute a Unity menu item (e.g. `MENU Window/General/Console`)
 - `PROFILE [enable|disable|clear|hierarchy]` - Control profiler and read performance data
 - `BUILD [--run] [--dev] [--output <path>]` - Build the Unity Player (active target). Streams progress + errors. `--run` launches Standalone after success. Default output: `Builds/<Target>/<ProductName>`. Other commands auto-block during the build.
@@ -335,4 +336,6 @@ Multiple Claude/CLI windows share **one** Unity editor, so commands collide (COM
 - `WAKEUP refresh` - Bring to foreground + send Ctrl+R to force recompile
 - `DISMISS` - Close modal dialogs
 - `SCREENSHOT` - CLI-side window capture (see Screenshot section)
+- `EDITORLOG [N|errors|grep PAT|path]` - Tail Unity's on-disk `Editor.log` (aliases: `EDITORLOGS`, `ELOG`). No pipe needed — works when the bridge isn't running in that instance (clones, crashed/busy Unity) and surfaces import/compile/crash/load lines `LOG` can't reach. Resolves the per-instance log (`-logFile` arg → header-matched `Editor*.log` → default `%LOCALAPPDATA%\Unity\Editor\Editor.log`) and prints which file it read. `errors` filters to error/exception/fail lines; `grep PAT` is a case-insensitive regex; `path` prints the resolved path only.
 - `VSCODE` - Install the bundled VSCode/Cursor status-bar extension into detected editors (`code`/`code-insiders`/`cursor`/`codium`/`windsurf`). The `.vsix` is embedded in the CLI exe (built from `vscode-extension/`, version-locked to the CLI) and installed via `<editor> --install-extension <vsix> --force`; idempotent (skips if the editor already has an equal-or-newer version). `SETUP` prints a hint pointing here but does not auto-install.
+- `RELEASENOTES [from] [to] [-c Cat,Cat] [-g regex] [--format md|json|text] [-o file] [--url]` - Fetch Unity Editor release notes for a version range from `release-notes.ds.unity3d.com` (pure HTTP, no Unity/project needed). **Bare** = current project's Unity version (`ProjectVersion.txt`) → latest available; **from-only** = that version → latest. `--list [substr]` browses versions. `-c` filters categories (substring, comma-OR), `-g` regex-filters note text — use it to check whether a hard bug matches a known Unity fix/regression. Issue links (`UUM-####`) resolve to the issue tracker. Aliases: `UNITYNOTES`, `RELNOTES`. See [clibridge4unity-release-notes skill](clibridge4unity/skills/clibridge4unity-release-notes.md).

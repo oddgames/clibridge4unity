@@ -1439,6 +1439,15 @@ class Program
             return HandleVscode(data);
         }
 
+        // RELEASENOTES: fetch Unity Editor release notes for a version range from
+        // release-notes.ds.unity3d.com — pure HTTP, needs neither a pipe nor a Unity project.
+        if (cmdUpper == "RELEASENOTES" || cmdUpper == "UNITYNOTES" || cmdUpper == "RELNOTES")
+        {
+            // projectPath may be null here (dispatched before auto-detect); the handler
+            // auto-detects only when it needs the project's Unity version for the default range.
+            return HandleReleaseNotes(data, projectPath);
+        }
+
         // Auto-detect project path if not specified
         projectPath = projectPath ?? AutoDetectProjectPath();
         if (projectPath == null)
@@ -1692,6 +1701,16 @@ class Program
         {
             bool refresh = data != null && data.Contains("refresh", StringComparison.OrdinalIgnoreCase);
             return HandleWakeup(projectPath, refresh);
+        }
+
+        // EDITORLOG: dump/tail Unity's Editor.log FILE from disk — CLI-side, no pipe needed.
+        // Works when the bridge isn't running in that instance (clones, crashed/busy Unity) and
+        // surfaces import/compile/crash/load lines the in-console LOG (pipe) can't reach.
+        if (command.Equals("EDITORLOG", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("EDITORLOGS", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("ELOG", StringComparison.OrdinalIgnoreCase))
+        {
+            return HandleEditorLog(projectPath, unityInfo, data);
         }
 
         // CODE_ANALYZE: offline — served by the Roslyn daemon or single-pass source parsing.
@@ -2134,6 +2153,8 @@ class Program
         Console.Error.WriteLine("  WAKEUP refresh             Bring to foreground + force recompile (Ctrl+R)");
         Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");
         Console.Error.WriteLine("  SCREENSHOT [view]          Capture Unity window screenshot");
+        Console.Error.WriteLine("  EDITORLOG [N|errors|grep PAT|path]  Tail Unity's Editor.log FILE (works with no pipe / on clones; aliases: ELOG)");
+        Console.Error.WriteLine("  RELEASENOTES [from] [to] [-c Cat] [-g regex]  Unity release notes; bare = current project version -> latest (--list to browse)");
         Console.Error.WriteLine("  LAST [N|-n N|-all|-list] [-head N|-tail N|-grep PAT]  Replay one of the last 10 responses (no re-run)");
         Console.Error.WriteLine("  OPEN                       Launch Unity (or restart if in Safe Mode)");
         Console.Error.WriteLine("  KILL                       Force-terminate Unity for this project (loses unsaved work)");
@@ -2569,7 +2590,8 @@ class Program
     // Anything outside this set short-circuits when the pipe isn't being served.
     static readonly HashSet<string> NoPipeNeeded = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "DISMISS", "LAST", "OPEN", "KILL", "WAKEUP", "CODE_ANALYZE", "MAP", "LINT", "SCREENSHOT"
+        "DISMISS", "LAST", "OPEN", "KILL", "WAKEUP", "CODE_ANALYZE", "MAP", "LINT", "SCREENSHOT",
+        "EDITORLOG", "EDITORLOGS", "ELOG", "RELEASENOTES", "UNITYNOTES", "RELNOTES"
     };
 
     /// <summary>
@@ -4823,6 +4845,439 @@ class Program
     /// and matching each file's header against the project path. Prefers the most recently
     /// modified match (that's the currently-active session). Excludes user-made copies.
     /// </summary>
+    /// <summary>
+    /// EDITORLOG — dump/tail Unity's Editor.log file from disk (CLI-side, no pipe). Resolves the
+    /// per-instance log (-logFile arg via process detection, else header-matched scan, else the
+    /// default %LOCALAPPDATA%\Unity\Editor\Editor.log), then prints a tail — optionally filtered
+    /// to error lines or a grep pattern. Opens with FileShare.ReadWrite so it reads even while
+    /// Unity holds the file open (during import/compile, or on a busy clone).
+    ///   EDITORLOG            last ~200 lines        EDITORLOG errors     error/exception/fail lines
+    ///   EDITORLOG 400        last N lines           EDITORLOG grep <pat> lines matching regex/substr
+    ///   EDITORLOG path       print the resolved log path only
+    /// </summary>
+    static int HandleEditorLog(string projectPath, UnityProcessInfo unityInfo, string data)
+    {
+        // Resolve the log path, most-specific first.
+        string logPath = unityInfo?.EditorLogPath;
+        if (logPath == null || !File.Exists(logPath))
+            logPath = FindEditorLogForProject(projectPath);
+        if (logPath == null || !File.Exists(logPath))
+        {
+            string fallback = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Unity", "Editor", "Editor.log");
+            if (File.Exists(fallback)) logPath = fallback;
+        }
+        if (logPath == null || !File.Exists(logPath))
+        {
+            Console.Error.WriteLine("Error: No Editor.log found for this project.");
+            Console.Error.WriteLine("       Looked for a -logFile path, a header-matching Editor*.log, and the default %LOCALAPPDATA%\\Unity\\Editor\\Editor.log.");
+            Console.Error.WriteLine("       If this is a clone launched with -logFile <path>, open it once so the log exists, or pass -d <cloneProjectPath>.");
+            return EXIT_COMMAND_ERROR;
+        }
+
+        string arg = (data ?? "").Trim();
+        var tokens = arg.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        string first = tokens.Length > 0 ? tokens[0].ToLowerInvariant() : "";
+
+        // EDITORLOG path — just tell the caller where it is (so they can tail it themselves).
+        if (first == "path")
+        {
+            Console.WriteLine(logPath);
+            return EXIT_SUCCESS;
+        }
+
+        var fi = new FileInfo(logPath);
+
+        // Read a generous byte-tail (last ~256KB) then filter by line — never load a huge log whole.
+        string text;
+        try { text = TailFile(logPath, 256 * 1024); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: could not read {logPath}: {ex.Message}");
+            return EXIT_COMMAND_ERROR;
+        }
+        var lines = text.Replace("\r\n", "\n").Split('\n');
+        // The byte-tail seek usually lands mid-line; drop that partial first line (only when we
+        // actually truncated — a small log returns whole and every line is real).
+        bool truncated = fi.Length > 256 * 1024;
+        if (truncated && lines.Length > 1) lines = lines.Skip(1).ToArray();
+
+        IEnumerable<string> selected = lines;
+        int limit = 200;
+        string mode = "tail";
+
+        if (first == "errors")
+        {
+            mode = "errors";
+            selected = lines.Where(IsEditorLogErrorLine);
+        }
+        else if (first == "grep" && tokens.Length > 1)
+        {
+            string pattern = arg.Substring(arg.IndexOf("grep", StringComparison.OrdinalIgnoreCase) + 4).Trim();
+            mode = $"grep '{pattern}'";
+            try
+            {
+                var rx = new System.Text.RegularExpressions.Regex(pattern,
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                selected = lines.Where(l => rx.IsMatch(l));
+            }
+            catch { selected = lines.Where(l => l.Contains(pattern, StringComparison.OrdinalIgnoreCase)); }
+        }
+        else if (int.TryParse(first, out int n) && n > 0)
+        {
+            limit = n;
+        }
+        else if (first == "tail" && tokens.Length > 1 && int.TryParse(tokens[1], out int tn) && tn > 0)
+        {
+            limit = tn;
+        }
+
+        var outLines = selected.ToList();
+        int matched = outLines.Count;
+        if (outLines.Count > limit)
+            outLines = outLines.Skip(outLines.Count - limit).ToList();
+
+        int ageSec = (int)(DateTime.Now - fi.LastWriteTime).TotalSeconds;
+        Console.WriteLine($"editorLog: {logPath}");
+        Console.WriteLine($"size: {fi.Length / 1024}KB   lastWrite: {ageSec}s ago");
+        Console.WriteLine($"mode: {mode}   showing: {outLines.Count}" + (matched > outLines.Count ? $" of {matched} matched" : ""));
+        Console.WriteLine(new string('-', 60));
+        foreach (var l in outLines)
+            Console.WriteLine(l.TrimEnd());
+
+        if (mode == "errors" && matched == 0)
+            Console.WriteLine("(no error/exception/failure lines in the tail — try `EDITORLOG 400` for raw context)");
+
+        return EXIT_SUCCESS;
+    }
+
+    // Broad error classifier for a raw Editor.log tail: compile + UI-import errors (shared with the
+    // diagnostics path) plus the log's own exception/assert/failure markers. Deliberately generous
+    // for a human-read diagnostic dump; use `EDITORLOG grep <pattern>` when you need precision.
+    static bool IsEditorLogErrorLine(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return false;
+        if (IsProjectError(line)) return true;
+        return line.Contains("Exception", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("error", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Assertion failed", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Failed to", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── Release notes ─────────────────────────────────────────────────────────
+    // RELEASENOTES <from> <to> [-c cats] [-g regex] [--format md|json|text] [-o file] [--url]
+    // RELEASENOTES --list [substr]
+    // Pulls Unity's official "Compare Versions" release notes (server-rendered HTML at
+    // release-notes.ds.unity3d.com/search) and the version catalog (/_root.data). Pure HTTP.
+    const string RelnotesBase = "https://release-notes.ds.unity3d.com";
+
+    // Reads m_EditorVersion from ProjectSettings/ProjectVersion.txt (null if not a Unity project).
+    static string ReadProjectUnityVersion(string projectPath)
+    {
+        try
+        {
+            if (projectPath == null) return null;
+            string vf = Path.Combine(projectPath, "ProjectSettings", "ProjectVersion.txt");
+            if (!File.Exists(vf)) return null;
+            foreach (var line in File.ReadLines(vf))
+                if (line.StartsWith("m_EditorVersion:"))
+                    return line.Substring("m_EditorVersion:".Length).Trim();
+        }
+        catch { }
+        return null;
+    }
+
+    static int HandleReleaseNotes(string data, string projectPath)
+    {
+        var toks = (data ?? "").Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+
+        // --list mode
+        if (toks.Length > 0 && toks[0].Equals("--list", StringComparison.OrdinalIgnoreCase))
+        {
+            string sub = toks.Length > 1 ? toks[1] : null;
+            var vers = RelnotesFetchVersions();
+            if (vers == null) { Console.Error.WriteLine($"Error: could not reach {RelnotesBase}."); return EXIT_COMMAND_ERROR; }
+            foreach (var v in vers)
+                if (sub == null || v.Contains(sub, StringComparison.OrdinalIgnoreCase))
+                    Console.WriteLine(v);
+            return EXIT_SUCCESS;
+        }
+
+        // parse from/to + flags
+        string frm = null, to = null, category = null, grep = null, format = "md", outFile = null;
+        bool urlOnly = false;
+        var pos = new List<string>();
+        for (int i = 0; i < toks.Length; i++)
+        {
+            string t = toks[i];
+            string Next() => (i + 1 < toks.Length) ? toks[++i] : null;
+            if (t == "-c" || t == "--category") category = Next();
+            else if (t == "-g" || t == "--grep") grep = Next();
+            else if (t == "--format") format = Next() ?? "md";
+            else if (t == "-o" || t == "--out") outFile = Next();
+            else if (t == "--url") urlOnly = true;
+            else pos.Add(t);
+        }
+        if (pos.Count >= 1) frm = pos[0];
+        if (pos.Count >= 2) to = pos[1];
+
+        // Default range: no <from> → the current project's Unity version; no <to> → the latest
+        // available. So a bare `RELEASENOTES` inside a project means "what's changed since my version."
+        List<string> catalog = null;
+        if (frm == null || to == null)
+            catalog = RelnotesFetchVersions();
+        if (frm == null)
+        {
+            string cur = ReadProjectUnityVersion(projectPath ?? AutoDetectProjectPath());
+            if (cur == null)
+            {
+                Console.Error.WriteLine("Error: no <from> version given and couldn't read the project's Unity version.");
+                Console.Error.WriteLine("       Run inside a Unity project (or pass -d <path>), or give versions: RELEASENOTES <from> <to>.");
+                Console.Error.WriteLine("       Browse versions with: RELEASENOTES --list <substr>");
+                return EXIT_USAGE_ERROR;
+            }
+            frm = cur;
+            Console.Error.WriteLine($"[RELEASENOTES] from = current project version {frm}");
+        }
+        if (to == null)
+        {
+            if (catalog == null || catalog.Count == 0)
+            {
+                Console.Error.WriteLine($"Error: couldn't fetch the version catalog from {RelnotesBase} to determine the latest version.");
+                return EXIT_COMMAND_ERROR;
+            }
+            to = catalog[0]; // newest first
+            Console.Error.WriteLine($"[RELEASENOTES] to = latest available {to}");
+        }
+
+        if (urlOnly)
+        {
+            Console.WriteLine($"{RelnotesBase}/search?from_release={Uri.EscapeDataString(frm)}&to_release={Uri.EscapeDataString(to)}");
+            return EXIT_SUCCESS;
+        }
+
+        if (frm == to)
+        {
+            Console.Error.WriteLine($"Already on the newest version ({frm}) — nothing to compare.");
+            return EXIT_SUCCESS;
+        }
+
+        // validate against the catalog (catches typos, suggests near matches)
+        var versions = catalog ?? RelnotesFetchVersions();
+        if (versions != null && versions.Count > 0)
+        {
+            foreach (var (label, val) in new[] { ("from", frm), ("to", to) })
+            {
+                if (!versions.Contains(val))
+                {
+                    Console.Error.WriteLine($"Error: unknown {label} version '{val}'.");
+                    string prefix = val.Contains('.') ? val.Split('f', 'a', 'b')[0] : val;
+                    var near = versions.Where(v => v.StartsWith(prefix.Length > 3 ? prefix.Substring(0, prefix.Length - 1) : prefix)).Take(8).ToList();
+                    if (near.Count == 0) near = versions.Take(8).ToList();
+                    Console.Error.WriteLine("  Did you mean: " + string.Join(", ", near));
+                    Console.Error.WriteLine("  Run: RELEASENOTES --list <substr>   to browse.");
+                    return EXIT_USAGE_ERROR;
+                }
+            }
+        }
+
+        string html;
+        try
+        {
+            html = RelnotesHttpGet($"/search?from_release={Uri.EscapeDataString(frm)}&to_release={Uri.EscapeDataString(to)}");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Network error fetching release notes: {ex.Message}");
+            return EXIT_COMMAND_ERROR;
+        }
+
+        var notes = RelnotesParse(html);
+
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            var wanted = category.Split(',').Select(c => c.Trim().ToLowerInvariant()).Where(c => c.Length > 0).ToList();
+            notes = notes.Where(n => wanted.Any(w => n.cat.ToLowerInvariant().Contains(w))).ToList();
+        }
+        if (!string.IsNullOrWhiteSpace(grep))
+        {
+            try
+            {
+                var rx = new System.Text.RegularExpressions.Regex(grep, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                notes = notes.Where(n => rx.IsMatch(n.text)).ToList();
+            }
+            catch { notes = notes.Where(n => n.text.Contains(grep, StringComparison.OrdinalIgnoreCase)).ToList(); }
+        }
+
+        if (notes.Count == 0)
+        {
+            Console.Error.WriteLine("No notes matched (check the version range / filters).");
+            return EXIT_COMMAND_ERROR;
+        }
+
+        string outText = RelnotesRender(notes, frm, to, format);
+        if (!string.IsNullOrEmpty(outFile))
+        {
+            File.WriteAllText(outFile, outText);
+            Console.Error.WriteLine($"Wrote {notes.Count} notes to {outFile}");
+        }
+        else Console.Write(outText);
+        return EXIT_SUCCESS;
+    }
+
+    static string RelnotesHttpGet(string path)
+    {
+        using var http = new HttpClient();
+        http.DefaultRequestHeaders.Add("User-Agent", "clibridge4unity-release-notes/1.0");
+        http.Timeout = TimeSpan.FromSeconds(45);
+        return http.GetStringAsync(RelnotesBase + path).GetAwaiter().GetResult();
+    }
+
+    static List<string> RelnotesFetchVersions()
+    {
+        try
+        {
+            string data = RelnotesHttpGet("/_root.data");
+            var set = new HashSet<string>();
+            foreach (System.Text.RegularExpressions.Match m in
+                System.Text.RegularExpressions.Regex.Matches(data, @"\d+\.\d+\.\d+[a-z]\d+"))
+                set.Add(m.Value);
+            var list = set.ToList();
+            list.Sort((a, b) => RelnotesVerKey(b).CompareTo(RelnotesVerKey(a))); // newest first
+            return list;
+        }
+        catch { return null; }
+    }
+
+    static (int, int, int, string, int) RelnotesVerKey(string v)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(v, @"(\d+)\.(\d+)\.(\d+)([a-z])(\d+)");
+        if (!m.Success) return (0, 0, 0, "", 0);
+        return (int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value),
+                int.Parse(m.Groups[3].Value), m.Groups[4].Value, int.Parse(m.Groups[5].Value));
+    }
+
+    // Parses the /search HTML: <h1 id="Cat"> sets category, <p>version</p> sets version,
+    // each <li> is one note (with an optional issue-tracker <a>). Attribute-order tolerant.
+    static List<(string cat, string ver, string text, string issue, string url)> RelnotesParse(string html)
+    {
+        var notes = new List<(string, string, string, string, string)>();
+        string cat = null, ver = null;
+        var verRe = new System.Text.RegularExpressions.Regex(@"^\d+\.\d+\.\d+[a-z]\d+$");
+        var aRe = new System.Text.RegularExpressions.Regex(
+            @"<a\s[^>]*href=""(?<url>[^""]*)""[^>]*>(?<id>[^<]*)</a>",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+        var tokenRe = new System.Text.RegularExpressions.Regex(
+            @"<h1[^>]*\bid=""(?<catid>[^""]*)""[^>]*>(?<cat>.*?)</h1>|<p[^>]*>(?<p>.*?)</p>|<li[^>]*>(?<li>.*?)</li>",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        foreach (System.Text.RegularExpressions.Match m in tokenRe.Matches(html))
+        {
+            if (m.Groups["catid"].Success)
+            {
+                cat = System.Net.WebUtility.HtmlDecode(m.Groups["catid"].Value).Trim();
+                ver = null;
+            }
+            else if (m.Groups["p"].Success)
+            {
+                string ptxt = RelnotesStrip(m.Groups["p"].Value);
+                if (verRe.IsMatch(ptxt)) ver = ptxt;
+            }
+            else if (m.Groups["li"].Success)
+            {
+                string inner = m.Groups["li"].Value;
+                string text = RelnotesStrip(inner);
+                string issue = null, url = null;
+                var am = aRe.Match(inner);
+                if (am.Success) { url = System.Net.WebUtility.HtmlDecode(am.Groups["url"].Value); issue = RelnotesStrip(am.Groups["id"].Value); }
+                if (!string.IsNullOrWhiteSpace(text) && cat != null)
+                    notes.Add((cat, ver, text, issue, url));
+            }
+        }
+        return notes;
+    }
+
+    static string RelnotesStrip(string html)
+    {
+        string s = System.Text.RegularExpressions.Regex.Replace(html, @"<[^>]+>", " ");
+        s = System.Net.WebUtility.HtmlDecode(s);
+        return System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ").Trim();
+    }
+
+    static string RelnotesRender(List<(string cat, string ver, string text, string issue, string url)> notes,
+        string frm, string to, string format)
+    {
+        string src = $"{RelnotesBase}/search?from_release={frm}&to_release={to}";
+
+        if (format == "json")
+        {
+            var rows = notes.Select(n => new { category = n.cat, version = n.ver, text = n.text, issue = n.issue, issue_url = n.url });
+            return System.Text.Json.JsonSerializer.Serialize(
+                new { from = frm, to = to, source = src, count = notes.Count, notes = rows },
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        }
+
+        // group category -> version -> [notes], first-seen order
+        var cats = new List<string>();
+        var byCat = new Dictionary<string, List<(string ver, string text, string issue, string url)>>();
+        foreach (var n in notes)
+        {
+            if (!byCat.ContainsKey(n.cat)) { byCat[n.cat] = new(); cats.Add(n.cat); }
+            byCat[n.cat].Add((n.ver, n.text, n.issue, n.url));
+        }
+        cats.Sort(StringComparer.OrdinalIgnoreCase);
+
+        var sb = new StringBuilder();
+        if (format == "text")
+        {
+            sb.AppendLine($"Unity release notes: {frm} -> {to}  ({notes.Count} notes, {cats.Count} categories)");
+            sb.AppendLine(src);
+            sb.AppendLine();
+            foreach (var c in cats)
+            {
+                sb.AppendLine($"== {c} ==");
+                string curVer = "\0";
+                foreach (var (ver, text, _, _) in byCat[c])
+                {
+                    if (ver != curVer) { sb.AppendLine($"  [{ver ?? "(unversioned)"}]"); curVer = ver; }
+                    sb.AppendLine($"    - {text}");
+                }
+                sb.AppendLine();
+            }
+        }
+        else // md
+        {
+            sb.AppendLine($"# Unity release notes: {frm} -> {to}");
+            sb.AppendLine();
+            sb.AppendLine($"_{notes.Count} notes across {cats.Count} categories · [source]({src})_");
+            sb.AppendLine();
+            foreach (var c in cats)
+            {
+                sb.AppendLine($"## {c}");
+                string curVer = "\0";
+                foreach (var (ver, text, issue, url) in byCat[c])
+                {
+                    if (ver != curVer) { sb.AppendLine(); sb.AppendLine($"### {ver ?? "(unversioned)"}"); curVer = ver; }
+                    sb.AppendLine($"- {RelnotesLinkify(text, issue, url)}");
+                }
+                sb.AppendLine();
+            }
+        }
+        return sb.ToString().TrimEnd() + "\n";
+    }
+
+    static string RelnotesLinkify(string text, string issue, string url)
+    {
+        if (string.IsNullOrEmpty(issue) || string.IsNullOrEmpty(url)) return text;
+        // The tag-stripper leaves the id as "( UUM-123 )" with stray spaces — match tolerantly,
+        // linkify in place, and tighten the parens. Append if it wasn't parenthesised at all.
+        var rx = new System.Text.RegularExpressions.Regex(
+            @"\(\s*" + System.Text.RegularExpressions.Regex.Escape(issue) + @"\s*\)");
+        if (rx.IsMatch(text)) return rx.Replace(text, $"([{issue}]({url}))");
+        return text.Contains(issue) ? text : text + $" ([{issue}]({url}))";
+    }
+
     static string FindEditorLogForProject(string projectPath)
     {
         try
