@@ -324,9 +324,11 @@ namespace clibridge4unity
                     "  SCREENSHOT gameview                     - GameView tab including OnGUI / UI Toolkit / chrome\n" +
                     "  SCREENSHOT Player                       - Find GameObject, render from multiple angles\n" +
                     "  SCREENSHOT Assets/Prefabs/X.prefab      - Render prefab asset (auto-sized, capped at 1280px)\n" +
-                    "  SCREENSHOT Assets/UI/X.uxml             - Render UXML at 800x450\n" +
+                    "  SCREENSHOT Assets/UI/X.uxml             - Render TWO views: as-authored + all-revealed (+ list of unhidden)\n" +
                     "  SCREENSHOT Assets/UI/X.uxml --el #card  - Render only the matching sub-element\n" +
-                    "                                            (--el supports #name, .class, or bare name)",
+                    "                                            (--el supports #name, .class, or bare name)\n" +
+                    "  SCREENSHOT Assets/UI/X.uxml --reveal    - Single view: unhide every hidden element + list them\n" +
+                    "  SCREENSHOT Assets/UI/X.uxml --show #a,.b - Force-show elements; --hide #c to hide",
             RequiresMainThread = false)]
         public static async Task<string> Screenshot(string data)
         {

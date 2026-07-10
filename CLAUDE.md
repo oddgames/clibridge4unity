@@ -112,7 +112,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.64)
+│   └── package.json           # UPM manifest (v1.1.65)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -314,8 +314,10 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `SCREENSHOT gameview` - GameView tab incl. OnGUI, runtime UI Toolkit, and chrome (use this to see what the player sees)
 - `SCREENSHOT <GameObjectName>` - Render scene GameObject (3-view atlas for 3D)
 - `SCREENSHOT Assets/Foo.prefab` - Render prefab asset (auto-sized, capped at 1280px)
-- `SCREENSHOT Assets/UI/Foo.uxml` - Render UXML at 800x450 (force-reimports the UXML + its .uss/.tss deps first)
-- `SCREENSHOT Assets/UI/Foo.uxml --el #card-grid` - Render only a sub-element (--el: `#name`, `.class`, or bare name)
+- `SCREENSHOT Assets/UI/Foo.uxml` - **Renders TWO views by default**: as-authored, and a second with every hidden element unhidden (`display:none`/`visibility:hidden`/`opacity:0`) + a **list of what it unhid** (with the reason). Both PNG paths returned. (force-reimports the UXML + its .uss/.tss deps first)
+- `SCREENSHOT Assets/UI/Foo.uxml --el #card-grid` - Single view: render only a sub-element (--el: `#name`, `.class`, or bare name)
+- `SCREENSHOT Assets/UI/Foo.uxml --reveal` - Single view: unhide every hidden element + list them (alias: `--unhide`; the bare command already gives this as its 2nd image)
+- `SCREENSHOT Assets/UI/Foo.uxml --show #panel,.tab / --hide #overlay` - Force-show/force-hide specific elements (comma-separated `#name`/`.class`/bare). Combine with `--reveal` to reveal-all-then-hide-a-few on a second run
 - `SCREENSHOT path1.prefab path2.prefab` - Grid render (multi-asset)
 
 ### Cross-window conflict warnings (CLI-side, automatic, no Unity needed)

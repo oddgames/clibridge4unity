@@ -33,11 +33,13 @@ clibridge4unity SCREENSHOT Player
 # 5. Prefab asset — UI auto-sizes from RectTransform/Canvas; 3D gets an 8-angle turntable
 clibridge4unity SCREENSHOT Assets/Prefabs/Player.prefab
 
-# 6. UXML asset — rendered at UXML root's declared pixel size (falls back to 1920x1080) via offscreen EditorWindow. .uss/.tss deps force-reimported first.
-clibridge4unity SCREENSHOT Assets/UI/Card.uxml
-clibridge4unity SCREENSHOT Assets/UI/Card.uxml --el "#card-grid"   # sub-element only
+# 6. UXML asset — TWO views by default (as-authored + all-revealed + list). Offscreen EditorWindow, root's declared size (fallback 1920x1080). .uss/.tss deps force-reimported first.
+clibridge4unity SCREENSHOT Assets/UI/Card.uxml                     # → 2 PNGs: as-authored + all-revealed (+ unhidden list)
+clibridge4unity SCREENSHOT Assets/UI/Card.uxml --el "#card-grid"   # single view: sub-element only
 clibridge4unity SCREENSHOT Assets/UI/Card.uxml --el ".active-row"  # by class
 clibridge4unity SCREENSHOT Assets/UI/Card.uxml --el card-grid      # bare name (tries name then class)
+clibridge4unity SCREENSHOT Assets/UI/Card.uxml --reveal            # single view: unhide ALL hidden elements + list them
+clibridge4unity SCREENSHOT Assets/UI/Card.uxml --show "#panel,.tab" # single view: force-show; --hide "#overlay" to hide
 
 # 7. Multi-asset grid (one image, labeled cells)
 clibridge4unity SCREENSHOT Assets/A.prefab Assets/B.prefab Assets/C.prefab
@@ -59,6 +61,13 @@ clibridge4unity SCREENSHOT gameview --output ./docs/screenshot.png
 | Several assets side-by-side | `SCREENSHOT a.prefab b.prefab c.prefab` |
 
 The result line includes `output: <path>`; Read it back to view the PNG. Editor-window modes are pipe-free, so use them as your fallback when other commands time out mid-compile.
+
+## Seeing hidden UXML elements (default 2-view, then `--show`/`--hide`)
+A UXML often has panels gated behind `display:none`, `visibility:hidden`, or `opacity:0` (a `.hidden` class, a runtime-shown dialog) that render blank in the authored state. So a **bare** `SCREENSHOT Foo.uxml` gives you **two images**: the as-authored view, and a second with everything unhidden — plus a **list of each element it unhid** with the reason, e.g. `#settings-panel (VisualElement) [display:none]`. That list is your selector vocabulary.
+- Dial in the exact state on a second run: `--show "#a,.b"` force-shows elements (and their ancestors); `--hide "#c"` force-hides them. Selectors are comma-separated `#name` / `.class` / bare name; `--show`/`--hide` apply to *all* matches of a class. Combine: `--reveal --hide "#debug-overlay"` = everything except the overlay.
+- `--reveal` alone gives just the revealed view (single image); `--el` gives just that element (single image). Any explicit flag opts out of the 2-view default.
+
+Overrides are inline styles on a throwaway render tree — the on-disk UXML is never modified.
 
 ## Verify UI at multiple device resolutions (phone + tablet)
 Never sign off UI on one resolution — a layout fine on tablet can clip or strand controls out of thumb reach on a tall phone. Render ≥1 phone + ≥1 tablet aspect and **present both screenshots back to the user**. `gameview` overwrites its temp PNG each call, so each pass needs its own `--output`:

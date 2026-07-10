@@ -176,15 +176,24 @@ namespace clibridge4unity
                 data = data?.Trim() ?? "";
 
                 // ── Extract --el <selector> flag (UXML sub-element capture) ──
-                string elSelector = null;
-                int elIdx = data.IndexOf("--el ", StringComparison.OrdinalIgnoreCase);
-                if (elIdx >= 0)
+                string elSelector = ExtractFlagValue(ref data, "--el");
+
+                // ── Extract UXML visibility overrides (all ignored for non-UXML targets) ──
+                //   --reveal / --unhide : unhide every hidden element and report them
+                //   --show <sel[,sel]>  : force-show specific elements (+ ancestors)
+                //   --hide <sel[,sel]>  : force-hide specific elements
+                bool revealAll = false;
+                foreach (var flag in new[] { "--reveal", "--unhide" })
                 {
-                    string after = data.Substring(elIdx + "--el ".Length).TrimStart();
-                    int spaceIdx = after.IndexOf(' ');
-                    elSelector = (spaceIdx > 0 ? after.Substring(0, spaceIdx) : after).Trim();
-                    data = (data.Substring(0, elIdx) + (spaceIdx > 0 ? after.Substring(spaceIdx) : "")).Trim();
+                    int idx = data.IndexOf(flag, StringComparison.OrdinalIgnoreCase);
+                    if (idx >= 0)
+                    {
+                        revealAll = true;
+                        data = (data.Substring(0, idx) + " " + data.Substring(idx + flag.Length)).Trim();
+                    }
                 }
+                string showList = ExtractFlagValue(ref data, "--show");
+                string hideList = ExtractFlagValue(ref data, "--hide");
 
                 // ── JSON input ──
                 if (data.StartsWith('{') || data.StartsWith('['))
@@ -208,7 +217,9 @@ namespace clibridge4unity
                                ?? json["gameObject"]?.ToString();
                     if (path == null)
                         return Response.Error("Missing prefab or gameObject");
-                    return await RenderSingleAsync(path, width, height, elSelector ?? json["el"]?.ToString());
+                    return await RenderSingleAsync(path, width, height, elSelector ?? json["el"]?.ToString(),
+                        revealAll || (json["reveal"]?.Value<bool>() ?? false),
+                        showList ?? json["show"]?.ToString(), hideList ?? json["hide"]?.ToString());
                 }
 
                 // ── Plain text: check for multiple paths ──
@@ -218,7 +229,7 @@ namespace clibridge4unity
 
                 // ── Single path ── (0,0 = auto-size from content bounds)
                 if (paths.Count == 1)
-                    return await RenderSingleAsync(paths[0], 0, 0, elSelector);
+                    return await RenderSingleAsync(paths[0], 0, 0, elSelector, revealAll, showList, hideList);
 
                 return Response.Error("Usage: RENDER <path> [path2 path3 ...]");
             }
@@ -230,7 +241,8 @@ namespace clibridge4unity
 
         // ───────────────────── Single item render ─────────────────────
 
-        static async Task<string> RenderSingleAsync(string path, int width, int height, string elSelector = null)
+        static async Task<string> RenderSingleAsync(string path, int width, int height, string elSelector = null,
+            bool revealAll = false, string showList = null, string hideList = null)
         {
             if (path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
             {
@@ -242,7 +254,7 @@ namespace clibridge4unity
             {
                 // Pass 0,0 to let RenderUxmlAsync infer viewport from UXML root's declared
                 // pixel size, falling back to 1920x1080.
-                return await RenderUxmlAsync(path, width, height, elSelector);
+                return await RenderUxmlAsync(path, width, height, elSelector, revealAll, showList, hideList);
             }
 
             // Auto-detect asset type
@@ -264,7 +276,8 @@ namespace clibridge4unity
         /// GrabPixels captures the window's internal backing buffer directly —
         /// no screen capture, no TOPMOST, works even if the window is behind other apps.
         /// </summary>
-        static async Task<string> RenderUxmlAsync(string uxmlPath, int width, int height, string elSelector = null)
+        static async Task<string> RenderUxmlAsync(string uxmlPath, int width, int height, string elSelector = null,
+            bool revealAll = false, string showList = null, string hideList = null)
         {
             using var _profile = _markerRenderUxml.Auto();
             // Force-reimport the UXML and its USS/TSS dependencies so on-disk edits show up
@@ -428,6 +441,43 @@ namespace clibridge4unity
 
                 await Pump(6);
 
+                // Default (no --el / --reveal / --show / --hide): produce TWO images — the UXML as
+                // authored, then a second pass with EVERY hidden element unhidden (conditionally-shown
+                // panels become visible) plus the list of what was unhidden. Explicit flags → one image.
+                bool twoImageDefault = string.IsNullOrEmpty(elSelector)
+                    && !revealAll && string.IsNullOrEmpty(showList) && string.IsNullOrEmpty(hideList);
+                if (twoImageDefault)
+                {
+                    var asis = await CommandRegistry.RunOnMainThreadAsync(() =>
+                        GrabUxmlView(window, instantiatedRoot, null, 0, uxmlPath, "asis"));
+                    if (asis.Error != null) return Response.Error(asis.Error);
+
+                    string report = await CommandRegistry.RunOnMainThreadAsync(() =>
+                        ApplyVisibilityOverrides(instantiatedRoot, true, null, null));
+                    await Pump(4); // re-settle the newly revealed content
+
+                    var revealed = await CommandRegistry.RunOnMainThreadAsync(() =>
+                        GrabUxmlView(window, instantiatedRoot, null, 0, uxmlPath, "revealed"));
+                    if (revealed.Error != null) return Response.Error(revealed.Error);
+
+                    return Response.Success(
+                        $"UXML rendered (2 views — as-authored + all-revealed)\n" +
+                        $"as-authored ({asis.W}x{asis.H}): {asis.Path}\n" +
+                        $"revealed ({revealed.W}x{revealed.H}): {revealed.Path}{report}");
+                }
+
+                // ── Explicit visibility overrides (--reveal / --show / --hide) → single image ──
+                // Runs AFTER the first settle so resolvedStyle is valid (USS-class hides like
+                // `.hidden { display:none }` only show up post-layout). Inline overrides beat USS +
+                // UXML style=; throwaway window, so the on-disk UXML is never touched.
+                string revealReport = "";
+                if (revealAll || !string.IsNullOrEmpty(showList) || !string.IsNullOrEmpty(hideList))
+                {
+                    revealReport = await CommandRegistry.RunOnMainThreadAsync(() =>
+                        ApplyVisibilityOverrides(instantiatedRoot, revealAll, showList, hideList));
+                    await Pump(4); // re-settle newly shown/hidden content
+                }
+
                 // If targeting a sub-element and it laid out small, supersample by scaling the
                 // root visual tree. Renders the same layout into more pixels so the cropped
                 // output stays sharp instead of being a tiny blurry thumbnail.
@@ -458,92 +508,12 @@ namespace clibridge4unity
                     }
                 }
 
-                // Use GrabPixels via reflection to capture the internal backing buffer
-                return await CommandRegistry.RunOnMainThreadAsync(() =>
-                {
-                    // Force repaint so content is current
-                    var parentField = typeof(EditorWindow).GetField("m_Parent",
-                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    var parent = parentField?.GetValue(window);
-                    if (parent == null)
-                        return Response.Error("EditorWindow has no parent view");
-
-                    // Final RepaintImmediately so backing buffer matches settled layout
-                    var repaintImm = parent.GetType().GetMethod("RepaintImmediately",
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    repaintImm?.Invoke(parent, null);
-
-                    // GrabPixels(RenderTexture, Rect) captures the view's backing buffer
-                    var grabMethod = parent.GetType().GetMethod("GrabPixels",
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-                    var rect = window.position;
-                    float dpi = EditorGUIUtility.pixelsPerPoint;
-                    int w = Mathf.RoundToInt(rect.width * dpi);
-                    int h = Mathf.RoundToInt(rect.height * dpi);
-
-                    var rt = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
-                    rt.Create();
-                    try
-                    {
-                        grabMethod?.Invoke(parent, new object[] { rt, new Rect(0, 0, w, h) });
-
-                        // If a sub-element selector was given, find it and crop to its bounds.
-                        // worldBound is in window-relative pixels (pre-DPI), so scale to texture coords.
-                        int cropX = 0, cropY = 0, cropW = w, cropH = h;
-                        string cropNote = "";
-                        if (!string.IsNullOrEmpty(elSelector) && instantiatedRoot != null)
-                        {
-                            var el = ResolveSelector(instantiatedRoot, elSelector);
-                            if (el == null)
-                                return Response.Error($"Element not found: {elSelector}");
-                            var wb = el.worldBound;
-                            if (float.IsNaN(wb.width) || wb.width <= 0 || wb.height <= 0)
-                                return Response.Error(
-                                    $"Element '{elSelector}' still has zero size after force-unhiding {unhiddenCount} ancestor(s). Likely cause: width/height is 0, parent uses position:absolute with offscreen coords, or layout depends on runtime data not present in the raw UXML.");
-                            cropX = Mathf.Clamp(Mathf.FloorToInt(wb.xMin * dpi), 0, w - 1);
-                            cropY = Mathf.Clamp(Mathf.FloorToInt(wb.yMin * dpi), 0, h - 1);
-                            cropW = Mathf.Clamp(Mathf.CeilToInt(wb.width * dpi), 1, w - cropX);
-                            cropH = Mathf.Clamp(Mathf.CeilToInt(wb.height * dpi), 1, h - cropY);
-                            cropNote = $" → element '{elSelector}' ({cropW}x{cropH})";
-                            if (unhiddenCount > 0) cropNote += $", force-unhid {unhiddenCount} ancestor(s)";
-                        }
-
-                        // Read pixels and fix orientation (GrabPixels returns vertically flipped)
-                        var prev = RenderTexture.active;
-                        RenderTexture.active = rt;
-                        var tex = new Texture2D(cropW, cropH, TextureFormat.RGBA32, false);
-                        // For cropped reads, RT is top-down so flip Y when sourcing from RT
-                        int rtSrcY = h - cropY - cropH;
-                        tex.ReadPixels(new Rect(cropX, rtSrcY, cropW, cropH), 0, 0);
-                        tex.Apply();
-                        RenderTexture.active = prev;
-
-                        // Flip vertically (GrabPixels is top-down, Texture2D is bottom-up)
-                        var pixels = tex.GetPixels32();
-                        var flipped = new Color32[pixels.Length];
-                        for (int y = 0; y < cropH; y++)
-                        {
-                            System.Array.Copy(pixels, y * cropW, flipped, (cropH - 1 - y) * cropW, cropW);
-                        }
-                        tex.SetPixels32(flipped);
-                        tex.Apply();
-
-                        string baseName = Path.GetFileNameWithoutExtension(uxmlPath);
-                        if (!string.IsNullOrEmpty(elSelector))
-                            baseName += "_" + SanitizeForFilename(elSelector);
-                        string outputPath = TimestampedPath(baseName);
-                        File.WriteAllBytes(outputPath, tex.EncodeToPNG());
-                        UnityEngine.Object.DestroyImmediate(tex);
-
-                        return Response.Success($"UXML rendered ({cropW}x{cropH}){cropNote}\noutput: {outputPath}");
-                    }
-                    finally
-                    {
-                        rt.Release();
-                        UnityEngine.Object.DestroyImmediate(rt);
-                    }
-                });
+                // Capture the settled view (crops to --el if given).
+                var single = await CommandRegistry.RunOnMainThreadAsync(() =>
+                    GrabUxmlView(window, instantiatedRoot, elSelector, unhiddenCount,
+                        uxmlPath, string.IsNullOrEmpty(elSelector) ? null : SanitizeForFilename(elSelector)));
+                if (single.Error != null) return Response.Error(single.Error);
+                return Response.Success($"UXML rendered ({single.W}x{single.H}){single.Note}\noutput: {single.Path}{revealReport}");
             }
             finally
             {
@@ -572,6 +542,203 @@ namespace clibridge4unity
                 return root.Q<VisualElement>(className: selector.Substring(1));
             return root.Q<VisualElement>(name: selector)
                 ?? root.Q<VisualElement>(className: selector);
+        }
+
+        // Result of a single UXML window capture: the PNG path + its dimensions + a note, or an Error.
+        class UxmlGrab { public string Path; public int W; public int H; public string Note = ""; public string Error; }
+
+        /// <summary>
+        /// Captures the offscreen window's current backing buffer to a PNG via GrabPixels. Crops to
+        /// `elSelector` when given. MUST run on the main thread. `fileSuffix` disambiguates output
+        /// filenames (e.g. "asis"/"revealed" for the two-view default). Returns the path + size, or Error.
+        /// </summary>
+        static UxmlGrab GrabUxmlView(EditorWindow window, VisualElement instantiatedRoot,
+            string elSelector, int unhiddenCount, string uxmlPath, string fileSuffix)
+        {
+            var parentField = typeof(EditorWindow).GetField("m_Parent",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var parent = parentField?.GetValue(window);
+            if (parent == null) return new UxmlGrab { Error = "EditorWindow has no parent view" };
+
+            // Final RepaintImmediately so backing buffer matches settled layout
+            var repaintImm = parent.GetType().GetMethod("RepaintImmediately",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            repaintImm?.Invoke(parent, null);
+
+            var grabMethod = parent.GetType().GetMethod("GrabPixels",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+            var rect = window.position;
+            float dpi = EditorGUIUtility.pixelsPerPoint;
+            int w = Mathf.RoundToInt(rect.width * dpi);
+            int h = Mathf.RoundToInt(rect.height * dpi);
+
+            var rt = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
+            rt.Create();
+            try
+            {
+                grabMethod?.Invoke(parent, new object[] { rt, new Rect(0, 0, w, h) });
+
+                // Crop to a sub-element's bounds if a selector was given.
+                // worldBound is window-relative pixels (pre-DPI), so scale to texture coords.
+                int cropX = 0, cropY = 0, cropW = w, cropH = h;
+                string cropNote = "";
+                if (!string.IsNullOrEmpty(elSelector) && instantiatedRoot != null)
+                {
+                    var el = ResolveSelector(instantiatedRoot, elSelector);
+                    if (el == null) return new UxmlGrab { Error = $"Element not found: {elSelector}" };
+                    var wb = el.worldBound;
+                    if (float.IsNaN(wb.width) || wb.width <= 0 || wb.height <= 0)
+                        return new UxmlGrab { Error = $"Element '{elSelector}' still has zero size after force-unhiding {unhiddenCount} ancestor(s). Likely cause: width/height is 0, parent uses position:absolute with offscreen coords, or layout depends on runtime data not present in the raw UXML." };
+                    cropX = Mathf.Clamp(Mathf.FloorToInt(wb.xMin * dpi), 0, w - 1);
+                    cropY = Mathf.Clamp(Mathf.FloorToInt(wb.yMin * dpi), 0, h - 1);
+                    cropW = Mathf.Clamp(Mathf.CeilToInt(wb.width * dpi), 1, w - cropX);
+                    cropH = Mathf.Clamp(Mathf.CeilToInt(wb.height * dpi), 1, h - cropY);
+                    cropNote = $" → element '{elSelector}' ({cropW}x{cropH})";
+                    if (unhiddenCount > 0) cropNote += $", force-unhid {unhiddenCount} ancestor(s)";
+                }
+
+                // Read pixels and fix orientation (GrabPixels returns vertically flipped)
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                var tex = new Texture2D(cropW, cropH, TextureFormat.RGBA32, false);
+                int rtSrcY = h - cropY - cropH; // RT is top-down; flip Y when sourcing
+                tex.ReadPixels(new Rect(cropX, rtSrcY, cropW, cropH), 0, 0);
+                tex.Apply();
+                RenderTexture.active = prev;
+
+                var pixels = tex.GetPixels32();
+                var flipped = new Color32[pixels.Length];
+                for (int y = 0; y < cropH; y++)
+                    System.Array.Copy(pixels, y * cropW, flipped, (cropH - 1 - y) * cropW, cropW);
+                tex.SetPixels32(flipped);
+                tex.Apply();
+
+                string baseName = Path.GetFileNameWithoutExtension(uxmlPath);
+                if (!string.IsNullOrEmpty(fileSuffix)) baseName += "_" + fileSuffix;
+                string outputPath = TimestampedPath(baseName);
+                File.WriteAllBytes(outputPath, tex.EncodeToPNG());
+                UnityEngine.Object.DestroyImmediate(tex);
+
+                return new UxmlGrab { Path = outputPath, W = cropW, H = cropH, Note = cropNote };
+            }
+            finally
+            {
+                rt.Release();
+                UnityEngine.Object.DestroyImmediate(rt);
+            }
+        }
+
+        /// <summary>All elements matching a selector (#name, .class, or bare name→class). Empty if none.</summary>
+        static List<VisualElement> ResolveAllSelector(VisualElement root, string selector)
+        {
+            if (root == null || string.IsNullOrEmpty(selector)) return new List<VisualElement>();
+            selector = selector.Trim();
+            if (selector.StartsWith("#")) return root.Query<VisualElement>(name: selector.Substring(1)).ToList();
+            if (selector.StartsWith(".")) return root.Query<VisualElement>(className: selector.Substring(1)).ToList();
+            var byName = root.Query<VisualElement>(name: selector).ToList();
+            return byName.Count > 0 ? byName : root.Query<VisualElement>(className: selector).ToList();
+        }
+
+        /// <summary>Readable id for an element: `#name`, else `.firstClass`, else its type — with type in parens.</summary>
+        static string DescribeElement(VisualElement ve)
+        {
+            string type = ve.GetType().Name;
+            string id = !string.IsNullOrEmpty(ve.name) ? "#" + ve.name : null;
+            if (id == null)
+            {
+                var cls = ve.GetClasses().FirstOrDefault();
+                if (cls != null) id = "." + cls;
+            }
+            return id == null ? type : $"{id} ({type})";
+        }
+
+        /// <summary>
+        /// Applies --reveal (unhide every hidden element), --show, and --hide to the instantiated tree
+        /// via inline styles (which override USS + UXML style=). Returns a report to append to the
+        /// render result: the elements it unhid (with the reason each was hidden) plus what was
+        /// force-shown/hidden, so the caller can iterate with precise --show/--hide selectors.
+        /// </summary>
+        static string ApplyVisibilityOverrides(VisualElement root, bool revealAll, string showList, string hideList)
+        {
+            if (root == null) return "";
+            var sb = new StringBuilder();
+
+            if (revealAll)
+            {
+                var revealed = new List<string>();
+                foreach (var ve in root.Query<VisualElement>().ToList())
+                {
+                    if (ve == root) continue;
+                    var reasons = new List<string>();
+                    if (ve.resolvedStyle.display == DisplayStyle.None) reasons.Add("display:none");
+                    if (ve.resolvedStyle.visibility == Visibility.Hidden) reasons.Add("visibility:hidden");
+                    if (ve.resolvedStyle.opacity < 0.01f) reasons.Add("opacity:0");
+                    if (reasons.Count == 0) continue;
+                    ve.style.display = DisplayStyle.Flex;
+                    ve.style.visibility = Visibility.Visible;
+                    if (ve.resolvedStyle.opacity < 0.01f) ve.style.opacity = 1f;
+                    revealed.Add($"  {DescribeElement(ve)} [{string.Join(", ", reasons)}]");
+                }
+                root.MarkDirtyRepaint();
+                if (revealed.Count > 0)
+                {
+                    sb.AppendLine($"\nrevealed {revealed.Count} hidden element(s) — re-run with --hide <sel> to keep any hidden:");
+                    const int cap = 50;
+                    foreach (var line in revealed.Take(cap)) sb.AppendLine(line);
+                    if (revealed.Count > cap) sb.AppendLine($"  … and {revealed.Count - cap} more");
+                }
+                else sb.AppendLine("\nrevealed 0 hidden elements (nothing was hidden).");
+            }
+
+            if (!string.IsNullOrEmpty(showList))
+            {
+                var shown = new List<string>();
+                foreach (var sel in showList.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0))
+                {
+                    var targets = ResolveAllSelector(root, sel);
+                    foreach (var t in targets)
+                        for (var v = t; v != null && v != root.parent; v = v.parent)
+                        {
+                            v.style.display = DisplayStyle.Flex;
+                            v.style.visibility = Visibility.Visible;
+                            v.style.opacity = 1f;
+                        }
+                    shown.Add($"{sel} ({targets.Count})");
+                }
+                root.MarkDirtyRepaint();
+                sb.AppendLine($"\nforce-shown: {string.Join(", ", shown)}");
+            }
+
+            if (!string.IsNullOrEmpty(hideList))
+            {
+                var hid = new List<string>();
+                foreach (var sel in hideList.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0))
+                {
+                    var targets = ResolveAllSelector(root, sel);
+                    foreach (var t in targets) t.style.display = DisplayStyle.None;
+                    hid.Add($"{sel} ({targets.Count})");
+                }
+                root.MarkDirtyRepaint();
+                sb.AppendLine($"\nforce-hidden: {string.Join(", ", hid)}");
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>
+        /// Extracts a `--flag value` pair from a space-joined arg string, removing it from `data`.
+        /// Returns the value (next whitespace-delimited token) or null if the flag is absent.
+        /// </summary>
+        static string ExtractFlagValue(ref string data, string flag)
+        {
+            int idx = data.IndexOf(flag + " ", StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return null;
+            string after = data.Substring(idx + flag.Length + 1).TrimStart();
+            int sp = after.IndexOf(' ');
+            string val = (sp > 0 ? after.Substring(0, sp) : after).Trim();
+            data = (data.Substring(0, idx) + " " + (sp > 0 ? after.Substring(sp) : "")).Trim();
+            return val;
         }
 
         static string SanitizeForFilename(string s)

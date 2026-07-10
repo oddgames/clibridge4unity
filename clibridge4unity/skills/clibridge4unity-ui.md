@@ -24,12 +24,15 @@ Filters Unity's console for UI Toolkit import errors only. Any command that refe
 ## Render a UXML
 
 ```bash
-clibridge4unity SCREENSHOT Assets/UI/Card.uxml
-clibridge4unity SCREENSHOT Assets/UI/Card.uxml --el "#card-grid"   # sub-element by id
-clibridge4unity SCREENSHOT Assets/UI/Card.uxml --el ".active-row"  # by class
+clibridge4unity SCREENSHOT Assets/UI/Card.uxml                    # TWO views: as-authored + all-revealed (+ unhidden list)
+clibridge4unity SCREENSHOT Assets/UI/Card.uxml --el "#card-grid"  # single: sub-element by id
+clibridge4unity SCREENSHOT Assets/UI/Card.uxml --reveal           # single: unhide all hidden elements + list them
+clibridge4unity SCREENSHOT Assets/UI/Card.uxml --show "#dialog"   # single: force-show; --hide "#x" to force-hide
 ```
 
 The UXML and its referenced `.uss`/`.tss` deps are force-reimported first, so on-disk edits show up immediately. Render size is inferred from the UXML root element's declared pixel width/height, falling back to 1920x1080 when the root has no explicit size.
+
+**Hidden panels render blank** — so a bare render gives two images: as-authored, and everything unhidden with a list of what it unhid (each element's selector + why it was hidden). Use that list to re-run with `--show`/`--hide` and target exactly the state you want. See `clibridge4unity-screenshot`.
 
 ## Runtime
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.65 — 2026-07-10
+
+## v1.1.65
+
+### New
+- **`SCREENSHOT <uxml>` now renders TWO views by default** — the UXML as authored, plus a second pass with **every hidden element unhidden** (`display:none` / `visibility:hidden` / `opacity:0`), so conditionally-shown panels (a `.hidden` class, a runtime dialog) are actually visible instead of rendering blank. The result text lists both PNG paths and **every element it unhid**, each with its selector and the reason it was hidden (e.g. `#settings-panel (VisualElement) [display:none]`) — giving you the selector vocabulary for the next step.
+- **`--reveal` / `--unhide`** — single-view variant: unhide all hidden elements + list them (the revealed view on its own).
+- **`--show "#a,.b"` / `--hide "#c"`** — force-show or force-hide specific elements on a UXML render (comma-separated `#name` / `.class` / bare name; `--show` also force-shows ancestors; class selectors hit all matches). Combine, e.g. `--reveal --hide "#debug-overlay"` = reveal everything except the overlay. Overrides are inline styles on a throwaway render tree — the on-disk UXML is never modified.
+- Any explicit visibility flag (`--el` / `--reveal` / `--show` / `--hide`) opts out of the 2-view default and renders a single image, so existing `--el` usage is unchanged.
+
+### Internal
+- Extracted the UXML GrabPixels capture into a reusable `GrabUxmlView` helper (removes duplication) so the two-view default can grab as-authored and revealed states from the same offscreen window without re-instantiating. `--el` extraction refactored onto a shared `ExtractFlagValue` parser. The CLI forwards the flag string to the server verbatim, so no CLI routing change was needed.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.64 — 2026-07-09
 
 ## v1.1.64

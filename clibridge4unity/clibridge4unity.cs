@@ -5504,8 +5504,10 @@ class Program
         md.AppendLine("- `SCREENSHOT gameview` — captures the GameView tab (via `GrabPixels`), so OnGUI, runtime `UIDocument`, and the GameView chrome all show up. Use this to see what the player actually sees.");
         md.AppendLine("- `SCREENSHOT Player` — find a scene GameObject by name, render it. 3D objects → 3-view atlas (front|right|top). UI under a Canvas → render that Canvas.");
         md.AppendLine("- `SCREENSHOT Assets/Foo.prefab` — render a prefab asset. UI prefabs auto-size from RectTransform/Canvas; 3D prefabs render an 8-angle turntable.");
-        md.AppendLine("- `SCREENSHOT Assets/UI/Foo.uxml` — render a UXML file at 800x450 via an offscreen EditorWindow. UXML and its `.uss`/`.tss` deps are force-reimported first, so on-disk edits show up immediately.");
-        md.AppendLine("- `SCREENSHOT Assets/UI/Foo.uxml --el #card-grid` — render only a sub-element. `--el` accepts `#name`, `.class`, or a bare name (tries name then class).");
+        md.AppendLine("- `SCREENSHOT Assets/UI/Foo.uxml` — renders **two** views by default: the UXML as authored, and a second with EVERY hidden element unhidden (`display:none`/`visibility:hidden`/`opacity:0`) plus a list of each element it unhid (with the reason). Both PNG paths are in the result. Offscreen EditorWindow; `.uss`/`.tss` deps force-reimported first so on-disk edits show immediately.");
+        md.AppendLine("- `SCREENSHOT Assets/UI/Foo.uxml --el #card-grid` — single view: render only a sub-element. `--el` accepts `#name`, `.class`, or a bare name (tries name then class).");
+        md.AppendLine("- `SCREENSHOT Assets/UI/Foo.uxml --reveal` — single view: unhide EVERY hidden element and list each (alias `--unhide`). (The bare command already gives you this as its second image; use `--reveal` when you want the revealed view alone.)");
+        md.AppendLine("- `SCREENSHOT Assets/UI/Foo.uxml --show #panel,.tab` / `--hide #overlay` — force-show or force-hide specific elements (comma-separated `#name`/`.class`/bare). Combine with `--reveal` (reveal all, then hide a few) to dial in exactly the state you want on a second run.");
         md.AppendLine("- `SCREENSHOT a.prefab b.prefab c.prefab` — multi-asset grid render (one image, labeled cells).");
         md.AppendLine("- `SCREENSHOT --output path/file.png ...` — also copy the result to a chosen path.");
         md.AppendLine();
