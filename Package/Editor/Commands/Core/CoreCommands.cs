@@ -626,6 +626,10 @@ namespace clibridge4unity
                     if (!p.StartsWith("Assets/", System.StringComparison.OrdinalIgnoreCase) &&
                         !p.StartsWith("Packages/", System.StringComparison.OrdinalIgnoreCase))
                         continue;
+                    // Native directory-bundle plugins (.xcframework/.androidlib/…) trip Unity's
+                    // PreviewImporter assert on force-reimport and don't need it for compilation —
+                    // Unity's own refresh picks up rebuilt plugins. Skip (see AssetSyncHelper).
+                    if (AssetSyncHelper.IsBundlePluginAsset(p)) continue;
                     try
                     {
                         AssetDatabase.ImportAsset(p, ImportAssetOptions.ForceUpdate);

@@ -93,6 +93,7 @@ namespace clibridge4unity
                 }
                 else
                 {
+                    if (IsBundlePluginAsset(rel)) continue; // PreviewImporter asserts on bundle dirs — see ApplyEntry
                     try { AssetDatabase.ImportAsset(rel, ImportAssetOptions.ForceUpdate); imported++; } catch { }
                 }
             }
@@ -135,12 +136,39 @@ namespace clibridge4unity
             {
                 try { return AssetDatabase.DeleteAsset(rel); } catch { return false; }
             }
+            // Native directory-bundle plugins (.xcframework/.androidlib/…) must not be
+            // force-reimported — Unity's PreviewImporter asserts on them and clibridge
+            // never needs them synced for a command. Skip; Unity's own refresh picks up
+            // rebuilt plugins. See IsBundlePluginAsset.
+            if (IsBundlePluginAsset(rel)) return false;
             try
             {
                 AssetDatabase.ImportAsset(rel, ImportAssetOptions.ForceUpdate);
                 return true;
             }
             catch { return false; }
+        }
+
+        // Directory-bundle plugin assets Unity treats as a single asset but whose folder
+        // extension its PreviewImporter doesn't skip — calling AssetDatabase.ImportAsset on
+        // the bundle dir (or a file inside it) logs "Error encountered importing asset … it
+        // may be necessary to add a new extension to the list of skippedPaths in
+        // PreviewImporter.cpp". The plugin still imports/links fine; the log is pure noise,
+        // and clibridge only force-reimports for SCREENSHOT/INSPECTOR (UXML/USS/prefabs/
+        // scripts), never these. Skip both the bundle dir itself and any path inside it.
+        private static readonly string[] BundlePluginExtensions =
+            { ".xcframework", ".androidlib", ".framework", ".bundle", ".plugin", ".app" };
+
+        public static bool IsBundlePluginAsset(string relPath)
+        {
+            if (string.IsNullOrEmpty(relPath)) return false;
+            string p = relPath.Replace('\\', '/');
+            foreach (var ext in BundlePluginExtensions)
+            {
+                if (p.EndsWith(ext, StringComparison.OrdinalIgnoreCase)) return true;      // the bundle dir
+                if (p.IndexOf(ext + "/", StringComparison.OrdinalIgnoreCase) >= 0) return true; // a file inside it
+            }
+            return false;
         }
 
         private static string ToAssetRelative(string fullOrRel)
