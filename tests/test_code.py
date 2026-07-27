@@ -17,17 +17,19 @@ class TestCodeSearch:
     def test_attribute_query(self, bridge):
         bridge.ok("CODE_SEARCH", "attribute:Serializable")
 
-    def test_empty_query_returns_results(self, bridge):
-        # Empty query does a broad text search, returns results
-        bridge.ok("CODE_SEARCH", "")
+    def test_empty_query_errors(self, bridge):
+        # Empty query is rejected with usage text
+        bridge.err("CODE_SEARCH", "")
 
 
 class TestCodeAnalyze:
+    # NOTE: the ANALYZE daemon indexes the project tree only — classes in the
+    # external file:../../Package reference (BridgeServer etc.) are not visible.
     def test_class_name(self, bridge):
-        bridge.ok("CODE_ANALYZE", "BridgeServer")
+        bridge.ok("CODE_ANALYZE", "ButtonManager")
 
     def test_member(self, bridge):
-        bridge.ok("CODE_ANALYZE", "CommandRegistry.Initialize")
+        bridge.ok("CODE_ANALYZE", "ButtonManager.onClick")
 
     def test_nonexistent_returns_error(self, bridge):
         bridge.err("CODE_ANALYZE", "ZzzNonExistentClass12345")
@@ -56,4 +58,4 @@ class TestCodeExecReturn:
 
 class TestTestRunner:
     def test_list(self, bridge):
-        bridge.ok("TEST")
+        bridge.ok("TEST", "list", timeout=120)

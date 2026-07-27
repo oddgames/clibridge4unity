@@ -52,7 +52,7 @@ Use `clibridge4unity -h` to list every command the connected Unity instance curr
 - `PROBE` — quick main-thread liveness check (~2s).
 - `LOG errors` — current console errors. `LOG errors verbose` for stacks.
 
-**Don't run `COMPILE` or `LINT` reactively after every edit.** Unity auto-recompiles when it gains focus; `STATUS` is the right check. See `clibridge4unity-lint` for when those commands earn their keep.
+**Don't run `COMPILE` or `LINT` after edits.** Unity auto-recompiles when it gains focus, and 99% of the time the user has already compiled before asking you to test — assume compiled. They're troubleshooting tools for when something isn't working as expected; `STATUS` is the right check. See `clibridge4unity-lint`.
 
 ## Output slicing — use LAST, not `| head`
 

@@ -3,7 +3,7 @@ name: clibridge4unity-lint
 description: Diagnose a suspected Unity compile error. Use LINT/COMPILE reactively — only when STATUS shows errors or behavior is unexpected, NEVER as a routine "did my edit compile?" check after every change.
 ---
 
-Standard compile/lint discipline applies; below is only what's specific to this CLI. Default after editing C#: do nothing (Unity auto-recompiles on focus). Escalate only on evidence of a problem.
+Standard compile/lint discipline applies; below is only what's specific to this CLI. Default after editing C#: do nothing — Unity auto-recompiles on focus, and 99% of the time the user has already compiled by the time they ask you to test. Assume compiled; escalate only on evidence of a problem (wrong results, errors in STATUS, CODE_EXEC can't see a new type).
 
 ## Tools, cheapest first
 
@@ -26,6 +26,7 @@ clibridge4unity LINT unity warnings
 ## Don'ts
 - Don't `COMPILE` after every edit (Unity does it on focus; it breaks in-flight bridge work).
 - Don't `LINT` proactively; don't loop `STATUS` until clean.
+- Don't treat STATUS's `scriptsModified`/`compileRecommended` alone as a trigger — that's informational. Act only when output is actually wrong or errors are shown.
 
 ## Reading errors
 ```bash

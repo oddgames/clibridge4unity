@@ -1,5 +1,52 @@
 # Changelog
 
+## v1.1.66 — 2026-07-27
+
+## v1.1.66
+
+### Fixed
+
+- **COMPILE/REFRESH could block for ~30 minutes instead of timing out.** The compile-wait loop
+  measured its timeout with a per-iteration counter (`elapsed += pollInterval`) that assumed one
+  poll cost exactly one second. A poll actually costs ~6s — sleep, plus a wake, plus a STATUS
+  round-trip that the server only answers after its own 5s main-thread hard-timeout — so the loop
+  ran `timeoutSeconds` *iterations*, not seconds. With the server's `timeoutSeconds = 300` for
+  REFRESH that meant ~30 minutes of real time. Worse, the overrun scaled with how slow Unity was
+  answering, so the timeout stretched in proportion to how wedged the Editor was. Now driven by a
+  `Stopwatch` deadline: 300s means 300s. The idle-retrigger heuristic had the same
+  one-poll-equals-one-second assumption and is now wall-clock too.
+
+- **Compile-wait could hang forever even with a correct clock.** The STATUS read inside the poll
+  loop was an unbounded blocking `Stream.Read`. When Unity's main thread is spinning, the bridge's
+  listener threads still accept and read, so connect and write both succeed and only the reply
+  never arrives — parking the loop indefinitely so the deadline was never re-evaluated. The read is
+  now bounded (15s, comfortably above the server's 5s hard-timeout so a slow-but-alive Editor
+  doesn't false-positive) and a timed-out poll retries instead of blocking.
+
+- **Duplicate Roslyn daemons.** `GetRunningPipe() ?? StartBackground()` is a check-then-act with no
+  cross-process lock, so two CLI invocations racing in the same window both saw "not running" and
+  both spawned a daemon — each indexing the whole project independently (~1.7 GB RSS and sustained
+  CPU apiece) while competing for one pipe name. Two named locks now: a spawn lock the CLI holds
+  around check-then-spawn, and an ownership lock the daemon holds for its lifetime so a duplicate
+  that got spawned anyway exits before it indexes. Deliberately distinct names — the spawner holds
+  its lock for up to 15s waiting on `daemon.pipe`, exactly when the child claims ownership.
+
+- **`.clibridge4unity/` state directory written inside the Unity asset tree.** The PreToolUse hook
+  resolved the project root with a weak "does this folder contain an `Assets/`?" walk-up, while
+  `-d` and CWD auto-detection use the strict test (`Assets/` **and**
+  `ProjectSettings/ProjectVersion.txt`). Projects legitimately contain nested folders named
+  `Assets` — e.g. `Assets/Resources/Assets/` — and the walk-up stopped at the first one, so every
+  file edit wrote peer-ledger state into the asset tree. The hook now uses the strict test,
+  matching the other two entry points.
+
+### Internal
+
+- Version files reconciled: `Package/package.json` had drifted to 1.1.66 in an earlier commit while
+  csproj and the rest stayed at 1.1.65. All version-bearing files now agree on 1.1.66.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.65 — 2026-07-10
 
 ## v1.1.65

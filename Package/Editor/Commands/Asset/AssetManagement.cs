@@ -283,8 +283,8 @@ namespace clibridge4unity
             {
                 if (srcAsset == null)
                 {
-                    // Source is in the open scene
-                    srcGo = GameObject.Find(srcChild);
+                    // Source is in the open scene (inactive-aware)
+                    srcGo = PathResolver.FindSceneObject(srcChild);
                     if (srcGo == null)
                         return Response.ErrorSceneNotFound(srcChild);
                 }
@@ -359,7 +359,7 @@ namespace clibridge4unity
                         if (dstScenePath.Contains("/"))
                         {
                             string parentPath = dstScenePath.Substring(0, dstScenePath.LastIndexOf('/'));
-                            var parent = GameObject.Find(parentPath);
+                            var parent = PathResolver.FindSceneObject(parentPath);
                             if (parent != null)
                                 clone.transform.SetParent(parent.transform, false);
                         }

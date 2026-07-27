@@ -49,6 +49,33 @@ namespace clibridge4unity
 
         public enum SuggestKind { SceneGameObject, Asset, Any }
 
+        /// <summary>
+        /// Resolve a scene GameObject by name or hierarchy path, INCLUDING inactive objects —
+        /// GameObject.Find only sees active ones, and wiring-relevant objects (mode runners,
+        /// disabled panels) are often inactive. Active fast path first; on miss, scans all
+        /// loaded-scene transforms: exact full-path match wins, then path-suffix match,
+        /// then bare-name match (single-segment queries only).
+        /// </summary>
+        public static GameObject FindSceneObject(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            var active = GameObject.Find(path);
+            if (active != null) return active;
+
+            string name = LastSegment(path);
+            GameObject suffixHit = null, nameHit = null;
+            var all = UnityEngine.Object.FindObjectsByType<Transform>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            foreach (var t in all)
+            {
+                if (!t.name.Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
+                string full = GetScenePath(t.gameObject);
+                if (full.Equals(path, StringComparison.OrdinalIgnoreCase)) return t.gameObject;
+                if (suffixHit == null && full.EndsWith("/" + path, StringComparison.OrdinalIgnoreCase)) suffixHit = t.gameObject;
+                if (nameHit == null) nameHit = t.gameObject;
+            }
+            return suffixHit ?? (path.IndexOf('/') < 0 ? nameHit : null);
+        }
+
         /// <summary>Top `max` scene GameObject paths whose name is close to the last segment of `query`.</summary>
         public static List<string> SuggestSceneObject(string query, int max = 5)
         {

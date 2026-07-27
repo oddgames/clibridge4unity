@@ -27,7 +27,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.65";
+        public const string Version = "1.1.66";
 
         // Minimum VSCode-extension version compatible with this bridge's interface — the command
         // verbs the extension sends (COMPILE/STATUS/VSCODE) and the STATUS fields it reads.
@@ -928,14 +928,32 @@ namespace clibridge4unity
                 {
                     sb.AppendLine($"{prop.Name}:");
                     foreach (var item in enumerable)
-                        sb.AppendLine($"  - {item}");
+                        sb.AppendLine($"  - {FormatDataValue(item)}");
                 }
                 else
                 {
-                    sb.AppendLine($"{prop.Name}: {value}");
+                    sb.AppendLine($"{prop.Name}: {FormatDataValue(value)}");
                 }
             }
             return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>
+        /// Recursive value formatter for SuccessWithData: nested arrays render their contents
+        /// ("[a, b]") instead of the type name ("System.String[]"), and anonymous objects render
+        /// their properties recursively so arrays inside them stay readable.
+        /// </summary>
+        private static string FormatDataValue(object value)
+        {
+            if (value == null) return "";
+            if (value is string s) return s;
+            if (value is System.Collections.IEnumerable en)
+                return "[" + string.Join(", ", en.Cast<object>().Select(FormatDataValue)) + "]";
+            var t = value.GetType();
+            if (t.Name.Contains("AnonymousType"))
+                return "{ " + string.Join(", ", t.GetProperties()
+                    .Select(p => $"{p.Name} = {FormatDataValue(p.GetValue(value))}")) + " }";
+            return value.ToString();
         }
 
         public static string Error(string message)

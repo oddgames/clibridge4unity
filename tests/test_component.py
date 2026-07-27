@@ -13,6 +13,29 @@ class TestInspector:
         bridge.ok("DELETE", "CompTestObj")
 
 
+class TestInspectorRefsAndComponent:
+    def test_setup(self, bridge):
+        bridge.ok("CREATE", "InspFlagsTest")
+        bridge.ok("COMPONENT_ADD", "InspFlagsTest BoxCollider")
+
+    def test_refs_audit(self, bridge):
+        out = bridge.ok("INSPECTOR", "InspFlagsTest --refs")
+        assert "m_Material = None" in out
+
+    def test_component_filter(self, bridge):
+        out = bridge.ok("INSPECTOR", "InspFlagsTest --component BoxCollider")
+        assert "[BoxCollider]" in out
+        assert "[Transform]" not in out
+
+    def test_typed_ref_rendering(self, bridge):
+        out = bridge.ok("INSPECTOR", "InspFlagsTest --component BoxCollider")
+        # object refs render as None / Type:'name', never bare names
+        assert "m_Material: None" in out
+
+    def test_cleanup(self, bridge):
+        bridge.ok("DELETE", "InspFlagsTest")
+
+
 class TestComponentAdd:
     def test_setup(self, bridge):
         bridge.ok("CREATE", "CompAddTest")

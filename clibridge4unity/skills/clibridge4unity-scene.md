@@ -15,18 +15,27 @@ clibridge4unity INSPECTOR Canvas/Panel             # one GameObject + components
 clibridge4unity INSPECTOR Canvas/Panel --children --brief   # subtree, components only, no field dumps
 clibridge4unity INSPECTOR Canvas/Panel --depth 2
 clibridge4unity INSPECTOR Canvas --filter Button   # filter subtree by name OR component
+clibridge4unity INSPECTOR Canvas/Panel --component Image   # one component's fields only (exact type)
+clibridge4unity INSPECTOR Canvas/Panel --refs      # wiring audit: every object-reference field (nested + array elements), None/Missing flagged
 ```
+
+- Paths resolve **inactive** objects too (disabled panels, mode runners).
+- Refs print as `Type:'name' (assetPath)` — feed the asset path straight into the next `INSPECTOR`. `None` = empty field, `Missing` = broken reference.
+- Arrays/lists print their elements (capped at 10); nested serializable classes recurse. No need for a `SerializedObject` dump via CODE_EXEC.
 
 `INSPECTOR Assets/Prefabs/Foo.prefab` works the same on prefab assets — see `clibridge4unity-prefab`.
 
 ## Finding
 
 ```bash
-clibridge4unity FIND Player                              # scene (default)
+clibridge4unity FIND Player                              # by name — scene (default), includes inactive
+clibridge4unity FIND PlayerController                    # by COMPONENT TYPE — base class matches derived, inactive included
 clibridge4unity FIND scene:Player                        # explicit scene scope
 clibridge4unity FIND prefab:Assets/UI/Menu.prefab/Button # inside a prefab asset
 clibridge4unity FIND prefab:Assets/UI/Menu.prefab/Button,Panel  # comma = OR
 ```
+
+Name and component-type search always run together (`matchedBy` labels each hit; `active` shows disabled objects). Never hand-roll `FindObjectsOfType<T>(true)` in CODE_EXEC — `FIND T` is that query.
 
 ## Create / delete
 
@@ -42,8 +51,10 @@ Component changes after creation: see `clibridge4unity-components`.
 
 ```bash
 clibridge4unity SAVE                          # save current scene
-clibridge4unity LOAD Assets/Scenes/Main.unity # load a scene
+clibridge4unity LOAD Assets/Scenes/Main.unity # load a scene — response confirms the now-active scene path
 ```
+
+`LOAD` replaces `CODE_EXEC 'EditorSceneManager.OpenScene(...)'` — same call, plus settle-wait so load-time errors get captured.
 
 ## Editing objects that only exist in play mode
 
@@ -53,9 +64,8 @@ A runtime-instantiated or additively-loaded object that `FIND` locates during pl
 # 1. FIND returns no sceneMatches in edit mode (error + sceneSuggestions instead):
 clibridge4unity FIND AILiveryGeneratorUI
 
-# 2. Baked into a prefab? Search via CODE_EXEC_RETURN:
-#    foreach AssetDatabase.FindAssets("t:Prefab") → LoadAssetAtPath<GameObject>
-#    → GetComponentInChildren<TheComponent>(true) != null  → print the path
+# 2. Baked into a prefab or another scene? ANALYZE (CLI-side, no pipe) lists attach sites:
+clibridge4unity ANALYZE TheComponent        # "Asset wiring" section → scenes/prefabs it's attached to
 
 # 3. Else it's in an additively-loaded scene — grep scene files for a unique name, then LOAD:
 #    foreach AssetDatabase.FindAssets("t:Scene") → File.ReadAllText(path).Contains("TyresButton")

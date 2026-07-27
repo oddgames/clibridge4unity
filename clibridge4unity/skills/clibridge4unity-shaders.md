@@ -95,14 +95,14 @@ platformSettings:
 
 Same discipline as `clibridge4unity-lint`: **`STATUS` first, escalate only on evidence.** Caveat: **offline `LINT` compiles C#, not HLSL** — it can't catch a typo inside a `.shader`/`.cginc`.
 
-- **C# material wiring (`Set*` / `MaterialPropertyBlock`):** `clibridge4unity LINT`, then confirm the uniform exists in every active include (#6). No COMPILE.
+- **C# material wiring (`Set*` / `MaterialPropertyBlock`):** confirm the uniform exists in every active include (#6) — grep, not compile. No COMPILE; `LINT` only if STATUS suggests the C# is actually broken.
 - **Shader body (`.shader`/`.cginc`):** fast path is **reading and grepping** — every include path (#5), the keyword `#define` ladder (#8), and a C# grep for any renamed tag/property (#7).
 - **Texture / placement math:** inspect the `.meta` per-platform block above — no compile needed.
 - **For true HLSL ground truth:** `REFRESH` to reimport the shader, then `LOG errors` to read per-variant shader compile failures. This is the shader equivalent of "compile" — `COMPILE` (script recompile) is the wrong tool and won't surface them.
 
 ```bash
 clibridge4unity STATUS               # are there errors?  (always first)
-clibridge4unity LINT                 # C# only, offline, sub-second
+clibridge4unity LINT                 # C# only, offline — reactive, only if STATUS shows a problem
 clibridge4unity REFRESH              # reimport changed shaders (what actually recompiles HLSL)
 clibridge4unity LOG errors           # read shader compile errors after reimport
 # COMPILE is for C# script changes — NOT needed for .shader/.cginc/.hlsl edits

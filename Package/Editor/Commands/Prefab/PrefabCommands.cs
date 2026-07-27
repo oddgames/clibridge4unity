@@ -69,7 +69,7 @@ namespace clibridge4unity
                     // Create from existing scene object or new
                     if (!string.IsNullOrEmpty(source))
                     {
-                        var sourceGo = GameObject.Find(source);
+                        var sourceGo = PathResolver.FindSceneObject(source);
                         if (sourceGo == null)
                             return Response.Error($"Source object not found: {source}");
                         go = UnityEngine.Object.Instantiate(sourceGo);
@@ -178,7 +178,7 @@ namespace clibridge4unity
                 if (string.IsNullOrEmpty(goName))
                     return Response.Error("GameObject name is required");
 
-                var go = GameObject.Find(goName);
+                var go = PathResolver.FindSceneObject(goName);
                 if (go == null)
                     return Response.ErrorSceneNotFound(goName);
 
@@ -277,7 +277,7 @@ namespace clibridge4unity
                 // Set parent
                 if (!string.IsNullOrEmpty(parentPath))
                 {
-                    var parent = GameObject.Find(parentPath);
+                    var parent = PathResolver.FindSceneObject(parentPath);
                     if (parent != null)
                         instance.transform.SetParent(parent.transform, true);
                 }
@@ -307,7 +307,7 @@ namespace clibridge4unity
             using var _profile = _markerApply.Auto();
             try
             {
-                var instance = GameObject.Find(instancePath);
+                var instance = PathResolver.FindSceneObject(instancePath);
                 if (instance == null)
                     return Response.ErrorSceneNotFound(instancePath, "prefab instance");
 
@@ -334,7 +334,7 @@ namespace clibridge4unity
             using var _profile = _markerUnpack.Auto();
             try
             {
-                var instance = GameObject.Find(instancePath);
+                var instance = PathResolver.FindSceneObject(instancePath);
                 if (instance == null)
                     return Response.ErrorSceneNotFound(instancePath, "prefab instance");
 

@@ -209,7 +209,7 @@ namespace clibridge4unity
                 int total = changes + deletions;
                 if (total == 0) return (false, 0, 0, "no script changes since last compile");
                 return (true, changes, deletions,
-                    $"{changes} changed + {deletions} deleted script file(s) since last compile — run COMPILE");
+                    $"{changes} changed + {deletions} deleted script file(s) since last compile — Unity auto-compiles on focus; COMPILE only if behavior looks stale");
             }
             catch (System.Exception ex)
             {
@@ -400,7 +400,7 @@ namespace clibridge4unity
                     scriptsModified = mt.scriptsModified,
                     compileRecommended = mt.scriptsModified && !mt.isCompiling,
                     compileRecommendation = mt.scriptsModified && !mt.isCompiling
-                        ? "Run COMPILE — script changes detected since last compile."
+                        ? "Uncompiled script changes. Unity auto-compiles on focus and the user has usually already compiled — only run COMPILE if results look stale or something isn't working."
                         : (mt.isCompiling ? "Compilation in progress." : "Up to date."),
                     lastCompileRequest = lastCompileRequestStr,
                     lastCompileFinished = lastCompileStr,
@@ -546,11 +546,13 @@ namespace clibridge4unity
         }
 
         [BridgeCommand("COMPILE", "Force script recompilation. Pass 'force' to bypass the no-change skip check. " +
-                                  "TIP: For fast syntax-only check (no Unity, no domain reload), use LINT instead.",
+                                  "Rarely needed — Unity auto-compiles on focus and the user has usually already compiled.",
             Category = "Core",
             Usage = "COMPILE [force]\n" +
-                    "  Prefer LINT first — offline, instant, catches syntax errors in NEW files Unity hasn't seen.\n" +
-                    "  Use COMPILE only when you need full semantic check (type errors, missing usings).",
+                    "  Rarely needed: Unity auto-compiles when focused, so the user has usually already compiled.\n" +
+                    "  Reach for it only when something isn't working as expected (stale results, CODE_EXEC can't\n" +
+                    "  see a new type) and STATUS confirms uncompiled changes. LINT is the offline alternative\n" +
+                    "  when Unity can't compile — also reactive-only, not a routine check.",
             Streaming = false,
             RequiresMainThread = true,
             TimeoutSeconds = 300,

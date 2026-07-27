@@ -41,6 +41,44 @@ static class RoslynDaemon
         return $"RoslynDaemon_{Environment.UserName}_{hash:X8}";
     }
 
+    // ─── Duplicate-daemon guards ─────────────────────────────────────
+    // GetRunningPipe() + StartBackground() is a check-then-act with no cross-process lock, so two
+    // CLI invocations landing in the same window both see "not running" and both spawn a daemon.
+    // Duplicates are expensive — each one indexes the whole project (~1.7 GB RSS, sustained CPU)
+    // and they compete for the same pipe name. Two separate locks, deliberately:
+    //   _spawn — held by the CLI only around check-then-spawn, so spawns serialise.
+    //   _own   — held by the daemon process for its whole life, so a daemon that got spawned
+    //            anyway exits before indexing instead of becoming a second resident copy.
+    // They must be distinct: the spawner holds _spawn while waiting up to 15s for the child to
+    // publish daemon.pipe, and the child acquires _own during that window.
+    static string SpawnLockName(string projectPath) => $@"Global\{GeneratePipeName(projectPath)}_spawn";
+    static string OwnerLockName(string projectPath) => $@"Global\{GeneratePipeName(projectPath)}_own";
+
+    static Mutex _ownership; // kept alive for the daemon's lifetime — do not let this be collected
+
+    /// <summary>Best-effort cross-process lock. Returns the mutex (may be null if the OS refused to
+    /// create it — e.g. restricted token); <paramref name="acquired"/> says whether we hold it.
+    /// A null mutex means "proceed unguarded" — the guard is an optimisation, never a hard gate.</summary>
+    static Mutex TryAcquireLock(string name, int waitMs, out bool acquired)
+    {
+        acquired = false;
+        try
+        {
+            var m = new Mutex(false, name);
+            try { acquired = m.WaitOne(waitMs, false); }
+            catch (AbandonedMutexException) { acquired = true; } // previous owner died — we inherit
+            return m;
+        }
+        catch { return null; }
+    }
+
+    static void ReleaseLock(Mutex m, bool acquired)
+    {
+        if (m == null) return;
+        try { if (acquired) m.ReleaseMutex(); } catch { }
+        try { m.Dispose(); } catch { }
+    }
+
     // ─── Client side ─────────────────────────────────────────────────
 
     /// <summary>Check if daemon is running. Returns pipe name or null.</summary>
@@ -196,6 +234,23 @@ static class RoslynDaemon
     /// <summary>Start the daemon as a background process. Returns pipe name or null.</summary>
     public static string StartBackground(string projectPath)
     {
+        // Serialise spawns across processes, then re-check: a peer may have won the race and
+        // published its pipe while we were queued here.
+        var spawnLock = TryAcquireLock(SpawnLockName(projectPath), 20000, out bool spawnHeld);
+        try
+        {
+            if (spawnHeld)
+            {
+                string winner = GetRunningPipe(projectPath);
+                if (winner != null) return winner;
+            }
+            return StartBackgroundCore(projectPath);
+        }
+        finally { ReleaseLock(spawnLock, spawnHeld); }
+    }
+
+    static string StartBackgroundCore(string projectPath)
+    {
         string exePath = Process.GetCurrentProcess().MainModule?.FileName
             ?? Path.Combine(AppContext.BaseDirectory, "clibridge4unity.exe");
 
@@ -313,6 +368,16 @@ static class RoslynDaemon
 
     static int RunServer(string projectPath)
     {
+        // Last line of defence against duplicates: whoever holds this owns the project. Held for
+        // the process lifetime (never released) — a second daemon exits here, before it spends
+        // ~1.7 GB and a full index pass becoming a resident copy of a daemon we already have.
+        _ownership = TryAcquireLock(OwnerLockName(projectPath), 0, out bool owned);
+        if (_ownership != null && !owned)
+        {
+            Console.Error.WriteLine("[roslyn] another daemon already owns this project — exiting");
+            return 0;
+        }
+
         string assetsDir = Path.Combine(projectPath, "Assets");
         string packagesDir = Path.Combine(projectPath, "Packages");
         string packageCacheDir = Path.Combine(projectPath, "Library", "PackageCache");

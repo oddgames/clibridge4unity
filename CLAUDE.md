@@ -5,8 +5,8 @@ A suite of tools for communicating with Unity Editor via Named Pipes using moder
 
 ### Components
 1. **clibridge4unity** - Lightweight CLI tool for single command execution (ideal for scripts, automation, Claude integration)
-2. **ConsoleUnityBridge** - Interactive REPL-style console for developers
-3. **Package** - Unity Editor package with the bridge server
+2. **Package** - Unity Editor package with the bridge server
+3. **vscode-extension** - VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 
 ### Architecture Goals
 - **Speed is the #1 goal** — every response must be as fast as possible
@@ -93,8 +93,7 @@ tool_claude_unity_bridge/
 │   ├── clibridge4unity.cs     # Single-command CLI with auto-detection
 │   ├── skills/                # Per-task skill .md files (embedded into the exe)
 │   └── vscode/                # Build-staging for the embedded extension .vsix (deploy-time)
-├── clibridge4unity.Tests/     # Integration tests for CLI (21 tests)
-├── ConsoleUnityBridge/        # Interactive console application
+├── tests/                     # pytest integration tests (require Unity running with UnityTestProject)
 ├── Package/                   # Unity Editor package (UPM)
 │   ├── Editor/
 │   │   ├── Core/              # Stable core (rarely changes)
@@ -112,7 +111,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.65)
+│   └── package.json           # UPM manifest (v1.1.66)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -170,7 +169,7 @@ dotnet build ConsoleUnityBridge.sln -c Debug
 ## Running Tests
 
 ### Test Setup
-Tests are located in `clibridge4unity.Tests` and require Unity to be running.
+Tests are pytest-based, located in `tests/`, and require Unity to be running (run with `pytest`).
 
 ### Unity Requirements
 For tests to pass:
@@ -233,6 +232,7 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `DIAG` - Diagnostic info (no main thread needed)
 - `BRIDGEINFO` - Stable handshake (no main thread): `bridgeVersion`, `minCompatibleExtensionVersion`, `bridgeProtocol`. **Frozen contract** — consumed by the VSCode extension to decide compatibility; never rename it or repurpose a field (append only). Raise `BridgeServer.MinCompatibleExtensionVersion` only in a release that breaks the extension's interface.
 - `STATUS` - Get Unity Editor status, including C# compile and UI Toolkit import errors
+- **LINT/COMPILE discipline:** both are reactive troubleshooting tools, never routine steps — Unity auto-compiles on focus and 99% of the time the user has already compiled before asking for a test. Run them only when something isn't working as expected (STATUS errors, stale results, CODE_EXEC can't see a new type). Exception: editing this repo's Package code with Unity backgrounded needs `COMPILE force` (change watcher can't see the external `file:` package).
 - `LINT [warnings]` - **Default: offline syntax + UXML/USS well-formedness check (~1s).** Catches missing braces, unclosed strings, bad keywords, malformed C#/UXML/USS. Daemon FileSystemWatcher → catches errors in NEW files Unity hasn't seen. Fails fast at 20s on huge projects.
 - `LINT unity [warnings]` - Unity-faithful **per-asmdef** compile (~5-60s). Asmdef-aware (avoids cross-asmdef type collision false positives). Catches missing methods, type errors, missing usings. 60s budget — falls back to COMPILE if exceeded.
 - `COMPILE` - Force script recompilation (Unity-side, triggers domain reload, breaks pipe). The ground truth — use when LINT modes give false positives or you need source generators / post-compile callbacks. Bridge auto-blocks all commands during Unity Player Build (returns clear error instead of timing out).
@@ -266,12 +266,12 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 
 ### Scene
 - `CREATE name` - Create a new GameObject
-- `FIND name` - Find by name. Scope prefixes:
+- `FIND name` - Find by name **or component type** (both always searched; results labeled `matchedBy` + `active`). A component-type query is inheritance-aware (base class matches derived) and includes inactive objects — never hand-roll `FindObjectsOfType<T>(true)` via CODE_EXEC. Scope prefixes:
   - `FIND Player` or `FIND scene:Player` — scene (default)
   - `FIND prefab:Assets/UI/Menu.prefab/Button` — inside a prefab asset (comma-separate for OR)
 - `DELETE path` - Delete a GameObject
 - `SAVE` - Save current scene
-- `LOAD scenePath` - Load a scene
+- `LOAD scenePath` - Load a scene (response confirms the now-active scene path — use instead of CODE_EXEC `OpenScene`)
 - `SCENEVIEW frame|2d|3d` - Control the Scene view
 - `WINDOWS` - List open editor windows with positions
 - `PLAY [scene]` - Enter play mode
@@ -288,11 +288,14 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 
 ### Component / Inspect
 - `INSPECTOR` - Whole-scene hierarchy (brief, all roots recursed)
-- `INSPECTOR path` - One scene GameObject or asset with serialized fields
+- `INSPECTOR path` - One scene GameObject or asset with serialized fields (resolves **inactive** objects too)
 - `INSPECTOR path --children` / `--depth N` - Recurse subtree
 - `INSPECTOR path --brief` - Components only, no serialized fields
 - `INSPECTOR path --filter X` - Subtree filtered by GameObject name OR component name
+- `INSPECTOR path --component X` - One component's fields only (exact type name)
+- `INSPECTOR path --refs` - Wiring audit: every object-reference property (deep-walked through nested classes + array elements) as `propertyPath = Type:'name'` / `None` / `Missing (broken reference)`
 - `INSPECTOR Assets/x.prefab [--children] [--brief] [--filter X]` - Prefab asset (absorbs old PREFAB_HIERARCHY)
+- Field rendering: object refs print `Type:'name' (assetPath)` (path only for assets); arrays/lists print elements (capped at 10); nested serializable classes recurse (3 levels); missing scripts print `[Missing Script!]`
 - `COMPONENT_SET gameObject component field value` - Set field/property on a component
 - `COMPONENT_ADD gameObject component` - Add a component
 - `COMPONENT_REMOVE gameObject component` - Remove a component

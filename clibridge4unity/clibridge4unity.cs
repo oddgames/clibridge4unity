@@ -197,6 +197,10 @@ class Program
     // 2s is plenty for a live bridge ([InitializeOnLoad] sub-second). Going higher just makes
     // the "Unity isn't open / bridge isn't responding" case feel like the CLI is hung.
     const int PIPE_CONNECT_TIMEOUT_MS = 2000;
+    // Bound on a single STATUS reply while polling through a domain reload. The server answers
+    // main-thread work after its own ~5s hard-timeout even when the main thread is wedged, so 15s
+    // only fires when the reply genuinely never comes — no false positives on a slow-but-alive Unity.
+    const int STATUS_READ_TIMEOUT_MS = 15000;
 
     // Track if last response indicated main thread timeout
     private static bool _lastResponseContainedMainThreadTimeout;
@@ -2095,9 +2099,15 @@ class Program
         // TEST: server writes results to Temp/clibridge4unity_test.log with a sibling .status
         // file (running/done/error). We tail the file from disk so PlayMode entering/exiting
         // the domain reload (which kills the pipe) doesn't eat the result stream.
+        // Exception: `TEST list` answers over the pipe directly (no run, no status/log files) —
+        // route it like a normal command or the status-file wait times out at 30s.
         if (command.Equals("TEST", StringComparison.OrdinalIgnoreCase))
         {
-            return HandleTest(pipeName, projectPath, data);
+            bool isListMode = !string.IsNullOrWhiteSpace(data) &&
+                data.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Any(t => t.Equals("list", StringComparison.OrdinalIgnoreCase));
+            if (!isListMode)
+                return HandleTest(pipeName, projectPath, data);
         }
 
         int result = SendCommand(pipeName, projectPath, command, data);
@@ -3398,20 +3408,26 @@ class Program
         Console.WriteLine($"\n[CLI] Waiting for Unity to complete compilation (up to {timeoutSeconds} seconds)...");
         Console.WriteLine($"[CLI] Pipe name: {pipeName}");
 
-        int elapsed = 0;
+        // Wall-clock, NOT an iteration counter. A per-iteration `elapsed += pollInterval` assumes
+        // each poll costs exactly pollInterval, but a poll also pays Thread.Sleep + WakeUnityEditor
+        // + Connect + a STATUS round-trip that the server answers only after its 5s main-thread
+        // hard-timeout. That inflates the real timeout by the per-poll overrun — so the sicker
+        // Unity is, the longer the timeout stretches, which is exactly backwards. Observed in the
+        // field: a REFRESH with timeoutSeconds=300 sat blocked for ~30 minutes.
+        var clock = Stopwatch.StartNew();
+        long deadlineMs = timeoutSeconds * 1000L;
         int pollInterval = 1000; // Check every second
         int lastUpdateSeconds = 0;
         int attemptCount = 0;
         bool hasConnectedOnce = false;
-        int idleStaleSeconds = 0; // how long Unity has been idle with stale timestamp
+        long idleSinceMs = -1; // when Unity first reported idle-with-stale-timestamp (-1 = not idle)
         bool hasRetriggered = false;
 
-        while (elapsed < timeoutSeconds * 1000)
+        while (clock.ElapsedMilliseconds < deadlineMs)
         {
             Thread.Sleep(pollInterval);
-            elapsed += pollInterval;
             attemptCount++;
-            int currentSeconds = elapsed / 1000;
+            int currentSeconds = (int)(clock.ElapsedMilliseconds / 1000);
 
             // Wake Unity so it processes compilation even in background
             WakeUnityEditor(projectPath);
@@ -3434,13 +3450,42 @@ class Program
                 pipe.Write(msgBytes, 0, msgBytes.Length);
                 pipe.Flush();
 
-                // Read response
+                // Read response — bounded. When Unity's main thread is spinning, the server's
+                // listener threads still accept and read, so Connect() and Write() both succeed
+                // and only the reply never comes. An unbounded Read here parks the poll loop
+                // forever and the deadline above never gets re-evaluated.
                 var responseBuilder = new StringBuilder();
                 byte[] buffer = new byte[4096];
-                int bytesRead;
-                while ((bytesRead = pipe.Read(buffer, 0, buffer.Length)) > 0)
+                bool readTimedOut = false;
+                using (var readCts = new CancellationTokenSource(STATUS_READ_TIMEOUT_MS))
                 {
-                    responseBuilder.Append(Encoding.UTF8.GetString(buffer, 0, bytesRead));
+                    try
+                    {
+                        while (true)
+                        {
+                            var readTask = pipe.ReadAsync(buffer, 0, buffer.Length, readCts.Token);
+                            readTask.Wait(readCts.Token);
+                            int bytesRead = readTask.Result;
+                            if (bytesRead == 0) break;
+                            responseBuilder.Append(Encoding.UTF8.GetString(buffer, 0, bytesRead));
+                        }
+                    }
+                    catch (Exception readEx) when (readEx is OperationCanceledException
+                                                || (readEx is AggregateException rae && rae.InnerException is OperationCanceledException))
+                    {
+                        readTimedOut = true;
+                    }
+                }
+
+                if (readTimedOut)
+                {
+                    CliTrace("WaitForCompilationAndReconnect", $"STATUS read timeout after {STATUS_READ_TIMEOUT_MS}ms — main thread likely wedged");
+                    if (currentSeconds - lastUpdateSeconds >= 5)
+                    {
+                        Console.WriteLine($"[CLI] Unity accepted the connection but did not answer STATUS within {STATUS_READ_TIMEOUT_MS / 1000}s — main thread may be wedged ({currentSeconds}s / {timeoutSeconds}s)");
+                        lastUpdateSeconds = currentSeconds;
+                    }
+                    continue;
                 }
 
                 string statusResponse = StripBridgeControlLines(responseBuilder.ToString());
@@ -3515,7 +3560,10 @@ class Program
                     bool isIdle = statusResponse.Contains("isCompiling: False");
                     if (isIdle)
                     {
-                        idleStaleSeconds++;
+                        // Wall-clock for the same reason the outer loop uses it — one poll is not
+                        // one second once Unity starts answering slowly.
+                        if (idleSinceMs < 0) idleSinceMs = clock.ElapsedMilliseconds;
+                        int idleStaleSeconds = (int)((clock.ElapsedMilliseconds - idleSinceMs) / 1000);
                         if (idleStaleSeconds >= 15 && !hasRetriggered)
                         {
                             // Unity has been idle for 15s without compiling our request.
@@ -3537,7 +3585,7 @@ class Program
                     }
                     else
                     {
-                        idleStaleSeconds = 0; // reset when actually compiling
+                        idleSinceMs = -1; // reset when actually compiling
                     }
                     // Parse compileTimeAvg from status for ETA
                     string eta = "";
@@ -5456,18 +5504,21 @@ class Program
         md.AppendLine();
         md.AppendLine("Flags: `--inspect [depth]` dumps the result tree, `--trace` emits line-by-line execution, `--vars x,y` filters.");
         md.AppendLine();
-        md.AppendLine("## LINT — offline check (works without Unity)");
+        md.AppendLine("## LINT / COMPILE — troubleshooting tools, NOT routine steps");
         md.AppendLine();
-        md.AppendLine("**Always prefer `LINT` over `COMPILE` first.** Works when Unity is busy/closed. Three modes:");
+        md.AppendLine("**Don't lint or compile after every edit.** Unity auto-compiles when it regains focus, and 99% of the");
+        md.AppendLine("time the user has already compiled by the time they ask you to test. Reach for these ONLY when");
+        md.AppendLine("something isn't working as expected — `STATUS` shows compile errors, a command returns stale/odd");
+        md.AppendLine("results, or `CODE_EXEC` can't see a type you just added:");
         md.AppendLine();
-        md.AppendLine("- `LINT` (default) — syntax-only. Sub-second. Catches missing braces, unclosed strings, bad keywords, malformed declarations, errors in NEW .cs Unity hasn't seen. No type binding.");
+        md.AppendLine("- `LINT` (default) — offline syntax-only. Sub-second. Catches missing braces, unclosed strings, bad keywords, malformed declarations, errors in NEW .cs Unity hasn't seen. No type binding. Works when Unity is busy/closed.");
         md.AppendLine("- `LINT unity` — Unity-faithful **per-asmdef** compile. ~5-60s depending on project size. Parses every asmdef, builds the dependency DAG, compiles each user asmdef separately with correct refs + defines + `UNITY_EDITOR` scoping. Catches missing methods, wrong arg counts, type errors, missing usings. Asmdef-aware so no cross-asmdef type collision false-positives. Caps at 60s — falls back to `COMPILE` if exceeded.");
         md.AppendLine("- Append `warnings` to any mode to include warnings.");
         md.AppendLine();
         md.AppendLine("Backed by the Roslyn daemon's FileSystemWatcher → catches errors in `.cs` files Unity hasn't seen yet.");
         md.AppendLine("`LINT` (unity mode) uses `Library/ScriptAssemblies/<package>.dll` as MetadataReferences for package asmdefs (Unity already compiled them) — only USER asmdefs get re-compiled, hence the speed.");
         md.AppendLine();
-        md.AppendLine("Workflow: `LINT` first → fix any errors → `COMPILE` only if Unity-specific behavior needed (domain reload, source generators, post-compile callbacks) → `STATUS` to verify.");
+        md.AppendLine("When something IS broken, escalate cheapest-first: `STATUS` (shows current compile errors) → `LINT` (offline syntax) → `LINT unity` (type binding) → `COMPILE` (ground truth — domain reload, breaks the pipe; needed for source generators / post-compile callbacks).");
         md.AppendLine();
         md.AppendLine("## ANALYZE — the main reference point (works without Unity)");
         md.AppendLine();
@@ -5518,7 +5569,7 @@ class Program
         md.AppendLine();
         md.AppendLine("## Other workflows");
         md.AppendLine();
-        md.AppendLine("- Build / state: `LINT` (offline syntax — try first) | `LINT unity` (per-asmdef compile, deeper type-binding) | `COMPILE` (Unity-side, triggers domain reload) | `REFRESH` | `STATUS` | `LOG errors` | `DIAG` (always works — no main thread needed) | `PROBE` (quick main-thread health)");
+        md.AppendLine("- Build / state: `STATUS` | `LOG errors` | `DIAG` (always works — no main thread needed) | `PROBE` (quick main-thread health) | `LINT` / `LINT unity` / `COMPILE` / `REFRESH` (reactive-only — see LINT/COMPILE section)");
         md.AppendLine("- Scene: `PLAY` | `STOP` | `PAUSE` | `STEP` | `CREATE` | `FIND` | `DELETE` | `SAVE` | `LOAD` | `SCENEVIEW frame|2d|3d` | `WINDOWS` | `GAMEVIEW WxH`");
         md.AppendLine("- Components: `COMPONENT_SET obj comp field value` | `COMPONENT_ADD obj comp` | `COMPONENT_REMOVE obj comp`");
         md.AppendLine("- Prefabs: `PREFAB_CREATE name path` | `PREFAB_INSTANTIATE path [parent]`");
@@ -7060,7 +7111,13 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         return 2; // exit 2 = deny/block
     }
 
-    /// <summary>Walk up from a path to find a Unity project (directory containing Assets/).</summary>
+    /// <summary>Walk up from a path to find a Unity project root.</summary>
+    /// <remarks>Uses the strict <see cref="IsUnityProjectRoot"/> test (Assets/ AND
+    /// ProjectSettings/ProjectVersion.txt), matching -d and <see cref="AutoDetectProjectPath"/>.
+    /// A bare "contains an Assets/ folder" test is not enough: projects legitimately have nested
+    /// folders named Assets (e.g. Assets/Resources/Assets/), and the walk-up stops at the first
+    /// one it meets. This runs on the PreToolUse hook path, so a false root gets a
+    /// .clibridge4unity/ state directory written *inside the asset tree* on every file edit.</remarks>
     static string DetectProjectFromPath(string startPath)
     {
         if (string.IsNullOrEmpty(startPath)) return null;
@@ -7069,7 +7126,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             string dir = Path.GetFullPath(startPath);
             for (int i = 0; i < 15; i++)
             {
-                if (Directory.Exists(Path.Combine(dir, "Assets")))
+                if (IsUnityProjectRoot(dir))
                     return dir;
                 string parent = Path.GetDirectoryName(dir);
                 if (parent == null || parent == dir) break;

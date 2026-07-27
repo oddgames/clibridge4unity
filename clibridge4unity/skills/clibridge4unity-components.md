@@ -18,7 +18,11 @@ clibridge4unity COMPONENT_SET Player Transform localPosition "1,2,3"
 
 # Inspect to discover serialized field names/types/current values
 clibridge4unity INSPECTOR Canvas/Panel
+clibridge4unity INSPECTOR Canvas/Panel --component Image   # just one component's fields
+clibridge4unity INSPECTOR Canvas/Panel --refs              # only object-reference fields (deep: nested + arrays), None/Missing flagged
 ```
+
+INSPECTOR resolves inactive objects, prints refs as `Type:'name' (assetPath)`, and expands arrays/lists and nested serializable classes — use `--refs` to audit wiring/null refs instead of a CODE_EXEC `SerializedObject` walk.
 
 Compound values: vectors/colors accept `"x,y,z"` and hex / named colors. JSON form for anything more involved:
 

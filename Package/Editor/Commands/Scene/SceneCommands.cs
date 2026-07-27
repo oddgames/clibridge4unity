@@ -63,7 +63,7 @@ namespace clibridge4unity
                 // Set parent
                 if (!string.IsNullOrEmpty(parentPath))
                 {
-                    var parent = GameObject.Find(parentPath);
+                    var parent = PathResolver.FindSceneObject(parentPath);
                     if (parent != null)
                         go.transform.SetParent(parent.transform, false);
                 }
@@ -96,12 +96,14 @@ namespace clibridge4unity
         /// Finds GameObjects by name. Default scope is the active scene.
         /// Prefix `prefab:Assets/path.prefab/NameFragment` to search inside a prefab asset.
         /// </summary>
-        [BridgeCommand("FIND", "Find GameObject by name — scene (default) or prefab:<assetpath>/<name>",
+        [BridgeCommand("FIND", "Find GameObject by name OR component type (inheritance-aware, includes inactive) — scene (default) or prefab:<assetpath>/<name>",
             Category = "Scene",
-            Usage = "FIND MyObject                                  (scene)\n" +
+            Usage = "FIND MyObject                                  (scene, by name — includes inactive objects)\n" +
+                    "  FIND PlayerController                          (component type — a base class matches all derived instances, inactive included)\n" +
                     "  FIND scene:MyObject                            (explicit scene scope)\n" +
                     "  FIND prefab:Assets/UI/Menu.prefab/Button       (inside a prefab asset — exact or substring match)\n" +
-                    "  FIND prefab:Assets/UI/Menu.prefab/Panel,Button (multiple names — comma-separated)",
+                    "  FIND prefab:Assets/UI/Menu.prefab/Panel,Button (multiple names — comma-separated)\n" +
+                    "  Name and component-type search always run together; results are labeled matchedBy.",
             RequiresMainThread = true,
             RelatedCommands = new[] { "INSPECTOR", "SCREENSHOT" })]
         public static string Find(string query)
@@ -125,8 +127,8 @@ namespace clibridge4unity
                 // Scene scope: run name search and component type search together.
                 var all = UnityEngine.Object.FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None);
 
-                // Exact name match via GameObject.Find (handles paths like "Parent/Child").
-                var exactFound = GameObject.Find(query);
+                // Exact name/path match, inactive-aware (handles paths like "Parent/Child").
+                var exactFound = PathResolver.FindSceneObject(query);
 
                 // Case-insensitive substring name match.
                 var nameMatches = all
@@ -177,6 +179,7 @@ namespace clibridge4unity
                             name = m.go.name,
                             path = GetPath(m.go),
                             matchedBy = m.matchedBy,
+                            active = m.go.activeInHierarchy,
                             components = m.go.GetComponents<Component>()
                                 .Where(c => c != null).Select(c => c.GetType().Name).ToArray()
                         }).ToArray(),
@@ -196,17 +199,23 @@ namespace clibridge4unity
                     .Select(s => new { name = s.go.name, path = GetPath(s.go) })
                     .ToArray();
 
-                return Response.SuccessWithData(new
+                // Miss is an error (Error: prefix drives the CLI exit code) — but keep the
+                // suggestion payload so the caller can recover without a second round-trip.
+                var miss = new System.Text.StringBuilder();
+                miss.AppendLine($"Error: No GameObjects found matching '{query}'");
+                miss.AppendLine($"scene: {activeScene.name}");
+                miss.AppendLine($"scenePath: {activeScene.path}");
+                miss.AppendLine($"totalGameObjects: {all.Length}");
+                if (suggestions.Length > 0)
                 {
-                    error = $"No GameObjects found matching '{query}'",
-                    scene = activeScene.name,
-                    scenePath = activeScene.path,
-                    totalGameObjects = all.Length,
-                    sceneSuggestions = suggestions,
-                    hint = suggestions.Length > 0
-                        ? "Closest scene names above. Try INSPECTOR <path> or a partial substring."
-                        : "Nothing matched. Try INSPECTOR (no path) for whole-scene hierarchy, or ASSET_SEARCH <query>."
-                });
+                    miss.AppendLine("sceneSuggestions:");
+                    foreach (var s in suggestions)
+                        miss.AppendLine($"  - {{ name = {s.name}, path = {s.path} }}");
+                    miss.AppendLine("hint: Closest scene names above. Try INSPECTOR <path> or a partial substring.");
+                }
+                else
+                    miss.AppendLine("hint: Nothing matched. Try INSPECTOR (no path) for whole-scene hierarchy, or ASSET_SEARCH <query>.");
+                return miss.ToString().TrimEnd();
             }
             catch (Exception ex)
             {
@@ -226,7 +235,7 @@ namespace clibridge4unity
             using var _profile = _markerDelete.Auto();
             try
             {
-                var go = GameObject.Find(path);
+                var go = PathResolver.FindSceneObject(path);
                 if (go == null)
                     return Response.ErrorSceneNotFound(path);
 
@@ -306,7 +315,7 @@ namespace clibridge4unity
         /// Built-in delay matters: without it, LOAD returns before editor-side handlers run
         /// and their errors land *after* the response, where no command sees them.
         /// </summary>
-        [BridgeCommand("LOAD", "Load a scene by path; waits for editor handlers to settle so errors get captured",
+        [BridgeCommand("LOAD", "Load a scene by path (returns the now-active scene); waits for editor handlers to settle so errors get captured",
             Category = "Scene",
             Usage = "LOAD Assets/Scenes/MyScene.unity  OR  LOAD Assets/Scenes/MyScene.unity --wait 2",
             RequiresMainThread = false)]
@@ -329,13 +338,13 @@ namespace clibridge4unity
                     scenePath = scenePath.Substring(0, waitIdx).Trim();
                 }
 
-                await CommandRegistry.RunOnMainThreadAsync(() =>
+                string activePath = await CommandRegistry.RunOnMainThreadAsync(() =>
                 {
-                    EditorSceneManager.OpenScene(scenePath);
-                    return 0;
+                    var scene = EditorSceneManager.OpenScene(scenePath);
+                    return string.IsNullOrEmpty(scene.path) ? scenePath : scene.path;
                 });
                 if (waitSeconds > 0) await Task.Delay(waitSeconds * 1000);
-                return Response.Success($"Loaded {scenePath} (settled {waitSeconds}s).");
+                return Response.Success($"Loaded {activePath} — now the active scene (settled {waitSeconds}s).");
             }
             catch (Exception ex)
             {
@@ -463,7 +472,7 @@ namespace clibridge4unity
             }
 
             if (go == null)
-                go = GameObject.Find(target);
+                go = PathResolver.FindSceneObject(target);
 
             if (go == null)
                 return Response.Error($"GameObject '{target}' not found");

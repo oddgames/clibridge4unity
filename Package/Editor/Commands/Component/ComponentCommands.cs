@@ -89,7 +89,7 @@ namespace clibridge4unity
                 }
                 else
                 {
-                    go = GameObject.Find(gameObjectPath);
+                    go = PathResolver.FindSceneObject(gameObjectPath);
                     if (go == null)
                         return Response.ErrorSceneNotFound(gameObjectPath);
                 }
@@ -190,7 +190,7 @@ namespace clibridge4unity
                 }
                 else
                 {
-                    go = GameObject.Find(gameObjectPath);
+                    go = PathResolver.FindSceneObject(gameObjectPath);
                     if (go == null)
                         return Response.ErrorSceneNotFound(gameObjectPath);
                 }
@@ -263,7 +263,7 @@ namespace clibridge4unity
                 }
                 else
                 {
-                    go = GameObject.Find(gameObjectPath);
+                    go = PathResolver.FindSceneObject(gameObjectPath);
                     if (go == null)
                         return Response.ErrorSceneNotFound(gameObjectPath);
                 }
@@ -289,20 +289,23 @@ namespace clibridge4unity
         /// Unified inspector — works on scene, prefab assets, materials, ScriptableObjects, etc.
         /// Absorbs the former PREFAB_HIERARCHY command via --brief + --filter + truncation.
         /// </summary>
-        [BridgeCommand("INSPECTOR", "Inspect a scene GameObject, prefab asset, material, ScriptableObject — optionally a subtree with filter",
+        [BridgeCommand("INSPECTOR", "Inspect a scene GameObject (incl. inactive), prefab asset, material, ScriptableObject — subtree, filter, refs-audit",
             Category = "Component",
             Usage = "INSPECTOR                                             (scene hierarchy — all roots, brief)\n" +
                     "  INSPECTOR scene                                     (same — explicit)\n" +
-                    "  INSPECTOR Canvas/Panel                              (one scene GameObject with fields)\n" +
+                    "  INSPECTOR Canvas/Panel                              (one scene GameObject with fields — inactive objects resolved too)\n" +
                     "  INSPECTOR Canvas/Panel --depth 2                    (recurse 2 levels)\n" +
                     "  INSPECTOR Canvas/Panel --children                   (recurse all children)\n" +
                     "  INSPECTOR Canvas --filter Button                    (subtree, keep only nodes matching 'Button' by GO or component name)\n" +
+                    "  INSPECTOR Canvas/Panel --component Image            (one component's fields only — exact type name)\n" +
+                    "  INSPECTOR Canvas/Panel --refs                       (wiring audit: every object-reference field incl. nested/array, None + Missing flagged)\n" +
                     "  INSPECTOR Canvas --brief                            (components only, skip serialized fields)\n" +
                     "  INSPECTOR Assets/Prefabs/My.prefab                  (prefab asset)\n" +
                     "  INSPECTOR Assets/Prefabs/My.prefab --children       (full prefab subtree with fields)\n" +
                     "  INSPECTOR Assets/Prefabs/My.prefab --children --brief --filter Button  (prefab, subtree, components-only, filtered)\n" +
                     "  INSPECTOR Assets/Materials/My.mat                   (material)\n" +
-                    "  INSPECTOR {\"gameObject\":\"Panel\",\"filter\":\"Button\",\"children\":true,\"brief\":true}  (JSON form)",
+                    "  INSPECTOR {\"gameObject\":\"Panel\",\"filter\":\"Button\",\"component\":\"Image\",\"refs\":true,\"children\":true,\"brief\":true}  (JSON form)\n" +
+                    "  Fields render typed refs (Type:'name' + asset path), array/list elements (capped), and nested serializable classes.",
             RequiresMainThread = true,
             RelatedCommands = new[] { "COMPONENT_SET", "COMPONENT_ADD", "SCREENSHOT", "FIND" })]
         public static string Inspector(string data)
@@ -317,9 +320,9 @@ namespace clibridge4unity
                                   opts.TargetPath.Equals("scene", StringComparison.OrdinalIgnoreCase);
                 if (sceneScope)
                 {
-                    // Default scene scope to brief + all children.
+                    // Default scene scope to brief + all children (refs audit wants fields, not brief).
                     if (opts.Depth == 0) opts.Depth = int.MaxValue;
-                    if (!opts.BriefExplicit) opts.Brief = true;
+                    if (!opts.BriefExplicit && !opts.RefsOnly) opts.Brief = true;
                     return InspectScene(opts);
                 }
 
@@ -332,8 +335,8 @@ namespace clibridge4unity
                     return InspectAsset(opts);
                 }
 
-                // Scene GameObject
-                var go = GameObject.Find(opts.TargetPath);
+                // Scene GameObject (inactive-aware — GameObject.Find alone misses disabled objects)
+                var go = PathResolver.FindSceneObject(opts.TargetPath);
                 if (go == null)
                     return Response.ErrorSceneNotFound(opts.TargetPath);
 
@@ -354,10 +357,11 @@ namespace clibridge4unity
         {
             public string TargetPath;
             public string Filter;           // matches GameObject name OR component name (substring, case-insensitive)
-            public string FilterComponent;  // exact component type name (legacy JSON "component" field)
+            public string FilterComponent;  // exact component type name (--component flag / JSON "component" field)
             public int Depth;
             public bool Brief;              // components only, skip serialized fields
             public bool BriefExplicit;      // user set Brief explicitly (vs default)
+            public bool RefsOnly;           // wiring audit: only ObjectReference properties, deep-walked
             public int MaxNodes = 300;
         }
 
@@ -379,6 +383,7 @@ namespace clibridge4unity
                 opts.TargetPath = json["gameObject"]?.ToString() ?? json["asset"]?.ToString() ?? json["target"]?.ToString();
                 opts.FilterComponent = json["component"]?.ToString();
                 opts.Filter = json["filter"]?.ToString();
+                if (json["refs"]?.ToObject<bool>() == true) opts.RefsOnly = true;
                 var depthToken = json["depth"];
                 if (depthToken != null) opts.Depth = depthToken.ToObject<int>();
                 if (json["children"]?.ToObject<bool>() == true) opts.Depth = int.MaxValue;
@@ -401,6 +406,11 @@ namespace clibridge4unity
                 { opts.Depth = Math.Max(0, d); i++; }
                 else if (t.Equals("--filter", StringComparison.OrdinalIgnoreCase) && i + 1 < tokens.Length)
                 { opts.Filter = tokens[++i]; }
+                else if (t.Equals("--component", StringComparison.OrdinalIgnoreCase) && i + 1 < tokens.Length)
+                { opts.FilterComponent = tokens[++i]; }
+                else if (t.Equals("--refs", StringComparison.OrdinalIgnoreCase) ||
+                         t.Equals("--references", StringComparison.OrdinalIgnoreCase))
+                { opts.RefsOnly = true; }
                 else if (t.Equals("--brief", StringComparison.OrdinalIgnoreCase) ||
                          t.Equals("--components-only", StringComparison.OrdinalIgnoreCase))
                 { opts.Brief = true; opts.BriefExplicit = true; }
@@ -471,26 +481,28 @@ namespace clibridge4unity
 
                 foreach (var comp in components)
                 {
-                    if (comp == null) continue;
+                    if (comp == null)
+                    {
+                        sb.AppendLine($"{indent}[Missing Script!]");  // broken component — key wiring signal
+                        continue;
+                    }
                     string typeName = comp.GetType().Name;
 
-                    // Legacy exact-component filter from JSON form.
+                    // Exact-component filter (--component flag / JSON "component" field).
                     if (!string.IsNullOrEmpty(opts.FilterComponent) &&
                         !typeName.Equals(opts.FilterComponent, StringComparison.OrdinalIgnoreCase))
                         continue;
 
                     sb.AppendLine($"{indent}[{typeName}]");
+
+                    if (opts.RefsOnly)
+                    {
+                        AppendObjectRefs(sb, new SerializedObject(comp), indent + "  ");
+                        continue;
+                    }
                     if (opts.Brief) continue;  // components-only mode — skip serialized fields
 
-                    var so = new SerializedObject(comp);
-                    var prop = so.GetIterator();
-                    if (prop.NextVisible(true))
-                    {
-                        do
-                        {
-                            sb.AppendLine($"{indent}  {prop.name}: {GetPropertyValue(prop)}");
-                        } while (prop.NextVisible(false));
-                    }
+                    AppendSerializedProperties(sb, new SerializedObject(comp), indent + "  ");
                 }
             }
 
@@ -604,15 +616,10 @@ namespace clibridge4unity
 
                 // Serialized properties
                 sb.AppendLine($"[{asset.GetType().Name}]");
-                var serialized = new SerializedObject(asset);
-                var iter = serialized.GetIterator();
-                if (iter.NextVisible(true))
-                {
-                    do
-                    {
-                        sb.AppendLine($"  {iter.name}: {GetPropertyValue(iter)}");
-                    } while (iter.NextVisible(false));
-                }
+                if (opts.RefsOnly)
+                    AppendObjectRefs(sb, new SerializedObject(asset), "  ");
+                else
+                    AppendSerializedProperties(sb, new SerializedObject(asset), "  ");
 
                 return sb.ToString().TrimEnd();
             }
@@ -628,16 +635,101 @@ namespace clibridge4unity
                 case SerializedPropertyType.String: return prop.stringValue;
                 case SerializedPropertyType.Enum: return prop.enumDisplayNames.Length > prop.enumValueIndex && prop.enumValueIndex >= 0
                     ? prop.enumDisplayNames[prop.enumValueIndex] : prop.enumValueIndex.ToString();
-                case SerializedPropertyType.ObjectReference:
-                    return prop.objectReferenceValue != null ? prop.objectReferenceValue.name : "None";
+                case SerializedPropertyType.ObjectReference: return FormatObjectRef(prop);
                 case SerializedPropertyType.Vector2: return prop.vector2Value.ToString();
                 case SerializedPropertyType.Vector3: return prop.vector3Value.ToString();
                 case SerializedPropertyType.Vector4: return prop.vector4Value.ToString();
+                case SerializedPropertyType.Vector2Int: return prop.vector2IntValue.ToString();
+                case SerializedPropertyType.Vector3Int: return prop.vector3IntValue.ToString();
+                case SerializedPropertyType.Quaternion: return $"{prop.quaternionValue.eulerAngles} (euler)";
                 case SerializedPropertyType.Rect: return prop.rectValue.ToString();
                 case SerializedPropertyType.Color: return prop.colorValue.ToString();
                 case SerializedPropertyType.LayerMask: return prop.intValue.ToString();
                 default: return $"({prop.propertyType})";
             }
+        }
+
+        /// <summary>
+        /// Object refs render as Type:'name' (+ asset path when the target is an asset, so the
+        /// caller can INSPECTOR it next). A destroyed/unresolvable target renders as Missing —
+        /// distinguishable from a deliberately-empty field (None).
+        /// </summary>
+        private static string FormatObjectRef(SerializedProperty prop)
+        {
+            var obj = prop.objectReferenceValue;
+            if (obj == null)
+                return prop.objectReferenceInstanceIDValue != 0 ? "Missing (broken reference)" : "None";
+            string label = $"{obj.GetType().Name}:'{obj.name}'";
+            string assetPath = AssetDatabase.GetAssetPath(obj);
+            return string.IsNullOrEmpty(assetPath) ? label : $"{label} ({assetPath})";
+        }
+
+        private const int MaxPropertyDepth = 3;   // nested-class recursion cap
+        private const int MaxArrayElements = 10;  // per-array element cap
+
+        /// <summary>Render all top-level visible properties of one object, recursing into arrays
+        /// and nested serializable classes so list contents and nested refs are visible.</summary>
+        private static void AppendSerializedProperties(System.Text.StringBuilder sb, SerializedObject so, string indent)
+        {
+            var prop = so.GetIterator();
+            if (!prop.NextVisible(true)) return;
+            do { AppendProperty(sb, prop, indent, 0); } while (prop.NextVisible(false));
+        }
+
+        private static void AppendProperty(System.Text.StringBuilder sb, SerializedProperty prop, string indent, int depth, string label = null)
+        {
+            label ??= prop.name;
+
+            // Arrays/lists: element lines instead of an opaque "(Generic)". Strings are also
+            // isArray in the serializer but carry propertyType String — handled by GetPropertyValue.
+            if (prop.isArray && prop.propertyType == SerializedPropertyType.Generic)
+            {
+                int size = prop.arraySize;
+                sb.AppendLine($"{indent}{label}: ({size} element{(size == 1 ? "" : "s")})");
+                if (depth >= MaxPropertyDepth) return;
+                int shown = Math.Min(size, MaxArrayElements);
+                for (int i = 0; i < shown; i++)
+                    AppendProperty(sb, prop.GetArrayElementAtIndex(i), indent + "  ", depth + 1, $"[{i}]");
+                if (size > shown) sb.AppendLine($"{indent}  ... +{size - shown} more");
+                return;
+            }
+
+            // Nested serializable class/struct: recurse so inner fields (esp. object refs) show up.
+            if (prop.propertyType == SerializedPropertyType.Generic)
+            {
+                if (depth >= MaxPropertyDepth || !prop.hasVisibleChildren)
+                {
+                    sb.AppendLine($"{indent}{label}: ({prop.type})");
+                    return;
+                }
+                sb.AppendLine($"{indent}{label}:");
+                var end = prop.GetEndProperty();
+                var child = prop.Copy();
+                if (child.NextVisible(true))
+                {
+                    while (!SerializedProperty.EqualContents(child, end))
+                    {
+                        AppendProperty(sb, child, indent + "  ", depth + 1);
+                        if (!child.NextVisible(false)) break;
+                    }
+                }
+                return;
+            }
+
+            sb.AppendLine($"{indent}{label}: {GetPropertyValue(prop)}");
+        }
+
+        /// <summary>
+        /// Wiring audit (--refs): deep-walk EVERY visible property (unbounded depth — refs hide
+        /// inside nested classes and array elements) and print only ObjectReference ones as
+        /// propertyPath = Type:'name' | None | Missing.
+        /// </summary>
+        private static void AppendObjectRefs(System.Text.StringBuilder sb, SerializedObject so, string indent)
+        {
+            var prop = so.GetIterator();
+            while (prop.NextVisible(true))
+                if (prop.propertyType == SerializedPropertyType.ObjectReference)
+                    sb.AppendLine($"{indent}{prop.propertyPath} = {FormatObjectRef(prop)}");
         }
 
         private static Type FindType(string name)
@@ -669,8 +761,8 @@ namespace clibridge4unity
             {
                 string path = valueToken.ToString();
 
-                // Try to find as GameObject first
-                var go = GameObject.Find(path);
+                // Try to find as GameObject first (inactive-aware)
+                var go = PathResolver.FindSceneObject(path);
                 if (go != null)
                 {
                     // If target type is GameObject, return it

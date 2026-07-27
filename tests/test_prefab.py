@@ -1,4 +1,4 @@
-"""Prefab commands: PREFAB_CREATE, PREFAB_SAVE, PREFAB_INSTANTIATE, PREFAB_HIERARCHY."""
+"""Prefab commands: PREFAB_CREATE, PREFAB_SAVE, PREFAB_INSTANTIATE (hierarchy via INSPECTOR)."""
 
 
 class TestPrefabSave:
@@ -9,7 +9,8 @@ class TestPrefabSave:
         bridge.ok("PREFAB_SAVE", "PrefabSaveTest Assets/Prefabs")
 
     def test_hierarchy(self, bridge):
-        bridge.ok("PREFAB_HIERARCHY", "Assets/Prefabs/PrefabSaveTest.prefab")
+        out = bridge.ok("INSPECTOR", "Assets/Prefabs/PrefabSaveTest.prefab --children")
+        assert "PrefabSaveTest" in out
 
     def test_cleanup(self, bridge):
         bridge.ok("DELETE", "PrefabSaveTest")

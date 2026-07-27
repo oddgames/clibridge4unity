@@ -9,7 +9,17 @@ Standard Unity/C# and shell knowledge applies; below is only what's specific to 
 
 `CODE_EXEC` / `CODE_EXEC_RETURN` ship their own Roslyn compiler — they work even when Unity's main thread is busy with another command, and don't require `COMPILE` first.
 
-Prefer a dedicated command when one fits (structured, faster): `INSPECTOR path [--children] [--brief] [--filter X]`, `FIND name`, `COMPONENT_SET obj comp field value`, `COMPONENT_ADD/COMPONENT_REMOVE`, `ASSET_SEARCH`/`ASSET_DISCOVER`, `MENU path`. Use `CODE_EXEC*` only when no command fits.
+Prefer a dedicated command when one fits (structured, faster): `INSPECTOR path [--children] [--brief] [--filter X] [--component T] [--refs]`, `FIND name`, `COMPONENT_SET obj comp field value`, `COMPONENT_ADD/COMPONENT_REMOVE`, `ASSET_SEARCH`/`ASSET_DISCOVER`, `MENU path`. Use `CODE_EXEC*` only when no command fits.
+
+Snippets that are already commands — don't hand-roll these:
+
+| If you're about to write… | Run instead |
+|---|---|
+| `EditorSceneManager.OpenScene(path)` | `LOAD path` (confirms the now-active scene) |
+| `FindObjectsOfType<T>(true)` | `FIND T` (component type, inheritance-aware, includes inactive) |
+| `SerializedObject` iterator printing object refs / nulls | `INSPECTOR obj --refs` (nested + array refs, None/Missing flagged) |
+| Dumping one component's fields | `INSPECTOR obj --component T` |
+| Reading a list field's elements | `INSPECTOR obj` (arrays render elements, refs as `Type:'name' (assetPath)`) |
 
 ## Variants
 
@@ -37,4 +47,4 @@ clibridge4unity CODE_EXEC_RETURN @/tmp/script.cs --trace --vars pos,vel --skip D
 
 ## COMPILE vs CODE_EXEC
 
-`CODE_EXEC*` runs in an isolated assembly — it cannot reference internal types you just added to user code that Unity hasn't compiled yet. To call into freshly-added code: edit the file → let Unity recompile (focus the editor or run `COMPILE`) → then `CODE_EXEC_RETURN` can reference it.
+`CODE_EXEC*` runs in an isolated assembly — it cannot reference internal types you just added to user code that Unity hasn't compiled yet. Usually the user has already compiled (Unity recompiles on focus) — just run it. If the type genuinely isn't found, that's the reactive cue to check `STATUS` and, only then, `COMPILE`.
