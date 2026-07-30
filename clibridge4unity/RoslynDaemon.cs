@@ -393,10 +393,33 @@ static class RoslynDaemon
         File.WriteAllText(GetPidFile(projectPath), Process.GetCurrentProcess().Id.ToString());
         try { File.WriteAllText(GetVersionFile(projectPath), DaemonVersionToken()); } catch { }
 
+        // Syntax trees are RESIDENT FOR USER CODE ONLY (Assets/, non-PackageCache Packages/).
+        // Measured on a large project: 12,154 files / 104 MB of source cost 775 MB of live objects,
+        // and Library/PackageCache was 459 MB of that — 59% — for read-only third-party source the
+        // user can never edit. Both lint modes already skip it outright, and the two query paths
+        // (analyze, map) only need a tree for files whose *text* matched a filter first. So package
+        // files keep their text (the filter needs it) and are re-parsed on demand via GetTreeFor().
+        // Re-parsing measured at ~0.7 ms/file, so a query matching 200 package files pays ~140 ms.
+        // Escape hatch: CLIBRIDGE_INDEX_PACKAGES=1 restores full residency. Costs ~400 MB on a large
+        // project but keeps broad `kind:` queries at their old latency — see the note above.
+        bool residentPackages = string.Equals(Environment.GetEnvironmentVariable("CLIBRIDGE_INDEX_PACKAGES"), "1", StringComparison.Ordinal);
         var trees = new ConcurrentDictionary<string, SyntaxTree>();
         var fileTexts = new ConcurrentDictionary<string, string>();
+        // Type names harvested from package files before their tree is dropped — keeps the
+        // "did you mean" suggester able to name package types without retaining their trees.
+        var pkgTypeNames = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
         int totalFilesToIndex = 0;
         var indexReady = new ManualResetEventSlim(false);
+
+        // Resident tree, or a fresh parse for package source. Deliberately uncached: caching would
+        // reintroduce the growth this split exists to remove, and a re-parse is sub-millisecond.
+        SyntaxTree GetTreeFor(string path)
+        {
+            if (trees.TryGetValue(path, out var resident)) return resident;
+            if (!fileTexts.TryGetValue(path, out var text)) return null;
+            try { return CSharpSyntaxTree.ParseText(text, CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Latest), path); }
+            catch { return null; }
+        }
 
         // DLL index — built in background after .cs parse completes. Used as fallback
         // when CODE_ANALYZE can't find a type in source (precompiled plugins, package DLLs).
@@ -504,13 +527,19 @@ static class RoslynDaemon
                 try
                 {
                     string text = File.ReadAllText(file);
-                    trees[file] = CSharpSyntaxTree.ParseText(text, defaultParseOpts, file);
                     fileTexts[file] = text;
+                    // Package source is never parsed at index time. Parsing it only to harvest names
+                    // would force red-tree realisation on every file — the single most expensive part
+                    // of holding a tree — and leave the GC heap grown even after the tree is dropped.
+                    if (residentPackages || IsUserCode(file, projectPath))
+                        trees[file] = CSharpSyntaxTree.ParseText(text, defaultParseOpts, file);
+                    else
+                        CollectTypeNames(text, pkgTypeNames);
                 }
                 catch { }
             });
             sw.Stop();
-            Console.Error.WriteLine($" {trees.Count} files in {sw.ElapsedMilliseconds}ms");
+            Console.Error.WriteLine($" {fileTexts.Count} files ({trees.Count} resident, {pkgTypeNames.Count} package types) in {sw.ElapsedMilliseconds}ms");
             indexReady.Set();
 
             // Phase 1b: Index plugin DLLs after source. Cheap (Cecil reads metadata only)
@@ -555,8 +584,13 @@ static class RoslynDaemon
                 Thread.Sleep(100); // debounce
                 string text = File.ReadAllText(filePath);
                 var opts = CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Latest);
-                trees[filePath] = CSharpSyntaxTree.ParseText(text, opts, filePath);
                 fileTexts[filePath] = text;
+                // Same residency rule as the initial index — watched Packages/ can include
+                // PackageCache paths on some layouts, and those must not become resident.
+                if (IsUserCode(filePath, projectPath))
+                    trees[filePath] = CSharpSyntaxTree.ParseText(text, opts, filePath);
+                else
+                    CollectTypeNames(text, pkgTypeNames);
                 Interlocked.Increment(ref reParseCount);
             }
             catch { }
@@ -675,7 +709,7 @@ static class RoslynDaemon
                         response = indexReady.IsSet ? "ok" : "indexing";
                         break;
                     case "status":
-                        response = $"files: {trees.Count}/{Volatile.Read(ref totalFilesToIndex)}\nready: {indexReady.IsSet}\nreparses: {reParseCount}\ndlls: {dllIndex.DllCount} ({dllIndex.TypeCount} types, ready={dllIndex.Ready})\nassets: {assetGraph.ContainerCount} containers ({assetGraph.GuidCount} guids, ready={assetGraph.Ready})\nuptime: {(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds:F0}s\nproject: {projectPath}";
+                        response = $"files: {fileTexts.Count}/{Volatile.Read(ref totalFilesToIndex)} ({trees.Count} resident trees, {pkgTypeNames.Count} package types)\nready: {indexReady.IsSet}\nreparses: {reParseCount}\ndlls: {dllIndex.DllCount} ({dllIndex.TypeCount} types, ready={dllIndex.Ready})\nassets: {assetGraph.ContainerCount} containers ({assetGraph.GuidCount} guids, ready={assetGraph.Ready})\nuptime: {(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds:F0}s\nproject: {projectPath}";
                         break;
                     case "analyze":
                         // Don't block the connection on indexing — return a progress sentinel
@@ -683,7 +717,7 @@ static class RoslynDaemon
                         // is short and stateless; client retries until indexReady.IsSet.
                         if (!indexReady.IsSet)
                         {
-                            response = $"__indexing:{trees.Count}/{Volatile.Read(ref totalFilesToIndex)}";
+                            response = $"__indexing:{fileTexts.Count}/{Volatile.Read(ref totalFilesToIndex)}";
                             break;
                         }
                         // `usedby:` is an asset-graph reverse lookup, not a code query.
@@ -697,14 +731,14 @@ static class RoslynDaemon
                             response = assetGraph.FormatUsedBy(query.Trim().Substring("usedby:".Length).Trim());
                             break;
                         }
-                        response = HandleAnalyze(trees, fileTexts, projectPath, query);
+                        response = HandleAnalyze(trees, fileTexts, GetTreeFor, pkgTypeNames.Keys, projectPath, query);
                         response = AugmentWithDllHits(response, dllIndex, query);
                         response = AugmentWithAssetWiring(response, assetGraph, query);
                         break;
                     case "map":
                         if (!indexReady.IsSet)
                         {
-                            response = $"__indexing:{trees.Count}/{Volatile.Read(ref totalFilesToIndex)}";
+                            response = $"__indexing:{fileTexts.Count}/{Volatile.Read(ref totalFilesToIndex)}";
                             break;
                         }
                         if (!assetGraph.Ready)
@@ -714,7 +748,7 @@ static class RoslynDaemon
                             break;
                         }
                         response = assetGraph.FormatMap(
-                            new Dictionary<string, SyntaxTree>(trees),
+                            GetTreeFor,
                             new Dictionary<string, string>(fileTexts),
                             projectPath, query, 0);
                         break;
@@ -765,7 +799,7 @@ static class RoslynDaemon
                         //        "unity warnings" (unity + warnings). 60s budget on unity mode.
                         if (!indexReady.IsSet)
                         {
-                            response = $"__indexing:{trees.Count}/{Volatile.Read(ref totalFilesToIndex)}";
+                            response = $"__indexing:{fileTexts.Count}/{Volatile.Read(ref totalFilesToIndex)}";
                             break;
                         }
                         string q = (query ?? "").Trim().ToLowerInvariant();
@@ -780,7 +814,7 @@ static class RoslynDaemon
                             response = LintUnity.Format(run, projectPath, includeWarnings);
                             break;
                         }
-                        response = RunSyntaxLint(trees, projectPath, includeWarnings);
+                        response = RunSyntaxLint(trees, projectPath, includeWarnings, fileTexts.Count);
                         break;
                     }
                     case "shutdown":
@@ -972,7 +1006,8 @@ static class RoslynDaemon
         return dllReport + "\n\n" + response;
     }
 
-    static string HandleAnalyze(ConcurrentDictionary<string, SyntaxTree> trees, ConcurrentDictionary<string, string> fileTexts, string projectPath, string query)
+    static string HandleAnalyze(ConcurrentDictionary<string, SyntaxTree> trees, ConcurrentDictionary<string, string> fileTexts,
+                                Func<string, SyntaxTree> getTree, IEnumerable<string> pkgTypeNames, string projectPath, string query)
     {
         var sw = Stopwatch.StartNew();
 
@@ -991,22 +1026,35 @@ static class RoslynDaemon
         while (filterTerm.EndsWith("[]")) filterTerm = filterTerm.Substring(0, filterTerm.Length - 2);
 
         var matchingTexts = new Dictionary<string, string>();
-        var matchingTrees = new Dictionary<string, SyntaxTree>();
         foreach (var kvp in fileTexts)
-        {
-            if (!kvp.Value.Contains(filterTerm)) continue;
-            if (!trees.TryGetValue(kvp.Key, out var tree)) continue;
-            matchingTexts[kvp.Key] = kvp.Value;
-            matchingTrees[kvp.Key] = tree;
-        }
+            if (kvp.Value.Contains(filterTerm)) matchingTexts[kvp.Key] = kvp.Value;
+
+        // Resolve trees in parallel. Package files are not resident, so getTree re-parses them —
+        // a broad query like `method:Update` matches thousands of files and serial re-parsing cost
+        // ~2.2s where the fully-resident index answered in 20ms. Parallel resolution puts that back
+        // in the low hundreds of ms. Only files that already passed the text filter get here, so
+        // the work scales with matches, not corpus size.
+        var resolved = new ConcurrentDictionary<string, SyntaxTree>();
+        Parallel.ForEach(matchingTexts.Keys,
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1) },
+            path => { var t = getTree(path); if (t != null) resolved[path] = t; });
+
+        var matchingTrees = new Dictionary<string, SyntaxTree>(resolved.Count);
+        foreach (var kvp in resolved) matchingTrees[kvp.Key] = kvp.Value;
+        // Drop texts whose tree failed to resolve, so the two maps stay in step.
+        foreach (var path in matchingTexts.Keys.ToList())
+            if (!matchingTrees.ContainsKey(path)) matchingTexts.Remove(path);
 
         sw.Stop();
-        var resp = CodeAnalysisCore.Analyze(matchingTrees, matchingTexts, projectPath, query, sw.ElapsedMilliseconds, trees.Count);
-        // Full trees needed for "did you mean" — pre-filter eliminates candidates on miss.
-        return CodeAnalysisCore.AppendSuggestionsIfMissing(resp, trees, query);
+        var resp = CodeAnalysisCore.Analyze(matchingTrees, matchingTexts, projectPath, query, sw.ElapsedMilliseconds, fileTexts.Count);
+        // "Did you mean" needs every declared type name; package names come from the harvested set
+        // rather than their trees, which are not retained.
+        return CodeAnalysisCore.AppendSuggestionsIfMissing(resp, trees, query, pkgTypeNames);
     }
 
-    static string RunSyntaxLint(ConcurrentDictionary<string, SyntaxTree> trees, string projectPath, bool includeWarnings)
+    // `totalIndexed` is the whole corpus (user + package); `trees` now holds user code only, so the
+    // skipped-file count has to come from the caller rather than trees.Count.
+    static string RunSyntaxLint(ConcurrentDictionary<string, SyntaxTree> trees, string projectPath, bool includeWarnings, int totalIndexed)
     {
         var sb = new StringBuilder();
         int errorCount = 0, warnCount = 0, userFiles = 0;
@@ -1029,10 +1077,33 @@ static class RoslynDaemon
         var uiRun = LintUI.Run(projectPath);
         int uiErrors = uiRun.Issues.Count;
         var csResult = FormatLintResponse(sb, userFiles, errorCount, warnCount, includeWarnings,
-            mode: $"syntax-only ({trees.Count - userFiles} package files skipped)",
+            mode: $"syntax-only ({totalIndexed - userFiles} package files skipped)",
             okHint: "Catches missing braces, bad keywords, unclosed strings.\nMisses: type errors, missing usings, wrong arg counts. Use `LINT semantic` or COMPILE for those.");
         if (uiErrors == 0 && uiRun.UxmlScanned + uiRun.UssScanned == 0) return csResult;
         return csResult + "\n\n" + LintUI.Format(uiRun, projectPath);
+    }
+
+    // Declared type names, straight off the source text. Deliberately NOT Roslyn: this runs for
+    // every package file, and parsing one just to read its type names costs far more than the names
+    // are worth. Only feeds "did you mean" suggestions, where a rare miss or a commented-out match
+    // is harmless — correctness here is not load-bearing.
+    static readonly System.Text.RegularExpressions.Regex TypeDeclRx = new(
+        @"\b(?:class|struct|interface|enum|record)\s+([A-Za-z_]\w*)|\bdelegate\s+[\w\.\<\>\[\],\s]+?\s+([A-Za-z_]\w*)\s*\(",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>Harvest declared type names from source we are not going to parse. ~5 MB across a
+    /// full PackageCache, versus ~335 MB to hold its trees.</summary>
+    static void CollectTypeNames(string text, ConcurrentDictionary<string, byte> into)
+    {
+        try
+        {
+            foreach (System.Text.RegularExpressions.Match m in TypeDeclRx.Matches(text))
+            {
+                string name = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+                if (!string.IsNullOrEmpty(name)) into.TryAdd(name, 0);
+            }
+        }
+        catch { }
     }
 
     /// <summary>True if `file` is user-editable code: Assets/ or non-PackageCache Packages/.
@@ -1047,7 +1118,7 @@ static class RoslynDaemon
         return false;
     }
 
-    static string RunSemanticLint(ConcurrentDictionary<string, SyntaxTree> trees, string projectPath, bool includeWarnings)
+    static string RunSemanticLint(ConcurrentDictionary<string, SyntaxTree> trees, string projectPath, bool includeWarnings, int totalIndexed)
     {
         var sw = Stopwatch.StartNew();
         var (refs, builtin, user, _, editorRoot, version, error) = LintSemantic.Resolve(projectPath);
@@ -1097,7 +1168,7 @@ static class RoslynDaemon
             AppendDiag(sb, filePath, projectPath, d);
         }
         sw.Stop();
-        string mode = $"semantic ({version}, {refs.Count} refs, {sw.ElapsedMilliseconds}ms, {trees.Count - userFileCount} package files skipped)";
+        string mode = $"semantic ({version}, {refs.Count} refs, {sw.ElapsedMilliseconds}ms, {totalIndexed - userFileCount} package files skipped)";
         string okHint = "Full type-binding pass — would compile under Unity.\nNote: per-file UNITY_EDITOR scoping is best-effort by /Editor/ folder, not asmdef-perfect.";
         return FormatLintResponse(sb, userFileCount, errorCount, warnCount, includeWarnings, mode, okHint);
     }

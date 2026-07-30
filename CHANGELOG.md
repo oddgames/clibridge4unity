@@ -1,5 +1,74 @@
 # Changelog
 
+## v1.1.67 — 2026-07-30
+
+## v1.1.67
+
+### New
+
+- **CLI-side compile guard.** `COMPILE`/`REFRESH` are now gated before the pipe is opened, so a
+  request that cannot accomplish anything never reaches Unity and never triggers a domain reload.
+  Two checks, both pure filesystem — no Unity, no daemon, no pipe:
+  - **Up-to-date:** if every `.cs`/`.asmdef`/`.asmref` under `Assets/` and `Packages/` is older than
+    the newest `Library/ScriptAssemblies` assembly, a compile has already covered those edits.
+    Prints `skipped: uptodate` and exits 0.
+  - **Succession:** refuses after two consecutive attempts whose source and assembly watermarks are
+    both unchanged, printing `skipped: looping` and exiting 1. State-based rather than a wall-clock
+    cooldown on purpose — a timer either blocks legitimate fast edit→compile→edit cycles or is
+    outrun by a retry loop that sleeps longer than it. Any real edit moves a watermark and resets
+    the counter, so genuine work is never blocked regardless of how fast it arrives.
+
+  `COMPILE force` bypasses both. The guard biases toward allowing: an uncompiled project, an
+  unreadable tree, or any exception returns "allow", because wrongly blocking a needed compile is
+  worse than a redundant one. Costs ~700 ms on a 5,700-file project, against a domain reload it
+  frequently avoids entirely.
+
+  This lives in the CLI rather than the Unity package deliberately. The package-side skip in
+  `CoreCommands.Compile` requires `!scan.scanFailed`, and `ScanModifiedScripts` sets `scanFailed`
+  whenever the daemon is absent — so with no daemon running, every `COMPILE` became a real domain
+  reload, which is exactly when a retry loop does damage. A guard behind the pipe is also
+  unreachable once Unity's main thread is wedged.
+
+### Fixed
+
+- **`DIAG` reported phantom pending script changes.** `compileRecommended`/`pendingChanges` measured
+  against `last-compiled.ticks`, which is written in exactly one place: the bridge's own `COMPILE`
+  command. Unity auto-compiles on focus far more often than anyone runs `COMPILE`, so that watermark
+  never advanced and every edit since the last bridge-initiated compile was reported pending
+  forever — long after Unity had built it. Observed in the field with a watermark 1.7 hours stale,
+  reporting 10 pending files that were all already compiled.
+
+  Worse, this disagreed with `COMPILE` itself, which measures against `SessionState[LastCompileTime]`
+  (updated on every reload) and correctly answered "No script changes detected". The two paths gave
+  opposite answers, so a caller could be told to compile by one and refused by the other — an
+  instruction to loop forever.
+
+  `DIAG` now takes the later of `last-compiled.ticks` and the newest `Library/ScriptAssemblies`
+  mtime. Unity stamps those on every compile regardless of trigger, so it is ground truth and needs
+  no main-thread access (`DIAG` runs off the main thread). Cached on a 5s `Stopwatch` TTL.
+
+- **Daemon memory: ~400 MB lower on large projects.** Syntax trees are now resident for user code
+  only. `Library/PackageCache` — measured at 59% of the Roslyn index on a real project — keeps its
+  source text (the query pre-filter needs it) plus a harvested type-name set, and is re-parsed on
+  demand when a query actually matches it. Package files are no longer parsed at index time at all.
+  Measured at a fully-ready state: **1654 MB → 1256 MB**, with indexing 9s faster.
+
+  Trade-off: broad `kind:` queries that match thousands of package files (e.g. `method:Update`) are
+  2–3× slower, since the analysis re-realises those trees. Typical type lookups cost +25–70 ms, and
+  misses are ~2× *faster* because "did you mean" now scores a cheap name set instead of walking
+  every tree. Set **`CLIBRIDGE_INDEX_PACKAGES=1`** to restore full residency and trade the memory
+  back. Query results are unchanged — verified byte-identical across analyze/map for user types,
+  package-only types, kind-prefixed listings, and misses.
+
+### Internal
+
+- `AssetGraph.FormatMap` and `CodeAnalysisCore.SuggestTypeNames` take a tree resolver / extra type
+  names instead of requiring a fully-resident tree dictionary.
+- Lint modes take an explicit total-file count; `trees.Count` no longer means "whole corpus".
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.66 — 2026-07-27
 
 ## v1.1.66

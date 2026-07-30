@@ -430,8 +430,11 @@ internal sealed class AssetGraph
     /// config assets, and UnityEvent wiring that relate to them — one compact dossier that
     /// answers "where do I start?" before any symbol name is known.
     /// </summary>
+    /// <param name="getTree">Resolves a syntax tree for a path. Package source is not held resident
+    /// by the daemon, so this may re-parse — only the top-ranked files below ever ask, so the cost
+    /// is bounded to those, not the corpus.</param>
     public string FormatMap(
-        IReadOnlyDictionary<string, SyntaxTree> trees,
+        Func<string, SyntaxTree> getTree,
         IReadOnlyDictionary<string, string> fileTexts,
         string projectPath,
         string query,
@@ -465,7 +468,8 @@ internal sealed class AssetGraph
         string nextTypeUserCode = null; // preferred "Next:" suggestion — user code beats package samples
         foreach (var (file, _) in topFiles)
         {
-            if (!trees.TryGetValue(file, out var tree)) continue;
+            var tree = getTree(file);
+            if (tree == null) continue;
             string rel = CodeAnalysisCore.ToRelativePath(file, projectPath);
             SyntaxNode root;
             try { root = tree.GetRoot(); } catch { continue; }

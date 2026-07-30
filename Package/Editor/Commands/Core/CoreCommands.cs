@@ -177,6 +177,38 @@ namespace clibridge4unity
         /// from the daemon's change log. Used by DIAG which runs off the main thread.
         /// Returns (recommended, pendingChanges, pendingDeletions, reason).
         /// </summary>
+        // Newest mtime across Library/ScriptAssemblies — when Unity last finished ANY compile.
+        // Cached because DIAG/STATUS call this often and a project can carry a couple hundred
+        // assemblies; the stat sweep is only a few ms but there is no reason to repeat it per call.
+        // Stopwatch, not EditorApplication.timeSinceStartup — this runs off the main thread.
+        private static long _asmTicksCache;
+        private static readonly System.Diagnostics.Stopwatch _asmTicksAge = System.Diagnostics.Stopwatch.StartNew();
+        private static long _asmTicksStampMs = -1;
+
+        private static long NewestScriptAssemblyTicksCached(string projectRoot, double maxAgeSeconds = 5.0)
+        {
+            long nowMs = _asmTicksAge.ElapsedMilliseconds;
+            if (_asmTicksStampMs >= 0 && (nowMs - _asmTicksStampMs) < maxAgeSeconds * 1000)
+                return _asmTicksCache;
+            long newest = 0;
+            try
+            {
+                string dir = Path.Combine(projectRoot, "Library", "ScriptAssemblies");
+                if (Directory.Exists(dir))
+                {
+                    foreach (var dll in Directory.EnumerateFiles(dir, "*.dll"))
+                    {
+                        long t = File.GetLastWriteTimeUtc(dll).Ticks;
+                        if (t > newest) newest = t;
+                    }
+                }
+            }
+            catch { newest = 0; } // unreadable -> fall back to last-compiled.ticks alone
+            _asmTicksCache = newest;
+            _asmTicksStampMs = nowMs;
+            return newest;
+        }
+
         public static (bool recommended, int changes, int deletions, string reason) GetCompileRecommendationFromLog(string projectRoot)
         {
             try
@@ -189,6 +221,15 @@ namespace clibridge4unity
                 long lastCompiledTicks = 0;
                 if (File.Exists(lastCompiledPath))
                     long.TryParse(File.ReadAllText(lastCompiledPath).Trim(), out lastCompiledTicks);
+
+                // last-compiled.ticks is only written by our own COMPILE command, but Unity
+                // auto-compiles on focus far more often than anyone runs COMPILE — so on its own
+                // that watermark never advances and every edit since the last bridge-initiated
+                // compile is reported pending forever, long after Unity built it.
+                // Library/ScriptAssemblies is stamped by Unity on EVERY compile regardless of who
+                // triggered it, so it is the ground truth. Take whichever watermark is later.
+                long assemblyTicks = NewestScriptAssemblyTicksCached(projectRoot);
+                if (assemblyTicks > lastCompiledTicks) lastCompiledTicks = assemblyTicks;
 
                 int changes = 0, deletions = 0;
                 foreach (var line in File.ReadAllLines(changeLogPath))
@@ -209,7 +250,7 @@ namespace clibridge4unity
                 int total = changes + deletions;
                 if (total == 0) return (false, 0, 0, "no script changes since last compile");
                 return (true, changes, deletions,
-                    $"{changes} changed + {deletions} deleted script file(s) since last compile — Unity auto-compiles on focus; COMPILE only if behavior looks stale");
+                    $"{changes} changed + {deletions} deleted script file(s) newer than Unity's last compile — focus Unity (it auto-compiles) or run COMPILE");
             }
             catch (System.Exception ex)
             {

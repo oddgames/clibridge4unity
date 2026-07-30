@@ -1506,6 +1506,29 @@ class Program
         }
         catch { }
 
+        // Compile guard — refuse a domain reload that cannot accomplish anything, before touching
+        // the pipe. Deliberately CLI-side: the Unity-side skip in CoreCommands.Compile is disabled
+        // when the daemon is down (ScanModifiedScripts sets scanFailed), which is precisely when a
+        // retry loop does real damage, and a guard behind the pipe is unreachable once Unity is
+        // wedged. `force` bypasses. See CompileGuard.
+        if (cmdUpper == "COMPILE" || cmdUpper == "REFRESH")
+        {
+            bool compileForce = !string.IsNullOrWhiteSpace(data)
+                && data.Trim().Equals("force", StringComparison.OrdinalIgnoreCase);
+            var guard = CompileGuard.Evaluate(projectPath, compileForce);
+            if (guard.Verdict != CompileGuard.Verdict.Allow)
+            {
+                Console.WriteLine($"skipped: {guard.Verdict.ToString().ToLowerInvariant()}");
+                Console.WriteLine(guard.Message);
+                try { PeerLedger.ClearActive(projectPath); } catch { }
+                // Up-to-date is a success (the caller's goal is already met); a refused loop is not.
+                return guard.Verdict == CompileGuard.Verdict.UpToDate ? EXIT_SUCCESS : EXIT_COMMAND_ERROR;
+            }
+            // No reset here: the counter must survive an allowed attempt or a loop never reaches the
+            // threshold. It self-clears in Evaluate the moment either watermark moves — i.e. as soon
+            // as a real edit lands or a compile actually completes.
+        }
+
         // Daemon autostart — fire and forget. Daemon provides FileSystemWatcher-based change tracking
         // for COMPILE/SCREENSHOT/INSPECTOR. Skipped for commands that don't need it or that manage
         // the daemon themselves.
@@ -8036,7 +8059,9 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             var graph = new AssetGraph(projectPath);
             graph.Build();
             sw.Stop();
-            return graph.FormatMap(trees, texts, projectPath, query, sw.ElapsedMilliseconds);
+            // This one-shot path already parsed only the token-matching files, so every tree it
+            // needs is resident — no re-parse fallback required.
+            return graph.FormatMap(f => trees.TryGetValue(f, out var t) ? t : null, texts, projectPath, query, sw.ElapsedMilliseconds);
         }
     }
 
