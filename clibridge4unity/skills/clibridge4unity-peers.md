@@ -42,12 +42,14 @@ The warnings are deliberately advisory so they never wedge automation — but tr
 - Each window gets a stable id like `peer-3F2A`, anchored to the parent `claude`/terminal process (the CLI invocation itself is ephemeral — one process per command — so it can't anchor identity). The id survives across invocations.
 - **Two chat panels hosted by one process** (e.g. two panels in the same VSCode window) collapse to one id. Set `CLIBRIDGE_PEER_ID=<something-unique>` in each to disambiguate. The override also pins a guaranteed-stable id for harness/CI use.
 - Liveness is by anchor-PID: when the anchoring window process is gone, that peer's records are pruned on the next read.
+- **Warnings are time-scoped.** A present-tense claim ("is recompiling Unity right now") requires an in-flight marker younger than the 300s command ceiling. A peer that merely exists in the ledger is described in the past tense ("was active 4m ago"), and one not heard from for over 5 minutes produces no warning at all. So a warning naming a peer means that window is genuinely recent — treat it as real, not as background noise.
+- A warning is **never** a reason to conclude you are blocked. It says another window may be affected, not that your command will fail. Verify actual state with `STATUS` / `PLAYMODE` / `DIAG` before deciding you cannot proceed.
 
 ## Storage
 
 `{project}/.clibridge4unity/peers/`:
 - `{id}.peer` — durable presence: last-seen, cwd, play-mode flag, an activity ring (last ~8 meaningful commands) and a touched-paths ring (last ~12 asset paths).
-- `{id}.active` — present **only while a command is in flight** (the "right now" signal); cleared when the command returns, and treated as stale if the invocation PID is dead.
+- `{id}.active` — present **only while a command is in flight** (the "right now" signal); cleared when the command returns. Treated as stale if the invocation PID is dead **or** the marker is older than the 300s command ceiling (PIDs get recycled, so age is checked independently). Markers whose `.peer` is gone are swept on the next read.
 
 These are plain key=value text files; nothing here needs hand-editing — it's the CLI's coordination state.
 

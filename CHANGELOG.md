@@ -1,5 +1,112 @@
 # Changelog
 
+## v1.1.68 — 2026-07-31
+
+## v1.1.68
+
+### New
+
+- **CLI-side compile guard.** `COMPILE`/`REFRESH` are gated before the pipe opens, so a request that
+  cannot accomplish anything never reaches Unity and never triggers a domain reload. Pure filesystem
+  — no Unity, no daemon, no pipe:
+  - `skipped: uptodate` (exit 0) — every `.cs`/`.asmdef`/`.asmref` under `Assets/` and `Packages/` is
+    older than the newest `Library/ScriptAssemblies` assembly, so a compile already covered them.
+  - `skipped: looping` (exit 1) — two consecutive attempts whose source *and* assembly watermarks
+    were both unchanged. State-based rather than a wall-clock cooldown on purpose: a timer either
+    blocks legitimate fast edit→compile→edit cycles or is outrun by a retry loop that sleeps longer
+    than it. Any real edit moves a watermark and resets the counter, so genuine work is never
+    blocked however fast it arrives.
+
+  `COMPILE force` bypasses both. The guard biases toward allowing — an uncompiled project, an
+  unreadable tree, or any exception returns "allow".
+
+  It lives in the CLI rather than the Unity package deliberately: the package-side skip requires
+  `!scan.scanFailed`, and `ScanModifiedScripts` sets `scanFailed` whenever the daemon is absent, so
+  with no daemon running *every* `COMPILE` became a real domain reload — exactly when a retry loop
+  does damage. A guard behind the pipe is also unreachable once Unity's main thread is wedged.
+
+- **Assistant docs teach the new discipline.** `SETUP`/`UPDATE`-generated `CLAUDE.md`/`AGENTS.md`,
+  plus the bundled `clibridge4unity-lint` and `clibridge4unity-peers` skills, now cover: never pipe
+  `COMPILE` through `tail`/`head`; never loop it; how to read the guard verdicts; that play-mode and
+  Player-Build blocks are terminal rather than transient; branch on exit codes instead of grepping
+  stdout; and never run `LINT unity` followed by `COMPILE`.
+
+### Fixed
+
+- **`UPDATE` failed outright once the GitHub API rate limit was hit**, reporting a raw
+  `AggregateException: ... 403 (rate limit exceeded)`. Version lookups used
+  `api.github.com/repos/…/releases/latest`, capped at 60 requests/hour per IP for unauthenticated
+  calls — a budget shared by every CLI invocation across every window and project on the machine.
+
+  Worse, it could not recover: the 30-minute background-check throttle keyed off the mtime of the
+  *data cache*, which was written only on success. A failed fetch left the mtime untouched, so every
+  later command retried immediately and held the quota at zero for the rest of the hour.
+
+  Version resolution now uses the `releases/latest` **302 redirect**, which carries the tag and costs
+  no API quota; the REST call is a fallback only. Asset URLs are constructed deterministically, so
+  `UPDATE` needs no API JSON at all. The throttle moved to a separate stamp written *before* the
+  fetch, so failures back off. `GITHUB_TOKEN`/`GH_TOKEN` are honoured on the fallback (5000/hour),
+  and a 403 now explains the limit and the reset instead of dumping an exception.
+
+- **Conflict warnings named long-dead windows as active**, which reads to a caller as "you are
+  blocked" and is simply false. `CheckConflicts` warned for every peer file on disk regardless of
+  recency, producing self-contradictory output like *"peer-18F90 is active (last: COMPILE 47h ago)"*.
+  On a real ledger a single `COMPILE` emitted six such warnings, every one wrong.
+
+  Present-tense claims now require present-tense evidence: an in-flight marker younger than the 300s
+  command ceiling. Everything else is phrased as history ("was active 2m ago"), and peers not heard
+  from within five minutes produce no warning at all. Same recency gate applied to the play-mode
+  warning, since `play=` is sticky when a window never sends `STOP`.
+
+- **Stale `.active` markers survived indefinitely.** Pruning checked only whether the invocation PID
+  was alive, and Windows recycles PIDs — one marker had persisted 20 days. Markers are now also
+  pruned on age, and orphaned markers whose `.peer` is gone (previously unreachable, since pruning
+  only visited ids that still had a `.peer`) are swept on the next read.
+
+- **`DIAG` reported phantom pending script changes.** `compileRecommended`/`pendingChanges` measured
+  against `last-compiled.ticks`, written only by the bridge's own `COMPILE`. Unity auto-compiles on
+  focus far more often than anyone runs `COMPILE`, so the watermark never advanced and every edit
+  since the last bridge-initiated compile was reported pending forever. Seen in the field 1.7 hours
+  stale, reporting 10 already-compiled files.
+
+  It also disagreed with `COMPILE` itself, which measures against `SessionState[LastCompileTime]` and
+  correctly answered "No script changes detected" — so a caller could be told to compile by one path
+  and refused by the other, an instruction to loop forever. `DIAG` now takes the later of
+  `last-compiled.ticks` and the newest `Library/ScriptAssemblies` mtime (ground truth, no main-thread
+  access needed), cached on a 5s TTL.
+
+- **`COMPILE` progress was invisible through a pipe.** Progress went to stdout, and `tail`/`head`
+  buffer to EOF — so `COMPILE 2>&1 | tail -3` printed nothing for the whole reload. A 5m26s compile
+  looked like a dead terminal and got killed mid-flight. Progress now goes to stderr; results stay on
+  stdout.
+
+- **The compile wait budget could expire just short of success.** The fixed 300s ceiling killed a
+  reload measured at 326s — 26 seconds before it completed — and because only *successful* waits were
+  recorded, a project that always overran never built the history that would have raised its budget.
+  The budget now derives from measured history (`min(900, max(avg×2.5, worst×1.5))`, never below the
+  server hint), and overruns are recorded when Unity positively reported compiling, so a slow project
+  self-corrects after one failure.
+
+- **Daemon memory: ~400 MB lower on large projects.** Syntax trees are resident for user code only.
+  `Library/PackageCache` — 59% of the Roslyn index on a real project — keeps its source text (the
+  query pre-filter needs it) plus a harvested type-name set, and is re-parsed on demand when a query
+  matches. Package files are no longer parsed at index time at all. Measured at a fully-ready state:
+  **1654 MB → 1256 MB**, indexing 9s faster.
+
+  Trade-off: broad `kind:` queries matching thousands of package files (e.g. `method:Update`) are
+  2–3× slower; typical type lookups cost +25–70 ms; misses are ~2× *faster* because "did you mean"
+  scores a cheap name set instead of walking every tree. Set **`CLIBRIDGE_INDEX_PACKAGES=1`** to
+  restore full residency. Query results verified byte-identical across analyze/map for user types,
+  package-only types, kind-prefixed listings, and misses.
+
+### Internal
+
+- `AssetGraph.FormatMap` and `CodeAnalysisCore.SuggestTypeNames` take a tree resolver / extra type
+  names instead of a fully-resident tree dictionary; lint modes take an explicit total-file count.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.67 — 2026-07-30
 
 ## v1.1.67

@@ -21,10 +21,26 @@ clibridge4unity LINT unity
 clibridge4unity LINT unity warnings
 ```
 
-`COMPILE` — last resort. Triggers Unity's real compilation + domain reload: breaks open pipes (clients reconnect), re-runs source generators and post-compile callbacks, reloads all Editor assemblies. Use only when you need generators/post-compile callbacks, `LINT unity` was inconclusive and you need ground truth, or the user asked for a full recompile. CLI returns immediately — reconnect and run `STATUS` for the result.
+`COMPILE` — last resort. Triggers Unity's real compilation + domain reload: breaks open pipes (clients reconnect), re-runs source generators and post-compile callbacks, reloads all Editor assemblies. Use only when you need generators/post-compile callbacks, `LINT unity` was inconclusive and you need ground truth, or the user asked for a full recompile. The CLI waits through the reload and streams progress — expect minutes on a large project.
+
+## COMPILE: never pipe it, never loop it
+
+**Never `COMPILE ... | tail -N` / `| head -N`.** Both buffer until EOF, so a multi-minute reload prints nothing and looks hung — that gets it killed mid-compile. The output *is* the progress. Run it bare; filter afterwards with `LAST`.
+
+**Never wrap it in a retry loop.** It is guarded CLI-side; read the verdict:
+- `skipped: uptodate` (exit 0) — sources all older than the compiled assemblies. Already compiled. This is success.
+- `skipped: looping` (exit 1) — repeated attempts, nothing changed between them. Something is blocking compilation; retrying cannot clear it. Run `STATUS`/`DIAG` and fix the cause.
+- `COMPILE force` bypasses both.
+
+Blocked states are terminal, not transient — waiting does not help:
+- *"Cannot compile during play mode"* → `STOP` first.
+- *"Unity is in the middle of a Player Build"* → wait for the build; every command is blocked until it ends.
+
+Branch on the exit code, not on grepping stdout (`0` ok · `11` compile errors · `12` play mode · `13` safe mode · `14` timeout · `10` no connection). A clean compile emits no error lines, so a grep for `error` can't tell success from a filter miss.
 
 ## Don'ts
 - Don't `COMPILE` after every edit (Unity does it on focus; it breaks in-flight bridge work).
+- Don't run `LINT unity` *and* `COMPILE` — `LINT unity` is the cheap substitute for `COMPILE`, so doing both pays twice and answers nothing new.
 - Don't `LINT` proactively; don't loop `STATUS` until clean.
 - Don't treat STATUS's `scriptsModified`/`compileRecommended` alone as a trigger — that's informational. Act only when output is actually wrong or errors are shown.
 

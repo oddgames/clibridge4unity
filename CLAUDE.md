@@ -111,7 +111,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.67)
+│   └── package.json           # UPM manifest (v1.1.68)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -236,6 +236,11 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `LINT [warnings]` - **Default: offline syntax + UXML/USS well-formedness check (~1s).** Catches missing braces, unclosed strings, bad keywords, malformed C#/UXML/USS. Daemon FileSystemWatcher → catches errors in NEW files Unity hasn't seen. Fails fast at 20s on huge projects.
 - `LINT unity [warnings]` - Unity-faithful **per-asmdef** compile (~5-60s). Asmdef-aware (avoids cross-asmdef type collision false positives). Catches missing methods, type errors, missing usings. 60s budget — falls back to COMPILE if exceeded.
 - `COMPILE` - Force script recompilation (Unity-side, triggers domain reload, breaks pipe). The ground truth — use when LINT modes give false positives or you need source generators / post-compile callbacks. Bridge auto-blocks all commands during Unity Player Build (returns clear error instead of timing out).
+  - **Never pipe it through `tail`/`head`** — both buffer to EOF, so a multi-minute reload prints nothing and looks hung (this has caused real cancellations mid-compile). The output *is* the progress; run it bare and filter afterwards with `LAST`. Progress goes to stderr, results to stdout.
+  - **Never loop it.** Guarded CLI-side ([CompileGuard.cs](clibridge4unity/CompileGuard.cs)): `skipped: uptodate` (exit 0 — assemblies newer than every source, nothing to do) or `skipped: looping` (exit 1 — repeated attempts with nothing changed; something is blocking compilation and retrying cannot clear it). `COMPILE force` bypasses both.
+  - **Blocked states are terminal:** play mode → `STOP` first; Player Build → wait. Branch on exit code (`0` ok · `11` compile errors · `12` play mode · `13` safe mode · `14` timeout · `10` no connection), not on grepping stdout — a clean compile emits no error lines.
+  - **Don't run `LINT unity` then `COMPILE`** — `LINT unity` is the cheap substitute for `COMPILE`; doing both pays twice and answers nothing new.
+  - Wait budget adapts from measured history (`~/.clibridge4unity/.compile_times`), never below the server's 300s hint; overruns are recorded so a slow project raises its own ceiling.
 - `REFRESH` - Force asset database refresh
 - `LOG [filter]` - Get bridge-captured Unity **console** logs (over the pipe); use `LOG ui errors` for current USS/UXML/TSS import errors
   - Commands that reference `.uss`, `.uxml`, or `.tss` assets append matching UI Toolkit import errors automatically

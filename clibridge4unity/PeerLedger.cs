@@ -233,12 +233,27 @@ internal static class PeerLedger
 
     // ───────────────────── Reading peers ─────────────────────
 
+    // A command cannot still be in flight past the server's own 300s ceiling, so an .active marker
+    // older than that is a leftover from a CLI that died without clearing it. PID liveness alone is
+    // not enough to catch those: Windows recycles PIDs, and the marker's pid can land on an
+    // unrelated live process — observed in the field as a marker that survived 20 days.
+    static readonly TimeSpan ActiveMarkerMaxAge = TimeSpan.FromSeconds(300);
+
+    // How recently a window must have been heard from before we describe it in the present tense.
+    // Peer files persist for as long as the anchor process lives, which for a long-running editor
+    // session is days — presence in the ledger is not evidence of activity.
+    static readonly TimeSpan RecentlyActiveWindow = TimeSpan.FromMinutes(5);
+
     public class Active
     {
         public int Pid;
         public string Command;
         public string Args;
         public DateTime StartedUtc;
+
+        /// <summary>False once the marker outlives any possible command. Such a marker says nothing
+        /// about what the peer is doing now and must not drive a present-tense warning.</summary>
+        public bool IsCurrent => StartedUtc != default && (DateTime.UtcNow - StartedUtc) <= ActiveMarkerMaxAge;
     }
 
     public class Peer
@@ -284,6 +299,20 @@ internal static class PeerLedger
             }
             catch { TryDelete(file); }
         }
+
+        // Sweep orphaned .active markers. Pruning only ever visits ids that still have a .peer, so
+        // a marker whose .peer is gone is unreachable and would sit here forever — one was found
+        // 20 days old. The directory holds a handful of files, so the scan is free.
+        try
+        {
+            foreach (var marker in Directory.EnumerateFiles(dir, "*.active"))
+            {
+                string id = Path.GetFileNameWithoutExtension(marker);
+                if (!File.Exists(PeerFile(projectPath, id))) TryDelete(marker);
+            }
+        }
+        catch { }
+
         return results.OrderBy(p => p.FirstSeenUtc).ToList();
     }
 
@@ -309,6 +338,9 @@ internal static class PeerLedger
             }
             // Stale .active (CLI died without clearing) — the invocation pid is gone.
             if (a.Pid > 0) { try { Process.GetProcessById(a.Pid); } catch { TryDelete(file); return null; } }
+            // Age check, independent of the pid: a recycled pid can make a long-dead marker look
+            // live forever. Nothing can legitimately outrun the 300s command ceiling.
+            if (!a.IsCurrent) { TryDelete(file); return null; }
             return string.IsNullOrEmpty(a.Command) ? null : a;
         }
         catch { return null; }
@@ -340,13 +372,17 @@ internal static class PeerLedger
 
             foreach (var pr in peers)
             {
-                string activeCmd = pr.Active?.Command?.ToUpperInvariant();
+                // Only a marker that is still within the command ceiling licenses a present-tense
+                // claim. Everything else is history, and must be phrased as history.
+                var live = (pr.Active != null && pr.Active.IsCurrent) ? pr.Active : null;
+                string activeCmd = live?.Command?.ToUpperInvariant();
+                bool recentlyActive = (DateTime.UtcNow - pr.LastSeenUtc) <= RecentlyActiveWindow;
 
                 // (A) Peer is mid heavy op RIGHT NOW → MY command will likely fail.
                 if (activeCmd == "COMPILE" || activeCmd == "REFRESH")
                 {
                     if (!IsTrivial(cmdUpper))
-                        warns.Add($"{pr.Id} is recompiling Unity right now ({activeCmd} started {Ago(pr.Active.StartedUtc)}). Your {cmdUpper} may time out — wait for the reload to finish.");
+                        warns.Add($"{pr.Id} is recompiling Unity right now ({activeCmd} started {Ago(live.StartedUtc)}). Your {cmdUpper} may time out — wait for the reload to finish.");
                 }
                 else if (activeCmd == "BUILD")
                 {
@@ -355,21 +391,26 @@ internal static class PeerLedger
                 }
 
                 // (B) I'm about to COMPILE/REFRESH → I break their pipe + reset shared state.
+                // Only warn about a window that could actually lose something. Warning for every
+                // peer file on disk described windows last heard from days ago as "active", which
+                // reads to a caller as "you are blocked" and is simply false.
                 if (isCompile)
                 {
-                    if (pr.Active != null && !IsTrivial(activeCmd))
-                        warns.Add($"{cmdUpper} domain-reloads Unity and will BREAK {pr.Id}'s in-flight {pr.Active.Command}. Coordinate before recompiling.");
-                    else
-                        warns.Add($"{cmdUpper} domain-reloads Unity (breaks pipes, resets play mode). {pr.Id} is active ({LastActDesc(pr)}) and will lose any in-flight command.");
+                    if (live != null && !IsTrivial(activeCmd))
+                        warns.Add($"{cmdUpper} domain-reloads Unity and will BREAK {pr.Id}'s in-flight {live.Command}. Coordinate before recompiling.");
+                    else if (recentlyActive)
+                        warns.Add($"{cmdUpper} domain-reloads Unity (breaks pipes, resets play mode). {pr.Id} was active {Ago(pr.LastSeenUtc)} ({LastActDesc(pr)}) and may lose an in-flight command.");
                 }
 
-                // (C) Play-mode trample.
-                if (isPlay && pr.PlayMode)
-                    warns.Add($"{pr.Id} appears to be in PLAY mode — {cmdUpper} changes the shared play state for them too.");
+                // (C) Play-mode trample. play= is sticky: a window that entered play mode and never
+                // issued STOP (or crashed) keeps the flag set indefinitely, so it needs the same
+                // recency gate as the rest.
+                if (isPlay && pr.PlayMode && recentlyActive)
+                    warns.Add($"{pr.Id} appears to be in PLAY mode (last seen {Ago(pr.LastSeenUtc)}) — {cmdUpper} changes the shared play state for them too.");
 
                 // (D) BUILD locks everyone out.
-                if (isBuild)
-                    warns.Add($"BUILD blocks ALL bridge commands for every window until it finishes. {pr.Id} is active and will be locked out.");
+                if (isBuild && recentlyActive)
+                    warns.Add($"BUILD blocks ALL bridge commands for every window until it finishes. {pr.Id} was active {Ago(pr.LastSeenUtc)} and will be locked out.");
 
                 // (E) Same-asset concurrent edit.
                 if (isAssetWrite)

@@ -1,4 +1,4 @@
-// clibridge4unity - CLI bridge for Unity Editor
+﻿// clibridge4unity - CLI bridge for Unity Editor
 // Usage: clibridge4unity <command> [data]       (auto-detects Unity project from current directory)
 // Usage: clibridge4unity -d <unity_project_path> <command> [data]  (explicit project path)
 // Usage: clibridge4unity -h | --help           (queries bridge for available commands)
@@ -284,6 +284,11 @@ class Program
     static string UpdateCacheDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".clibridge4unity");
     static string UpdateCacheFile => Path.Combine(UpdateCacheDir, ".last_update_check");
+    // Separate from the data cache on purpose: the throttle must advance on a FAILED attempt too.
+    // Throttling on the data file meant a failed fetch left its mtime untouched, so every later
+    // command retried immediately — which is how a single rate-limit reply pinned the quota at zero
+    // for the rest of the hour instead of backing off.
+    static string UpdateAttemptFile => Path.Combine(UpdateCacheDir, ".last_update_attempt");
     static string CompileTimesFile => Path.Combine(UpdateCacheDir, ".compile_times");
     static string CliTraceFile => Path.Combine(UpdateCacheDir, "clibridge4unity_cli.log");
     static readonly object CliTraceLock = new object();
@@ -318,12 +323,72 @@ class Program
     {
         try
         {
-            if (File.Exists(UpdateCacheFile) &&
-                (DateTime.UtcNow - File.GetLastWriteTimeUtc(UpdateCacheFile)).TotalMinutes < 30)
+            if (File.Exists(UpdateAttemptFile) &&
+                (DateTime.UtcNow - File.GetLastWriteTimeUtc(UpdateAttemptFile)).TotalMinutes < 30)
                 return;
-            Task.Run(() => FetchLatestRelease());
+            StampUpdateAttempt(); // before the fetch, so a failure still backs off
+            Task.Run(() => { try { FetchLatestRelease(); } catch { } });
         }
         catch { }
+    }
+
+    static void StampUpdateAttempt()
+    {
+        try
+        {
+            Directory.CreateDirectory(UpdateCacheDir);
+            File.WriteAllText(UpdateAttemptFile, DateTime.UtcNow.ToString("O"));
+        }
+        catch { }
+    }
+
+    /// <summary>Latest release tag without touching the REST API. `/releases/latest` answers 302 to
+    /// `/releases/tag/vX.Y.Z`, and plain web requests are not subject to the API's 60/hour
+    /// unauthenticated IP limit — which many windows issuing many commands exhausts routinely.
+    /// Returns null if the redirect can't be read, letting the caller fall back to the API.</summary>
+    static string ResolveLatestTagViaRedirect()
+    {
+        try
+        {
+            using var handler = new HttpClientHandler { AllowAutoRedirect = false };
+            using var http = new HttpClient(handler);
+            http.DefaultRequestHeaders.Add("User-Agent", "clibridge4unity");
+            http.Timeout = TimeSpan.FromSeconds(5);
+            var resp = http.GetAsync($"https://github.com/{GITHUB_REPO}/releases/latest").Result;
+            string loc = resp.Headers.Location?.ToString();
+            if (string.IsNullOrEmpty(loc)) return null;
+            int i = loc.LastIndexOf("/tag/", StringComparison.Ordinal);
+            if (i < 0) return null;
+            string tag = loc.Substring(i + "/tag/".Length).Trim();
+            return string.IsNullOrEmpty(tag) ? null : tag;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Add a token when one is available — an authenticated API call gets 5000/hour instead
+    /// of 60, which matters on a machine running many windows.</summary>
+    static void AddGitHubAuth(HttpClient http)
+    {
+        try
+        {
+            string token = Environment.GetEnvironmentVariable("GITHUB_TOKEN")
+                        ?? Environment.GetEnvironmentVariable("GH_TOKEN");
+            if (!string.IsNullOrWhiteSpace(token))
+                http.DefaultRequestHeaders.Authorization =
+                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Trim());
+        }
+        catch { }
+    }
+
+    /// <summary>Human-readable reason for a failed GitHub call. Turns the raw
+    /// "403 (rate limit exceeded)" aggregate into something actionable.</summary>
+    static string DescribeGitHubFailure(Exception ex)
+    {
+        var e = (ex as AggregateException)?.InnerException ?? ex;
+        if (e is HttpRequestException hre && hre.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            return "GitHub API rate limit exceeded (60/hour for unauthenticated requests).\n" +
+                   "  This resets within the hour. Set GITHUB_TOKEN to raise it to 5000/hour.";
+        return $"{e.GetType().Name}: {e.Message}";
     }
 
     /// <summary>
@@ -336,13 +401,26 @@ class Program
             FetchLatestRelease();
             ShowCachedUpdateNotice(force: true);
         }
-        catch (Exception ex) { Console.Error.WriteLine($"[update] {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { Console.Error.WriteLine($"[update] {DescribeGitHubFailure(ex)}"); }
     }
 
     static void FetchLatestRelease()
     {
+        StampUpdateAttempt();
+
+        // Redirect first — it carries the tag and costs no API quota. Only the version is needed
+        // here; ShowCachedUpdateNotice reads tag_name out of the cache.
+        string tag = ResolveLatestTagViaRedirect();
+        if (!string.IsNullOrEmpty(tag))
+        {
+            Directory.CreateDirectory(UpdateCacheDir);
+            File.WriteAllText(UpdateCacheFile, $"{{\"tag_name\":\"{tag}\"}}");
+            return;
+        }
+
         using var http = new HttpClient();
         http.DefaultRequestHeaders.Add("User-Agent", "clibridge4unity");
+        AddGitHubAuth(http);
         http.Timeout = TimeSpan.FromSeconds(5);
         string json = http.GetStringAsync(
             $"https://api.github.com/repos/{GITHUB_REPO}/releases/latest").Result;
@@ -432,6 +510,27 @@ class Program
             File.WriteAllLines(CompileTimesFile, allLines);
         }
         catch { }
+    }
+
+    /// <summary>Wait budget for this project's domain reload, derived from measured history.
+    /// 0 when there is no history, so the caller keeps the server's hint.</summary>
+    /// <remarks>The server hint is a fixed 300s for every project. A project that has grown past it
+    /// fails at the finish line — a reload measured at 326s was abandoned 26s short — and because
+    /// only successful waits were ever recorded, such a project never accumulated the history that
+    /// would have raised its own budget. Headroom over the worst observed reload, capped so a
+    /// pathological reading cannot strand the caller for a quarter of an hour.</remarks>
+    static int GetCompileBudgetSeconds(string projectPath)
+    {
+        try
+        {
+            var times = ReadCompileTimes(Path.GetFileName(Path.GetFullPath(projectPath)));
+            if (times.Count == 0) return 0;
+            int sum = 0, max = 0;
+            foreach (var t in times) { sum += t; if (t > max) max = t; }
+            int avg = sum / times.Count;
+            return Math.Min(900, Math.Max(avg * 5 / 2, max * 3 / 2));
+        }
+        catch { return 0; }
     }
 
     static List<int> ReadCompileTimes(string projectName)
@@ -781,13 +880,30 @@ class Program
 
         try
         {
-            // Fetch latest release info
+            // Resolve the version via the redirect — no API quota consumed. The REST call is only a
+            // fallback, so an exhausted rate limit no longer blocks updating.
             using var http = new HttpClient();
             http.DefaultRequestHeaders.Add("User-Agent", "clibridge4unity");
-            string json = http.GetStringAsync(
-                $"https://api.github.com/repos/{GITHUB_REPO}/releases/latest").Result;
+            AddGitHubAuth(http);
 
-            string latestVersion = ExtractJsonString(json, "tag_name")?.TrimStart('v');
+            string json = null;
+            string latestVersion = ResolveLatestTagViaRedirect()?.TrimStart('v');
+            if (string.IsNullOrEmpty(latestVersion))
+            {
+                try
+                {
+                    json = http.GetStringAsync(
+                        $"https://api.github.com/repos/{GITHUB_REPO}/releases/latest").Result;
+                    latestVersion = ExtractJsonString(json, "tag_name")?.TrimStart('v');
+                }
+                catch (Exception fetchEx)
+                {
+                    Console.Error.WriteLine($"Error: could not reach GitHub — {DescribeGitHubFailure(fetchEx)}");
+                    Console.Error.WriteLine($"  Run: irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
+                    return EXIT_COMMAND_ERROR;
+                }
+            }
+
             if (string.IsNullOrEmpty(latestVersion))
             {
                 Console.Error.WriteLine("Error: Could not determine latest version.");
@@ -814,10 +930,11 @@ class Program
 
             Console.WriteLine($"Updating v{CLI_VERSION} → v{latestVersion}...");
 
-            // Find the exe download URL from release assets
+            // Asset URLs are deterministic, so the API JSON is optional here. Scan it when we happen
+            // to have it (fallback path); otherwise construct the canonical release-download URL.
             string exeUrl = null;
             int searchStart = 0;
-            while (true)
+            while (json != null)
             {
                 int urlIdx = json.IndexOf("\"browser_download_url\"", searchStart, StringComparison.Ordinal);
                 if (urlIdx < 0) break;
@@ -829,6 +946,7 @@ class Program
                 }
                 searchStart = urlIdx + 1;
             }
+            exeUrl ??= $"https://github.com/{GITHUB_REPO}/releases/download/v{latestVersion}/clibridge4unity.exe";
 
             if (exeUrl == null)
             {
@@ -3427,9 +3545,22 @@ class Program
         if (TryDiscoverPipeNameFromHeartbeat(projectPath, pipeName, out var discoveredPipeName))
             pipeName = discoveredPipeName;
 
+        // Budget from this project's measured history, never below the server's hint. A fixed
+        // ceiling fails silently on a project that has outgrown it: a reload measured at 326s died
+        // against a 300s budget 26 seconds before it would have succeeded.
+        int historyBudget = GetCompileBudgetSeconds(projectPath);
+        if (historyBudget > timeoutSeconds)
+        {
+            CliTrace("WaitForCompilationAndReconnect", $"budget raised {timeoutSeconds}s -> {historyBudget}s from measured history");
+            timeoutSeconds = historyBudget;
+        }
+
         CliTrace("WaitForCompilationAndReconnect", $"begin timeoutSec={timeoutSeconds}, requestedAt={requestedAt:O}");
-        Console.WriteLine($"\n[CLI] Waiting for Unity to complete compilation (up to {timeoutSeconds} seconds)...");
-        Console.WriteLine($"[CLI] Pipe name: {pipeName}");
+        // Progress goes to stderr, results to stdout. This loop can run for minutes, and progress on
+        // stdout is swallowed whole by `| tail`/`| head` (which buffer to EOF) — turning a working
+        // command into a silent multi-minute hang that reads as a lock-up. stderr survives the pipe.
+        Console.Error.WriteLine($"\n[CLI] Waiting for Unity to complete compilation (up to {timeoutSeconds} seconds)...");
+        Console.Error.WriteLine($"[CLI] Pipe name: {pipeName}");
 
         // Wall-clock, NOT an iteration counter. A per-iteration `elapsed += pollInterval` assumes
         // each poll costs exactly pollInterval, but a poll also pays Thread.Sleep + WakeUnityEditor
@@ -3445,6 +3576,7 @@ class Program
         bool hasConnectedOnce = false;
         long idleSinceMs = -1; // when Unity first reported idle-with-stale-timestamp (-1 = not idle)
         bool hasRetriggered = false;
+        bool sawCompiling = false; // Unity positively reported compiling at least once
 
         while (clock.ElapsedMilliseconds < deadlineMs)
         {
@@ -3464,7 +3596,7 @@ class Program
                 if (!hasConnectedOnce)
                 {
                     CliTrace("WaitForCompilationAndReconnect", $"reconnected after {currentSeconds}s attempts={attemptCount}");
-                    Console.WriteLine($"[CLI] Reconnected to Unity after {currentSeconds} seconds (attempt #{attemptCount})");
+                    Console.Error.WriteLine($"[CLI] Reconnected to Unity after {currentSeconds} seconds (attempt #{attemptCount})");
                     hasConnectedOnce = true;
                 }
 
@@ -3505,7 +3637,7 @@ class Program
                     CliTrace("WaitForCompilationAndReconnect", $"STATUS read timeout after {STATUS_READ_TIMEOUT_MS}ms — main thread likely wedged");
                     if (currentSeconds - lastUpdateSeconds >= 5)
                     {
-                        Console.WriteLine($"[CLI] Unity accepted the connection but did not answer STATUS within {STATUS_READ_TIMEOUT_MS / 1000}s — main thread may be wedged ({currentSeconds}s / {timeoutSeconds}s)");
+                        Console.Error.WriteLine($"[CLI] Unity accepted the connection but did not answer STATUS within {STATUS_READ_TIMEOUT_MS / 1000}s — main thread may be wedged ({currentSeconds}s / {timeoutSeconds}s)");
                         lastUpdateSeconds = currentSeconds;
                     }
                     continue;
@@ -3591,7 +3723,7 @@ class Program
                         {
                             // Unity has been idle for 15s without compiling our request.
                             // Re-send COMPILE — original request was likely lost during domain reload.
-                            Console.WriteLine($"[CLI] Unity idle for {idleStaleSeconds}s without compiling. Re-triggering...");
+                            Console.Error.WriteLine($"[CLI] Unity idle for {idleStaleSeconds}s without compiling. Re-triggering...");
                             CliTrace("WaitForCompilationAndReconnect", "idle stale - retrigger compile");
                             hasRetriggered = true;
                             requestedAt = DateTime.Now;
@@ -3624,7 +3756,8 @@ class Program
                                 eta = $", avg {avgSec}s";
                         }
                     }
-                    Console.WriteLine($"[CLI] Unity is still compiling... ({currentSeconds}s elapsed{eta})");
+                    sawCompiling = true; // Unity confirmed it is mid-compile — see the timeout exit
+                    Console.Error.WriteLine($"[CLI] Unity is still compiling... ({currentSeconds}s elapsed{eta})");
                 }
             }
             catch (TimeoutException)
@@ -3633,7 +3766,7 @@ class Program
                 if (currentSeconds - lastUpdateSeconds >= 5)
                 {
                     CliTrace("WaitForCompilationAndReconnect", $"connect timeout elapsed={currentSeconds}s attempts={attemptCount}");
-                    Console.WriteLine($"[CLI] Waiting for Unity to restart... ({currentSeconds}s / {timeoutSeconds}s, attempt #{attemptCount})");
+                    Console.Error.WriteLine($"[CLI] Waiting for Unity to restart... ({currentSeconds}s / {timeoutSeconds}s, attempt #{attemptCount})");
                     lastUpdateSeconds = currentSeconds;
                 }
             }
@@ -3643,16 +3776,28 @@ class Program
                 if (currentSeconds - lastUpdateSeconds >= 5)
                 {
                     CliTrace("WaitForCompilationAndReconnect", $"connection error {ex.GetType().Name}: {ex.Message}");
-                    Console.WriteLine($"[CLI] Connection error: {ex.GetType().Name} - {ex.Message} ({currentSeconds}s / {timeoutSeconds}s)");
+                    Console.Error.WriteLine($"[CLI] Connection error: {ex.GetType().Name} - {ex.Message} ({currentSeconds}s / {timeoutSeconds}s)");
                     lastUpdateSeconds = currentSeconds;
                 }
             }
+        }
+
+        // Record the give-up time when Unity positively reported compiling, so the next run budgets
+        // for a project this slow. Only recording successes meant a project that always overran the
+        // budget never built the history that would have raised it. Gated on sawCompiling: a wait
+        // that timed out against a wedged or idle editor says nothing about compile duration.
+        if (sawCompiling)
+        {
+            CliTrace("WaitForCompilationAndReconnect", $"recording overrun {timeoutSeconds}s as a lower bound for budget");
+            RecordCompileTime(projectPath, timeoutSeconds);
         }
 
         Console.Error.WriteLine($"\n[CLI] Error: Timeout after {timeoutSeconds} seconds waiting for compilation");
         CliTrace("WaitForCompilationAndReconnect", $"timeout timeoutSec={timeoutSeconds}, attempts={attemptCount}, connected={hasConnectedOnce}");
         Console.Error.WriteLine($"[CLI] Total connection attempts: {attemptCount}");
         Console.Error.WriteLine($"[CLI] Reconnected at least once: {hasConnectedOnce}");
+        if (sawCompiling)
+            Console.Error.WriteLine($"[CLI] Unity was still compiling when the budget expired — the next run will allow longer.");
         return EXIT_TIMEOUT;
     }
 
@@ -5543,6 +5688,32 @@ class Program
         md.AppendLine();
         md.AppendLine("When something IS broken, escalate cheapest-first: `STATUS` (shows current compile errors) → `LINT` (offline syntax) → `LINT unity` (type binding) → `COMPILE` (ground truth — domain reload, breaks the pipe; needed for source generators / post-compile callbacks).");
         md.AppendLine();
+        md.AppendLine("**Pick ONE — never `LINT unity` followed by `COMPILE`.** `LINT unity` exists as the cheap substitute for `COMPILE`. Running both pays for both (a per-asmdef compile AND a full domain reload) and the second answers nothing the first didn't. If `LINT` is clean you don't need `COMPILE`; if it found errors, fix them.");
+        md.AppendLine();
+        md.AppendLine("### NEVER pipe COMPILE through `tail` / `head`");
+        md.AppendLine();
+        md.AppendLine("`COMPILE` streams progress for as long as the reload takes — minutes on a large project. `tail` and `head`");
+        md.AppendLine("buffer their input until EOF, so `COMPILE 2>&1 | tail -3` shows **nothing at all** until it finishes. A working");
+        md.AppendLine("command then looks like a dead terminal and gets killed. For `COMPILE` the output *is* the progress — let it stream,");
+        md.AppendLine("then use `LAST` if you want to re-read it filtered.");
+        md.AppendLine();
+        md.AppendLine("### COMPILE is guarded — read the verdict, don't retry blindly");
+        md.AppendLine();
+        md.AppendLine("The CLI refuses reloads that cannot accomplish anything, before it opens a pipe:");
+        md.AppendLine();
+        md.AppendLine("- `skipped: uptodate` (exit 0) — every source is older than the compiled assemblies. Already compiled; nothing to do. This is SUCCESS, not a failure.");
+        md.AppendLine("- `skipped: looping` (exit 1) — repeated attempts with nothing changed in between. Something is blocking compilation (play mode, a Player Build, a modal dialog, a busy main thread). **Retrying cannot clear it** — run `STATUS` or `DIAG` and fix the cause.");
+        md.AppendLine();
+        md.AppendLine("`COMPILE force` bypasses both. Never wrap `COMPILE` in a retry loop: it domain-reloads Unity and breaks every");
+        md.AppendLine("other window's in-flight command each time it actually runs.");
+        md.AppendLine();
+        md.AppendLine("### Blocked states are terminal, not transient");
+        md.AppendLine();
+        md.AppendLine("- *\"Cannot compile during play mode\"* → run `STOP` first. Waiting will not help.");
+        md.AppendLine("- *\"Unity is in the middle of a Player Build\"* → wait for the build; all commands are blocked until it ends.");
+        md.AppendLine();
+        md.AppendLine("Branch on the **exit code**, not on grepping stdout: `0` ok · `11` compile errors · `12` play mode · `13` safe mode · `14` timeout · `10` no connection. A clean compile prints no error lines, so a grep for `error` matches nothing and success is indistinguishable from a filter miss.");
+        md.AppendLine();
         md.AppendLine("## ANALYZE — the main reference point (works without Unity)");
         md.AppendLine();
         md.AppendLine("One query, both worlds: C# symbols (Roslyn index) and serialized asset wiring (GUID graph).");
@@ -5637,7 +5808,7 @@ class Program
         md.AppendLine("  - `LAST -grep ERROR` — case-insensitive substring filter on the most recent");
         md.AppendLine("  - `LAST -all -grep CS0246` — same filter across every cached response");
         md.AppendLine();
-        md.AppendLine("**Always prefer `LAST` over piping a fresh command through `head` / `tail` / `grep`.** Re-running `LINT` / `LOG` / `INSPECTOR` costs Unity time, can invalidate caches, and can race with ongoing imports.");
+        md.AppendLine("**Always prefer `LAST` over piping a fresh command through `head` / `tail` / `grep`.** Re-running `LINT` / `LOG` / `INSPECTOR` costs Unity time, can invalidate caches, and can race with ongoing imports. For long-running commands (`COMPILE`, `BUILD`, `TEST`) piping is worse than wasteful: `tail`/`head` buffer to EOF and hide all progress, so the command looks hung. Run it bare, then filter with `LAST`.");
 
         // Determine target path
         string targetPath;
