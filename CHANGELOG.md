@@ -1,5 +1,70 @@
 # Changelog
 
+## v1.1.69 — 2026-08-06
+
+## v1.1.69
+
+### New
+
+- **Long-running commands can answer before they finish.** New `DetachAfterSeconds` on
+  `[BridgeCommand]`: once the grace period elapses, the caller receives an immediate
+  `status: running` envelope naming the command and how to follow it, instead of waiting out the
+  full timeout. The work is **not** cancelled — it keeps running and its effects still land; only
+  the caller stops waiting. Default (0) leaves every other command byte-identical.
+
+  Applied to the three commands with no upper bound:
+  - `MENU` (3s) — `ExecuteMenuItem` runs an arbitrary editor action; if it opens a modal the main
+    thread is blocked until a human clicks, and previously the caller waited the entire timeout for
+    an error.
+  - `REFRESH` (10s) — ran `AssetDatabase.Refresh(ForceUpdate)` synchronously before returning, so
+    despite advertising `reconnect` it blocked through the whole import sweep.
+  - `ASSET_RESERIALIZE` (10s) — with no arguments this reserialises every asset in the project.
+
+  The other 44 commands are bounded scene/component/query work that callers want inline, so they
+  are unchanged; `BUILD` and `TEST` already stream, and `COMPILE` already returns with `reconnect`.
+
+- **`EDITORLOG reload [N]`** — surfaces Unity's own `Domain Reload Profiling` tree from the log:
+  total reload time across recent reloads, a full breakdown of the most recent one, and the worst
+  phases averaged over the sample. Unity measures this on every reload and nothing else reads it.
+  Entirely offline — no pipe, no daemon — so it works against a closed or wedged editor, and it
+  scans from the end of the file so a multi-GB log costs the same as a small one.
+
+  It calls out `SetupLoadedEditorAssemblies` specifically, since that is where `[InitializeOnLoad]`
+  and `[DidReloadScripts]` run — usually the phase a project can actually do something about.
+
+- **`EDITORLOG` now refuses to pass off another project's log as yours.** When the log can only be
+  resolved by falling back to the shared default, it says so loudly. Unity rotates
+  `Editor.log` → `Editor-prev.log` on startup while a still-running editor keeps writing to its
+  renamed handle, so with several editors open the default log routinely belongs to a different
+  project. Reload timings are meaningless if misattributed.
+
+### Fixed
+
+- **`COMPILE` could send a caller into an infinite retry loop — a regression introduced in 1.1.67.**
+  The compile guard added in that release short-circuits a redundant compile with
+  `skipped: uptodate` and exit 0. That is a success, but it contains none of the words callers
+  filter on, so the near-universal `COMPILE | grep -E "Compilation completed|error"` printed
+  **nothing** — and an agent reading empty output concludes failure and runs it again, forever.
+  Before the guard existed the same command actually compiled and printed "Compilation completed",
+  which matched.
+
+  The up-to-date path now closes with `Compilation completed — nothing to do (already up to date).`,
+  and the loop refusal leads with `Error:` so it surfaces through error filters too. Both verified
+  against the exact failing pipeline.
+
+### Internal
+
+- Groundwork for a cross-process "a client is waiting" lease (`TickSignal`, a 16-byte memory-mapped
+  flag with a self-expiring deadline, plus a reflection binding to `EditorApplication.SignalTick`).
+  It is wired up, compiles, costs ~61 ns per idle poll and cannot strand the editor — but A/B
+  measurement found **no** speed benefit (9.6s vs 9.7s backgrounded compiles, and 9.6s minimised vs
+  9.8s restored). Script compilation runs out of process, so editor tick rate cannot affect it.
+  Shipped inert; it would only earn its place on a non-Windows build, where there is no
+  `PostMessage` wake path.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.68 — 2026-07-31
 
 ## v1.1.68

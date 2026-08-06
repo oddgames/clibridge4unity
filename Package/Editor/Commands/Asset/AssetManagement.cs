@@ -205,6 +205,9 @@ namespace clibridge4unity
                     "  ASSET_RESERIALIZE Assets/Prefabs/My.prefab     (specific asset)\n" +
                     "  ASSET_RESERIALIZE Assets/A.prefab Assets/B.mat (batch)",
             RequiresMainThread = true,
+            // With no paths this reserialises every asset in the project — minutes on a large one.
+            // Report back once it is clearly long-running instead of timing out and reading as failure.
+            DetachAfterSeconds = 10,
             Aliases = new[] { "REIMPORT" })]
         public static string Reserialize(string data)
         {

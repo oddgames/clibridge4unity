@@ -46,6 +46,25 @@ namespace clibridge4unity
         public int TimeoutSeconds { get; set; } = 0;
 
         /// <summary>
+        /// Seconds to wait for a result before answering "still running" instead of continuing to
+        /// block. 0 (default) keeps the classic behaviour: wait for the result or the timeout.
+        /// </summary>
+        /// <remarks>
+        /// For an operation with no upper bound — <c>ExecuteMenuItem</c>, a full
+        /// <c>AssetDatabase.Refresh</c>, <c>ForceReserializeAssets</c> over a whole project — waiting
+        /// for completion means the caller gets nothing at all until it finishes or the deadline
+        /// expires, and a deadline expiry reads as failure even though the work succeeded. Worse, a
+        /// menu item that opens a modal never returns and the caller waits out the full timeout for
+        /// an error.
+        ///
+        /// With this set, the command is dispatched to the main thread as usual, but once the grace
+        /// period elapses the caller is answered immediately with an accepted/still-running envelope
+        /// naming the command and how to follow it. The work is NOT cancelled — it keeps running and
+        /// its effects still land; only the caller stops waiting.
+        /// </remarks>
+        public int DetachAfterSeconds { get; set; } = 0;
+
+        /// <summary>
         /// Related commands suggested to the caller on successful responses.
         /// Appended as "Related: CMD1, CMD2, ..." so the AI is reminded of adjacent tools.
         /// </summary>

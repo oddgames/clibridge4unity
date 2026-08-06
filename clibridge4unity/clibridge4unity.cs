@@ -204,6 +204,26 @@ class Program
 
     // Track if last response indicated main thread timeout
     private static bool _lastResponseContainedMainThreadTimeout;
+
+    // Held for the life of the invocation; re-armed while waiting on a long operation.
+    private static TickSignal _tickLease;
+
+    // Diagnostics that never wait on Unity — no point asking the editor to burn CPU for them.
+    private static bool IsTrivialForTick(string cmdUpper)
+        => cmdUpper is "PING" or "PROBE" or "DIAG" or "VERSION" or "HELP" or "LAST"
+                    or "ANALYZE" or "CODE_ANALYZE" or "CODE_SEARCH" or "MAP" or "LINT"
+                    or "EDITORLOG" or "ELOG" or "EDITORLOGS" or "SETUP" or "UPDATE" or "HOOK";
+
+    private static int SafeCurrentPid()
+    {
+        try { return Process.GetCurrentProcess().Id; } catch { return 0; }
+    }
+
+    /// <summary>Re-arm the tick lease. Called from the poll loops that wait minutes on Unity.</summary>
+    private static void RenewTickLease()
+    {
+        try { _tickLease?.Request(SafeCurrentPid(), TickSignal.DefaultLease); } catch { }
+    }
     private static string _lastCommandResponse = "";
     private static long _preCompileLogId;
     private static string _intent;       // set via --intent flag; purely descriptive
@@ -1624,6 +1644,20 @@ class Program
         }
         catch { }
 
+        // Tick lease — tell Unity a client is waiting so a backgrounded editor keeps its loop at full
+        // rate. Matters most across a domain reload, when the pipe is down and the server has no
+        // other way to know. Deadline-based and re-armed while waiting, so killing this process
+        // stops the fast ticking within seconds instead of pegging an editor core forever.
+        if (!IsTrivialForTick(cmdUpper))
+        {
+            try
+            {
+                _tickLease = TickSignal.Open(projectPath, create: true);
+                _tickLease?.Request(SafeCurrentPid(), TickSignal.DefaultLease);
+            }
+            catch { }
+        }
+
         // Compile guard — refuse a domain reload that cannot accomplish anything, before touching
         // the pipe. Deliberately CLI-side: the Unity-side skip in CoreCommands.Compile is disabled
         // when the daemon is down (ScanModifiedScripts sets scanFailed), which is precisely when a
@@ -2304,7 +2338,8 @@ class Program
         Console.Error.WriteLine("  WAKEUP refresh             Bring to foreground + force recompile (Ctrl+R)");
         Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");
         Console.Error.WriteLine("  SCREENSHOT [view]          Capture Unity window screenshot");
-        Console.Error.WriteLine("  EDITORLOG [N|errors|grep PAT|path]  Tail Unity's Editor.log FILE (works with no pipe / on clones; aliases: ELOG)");
+        Console.Error.WriteLine("  EDITORLOG [N|errors|grep PAT|path|reload [N]]  Tail Unity's Editor.log FILE (works with no pipe / on clones; aliases: ELOG)");
+        Console.Error.WriteLine("                                      'reload' shows Unity's own domain-reload timing breakdown");
         Console.Error.WriteLine("  RELEASENOTES [from] [to] [-c Cat] [-g regex]  Unity release notes; bare = current project version -> latest (--list to browse)");
         Console.Error.WriteLine("  LAST [N|-n N|-all|-list] [-head N|-tail N|-grep PAT]  Replay one of the last 10 responses (no re-run)");
         Console.Error.WriteLine("  OPEN                       Launch Unity (or restart if in Safe Mode)");
@@ -3583,6 +3618,10 @@ class Program
             Thread.Sleep(pollInterval);
             attemptCount++;
             int currentSeconds = (int)(clock.ElapsedMilliseconds / 1000);
+
+            // Re-arm every poll: the lease deliberately expires, so a client that dies mid-wait
+            // stops the editor ticking at full rate a few seconds later.
+            RenewTickLease();
 
             // Wake Unity so it processes compilation even in background
             WakeUnityEditor(projectPath);
@@ -5071,9 +5110,128 @@ class Program
     ///   EDITORLOG 400        last N lines           EDITORLOG grep <pat> lines matching regex/substr
     ///   EDITORLOG path       print the resolved log path only
     /// </summary>
+    /// <summary>Parse Unity's own "Domain Reload Profiling" blocks out of Editor.log and report the
+    /// most recent ones, worst phases first.</summary>
+    /// <remarks>Unity emits a full hierarchical timing tree on every reload and then nothing reads
+    /// it. The tail is scanned from the end of the file so a multi-GB log costs the same as a small
+    /// one. `SetupLoadedEditorAssemblies` is called out because that is where [InitializeOnLoad] and
+    /// [DidReloadScripts] user code runs — usually the phase a project can actually do something
+    /// about.</remarks>
+    static int ShowReloadProfiles(string logPath, int want, bool logIsAttributed, string projectPath)
+    {
+        if (!logIsAttributed)
+        {
+            // Reload timings are only meaningful per project, so an unattributed log is worth a loud
+            // warning rather than a footnote — the numbers may be another editor's entirely.
+            Console.Error.WriteLine("WARNING: this log could not be attributed to this project.");
+            Console.Error.WriteLine($"         Falling back to the shared default log: {logPath}");
+            Console.Error.WriteLine("         Several editors target it when launched without -logFile, and the first to");
+            Console.Error.WriteLine("         open it owns it — the timings below may belong to a different project.");
+            Console.Error.WriteLine($"         Confirm with: clibridge4unity -d \"{projectPath}\" EDITORLOG path");
+            Console.Error.WriteLine();
+        }
+
+        // Reload blocks are ~25 lines; take a large tail so `want` blocks are almost always present
+        // even on a chatty log, without ever reading the whole file.
+        string text;
+        try { text = TailFile(logPath, 4 * 1024 * 1024); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: could not read {logPath}: {ex.Message}");
+            return EXIT_COMMAND_ERROR;
+        }
+
+        var lines = text.Split('\n');
+        var blocks = new List<(int Total, List<(int Depth, string Name, int Ms)> Rows)>();
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var head = lines[i];
+            int hIdx = head.IndexOf("Domain Reload Profiling:", StringComparison.Ordinal);
+            if (hIdx < 0) continue;
+
+            int total = 0;
+            var mTotal = System.Text.RegularExpressions.Regex.Match(head, @"Domain Reload Profiling:\s*(\d+)\s*ms");
+            if (mTotal.Success) int.TryParse(mTotal.Groups[1].Value, out total);
+
+            var rows = new List<(int, string, int)>();
+            for (int j = i + 1; j < lines.Length; j++)
+            {
+                string raw = lines[j].TrimEnd('\r');
+                if (raw.Length == 0 || raw[0] != '\t') break; // block ends at the first non-indented line
+                int depth = 0;
+                while (depth < raw.Length && raw[depth] == '\t') depth++;
+                var m = System.Text.RegularExpressions.Regex.Match(raw.Trim(), @"^(.+?)\s*\((\d+)ms\)$");
+                if (!m.Success) continue;
+                int.TryParse(m.Groups[2].Value, out int ms);
+                rows.Add((depth, m.Groups[1].Value.Trim(), ms));
+            }
+            if (rows.Count > 0) blocks.Add((total, rows));
+        }
+
+        if (blocks.Count == 0)
+        {
+            Console.WriteLine($"log: {logPath}");
+            Console.WriteLine("No 'Domain Reload Profiling' blocks in the scanned tail.");
+            Console.WriteLine("Unity writes one per domain reload — trigger a COMPILE, or the log may have rolled.");
+            return EXIT_SUCCESS;
+        }
+
+        var recent = blocks.Skip(Math.Max(0, blocks.Count - want)).ToList();
+        Console.WriteLine($"log: {logPath}");
+        Console.WriteLine($"reloads found in tail: {blocks.Count}   showing last {recent.Count}");
+        Console.WriteLine();
+
+        var totals = recent.Select(b => b.Total).Where(t => t > 0).ToList();
+        if (totals.Count > 0)
+            Console.WriteLine($"total reload time: min {totals.Min()}ms  median {Median(totals)}ms  max {totals.Max()}ms");
+        Console.WriteLine();
+
+        // Most recent block in full — the one the caller just felt.
+        var last = recent[recent.Count - 1];
+        Console.WriteLine($"--- most recent reload: {last.Total}ms ---");
+        foreach (var (depth, name, ms) in last.Rows)
+        {
+            if (ms == 0 && depth > 2) continue; // trim zero-cost leaves, keep the shape readable
+            string bar = ms >= 100 ? "  " + new string('#', Math.Min(30, ms / 100)) : "";
+            Console.WriteLine($"  {new string(' ', (depth - 1) * 2)}{name,-38} {ms,6}ms{bar}");
+        }
+        Console.WriteLine();
+
+        // Worst phases across the sample, so a one-off spike doesn't dominate the read.
+        var agg = new Dictionary<string, (int Sum, int Max, int Count)>(StringComparer.Ordinal);
+        foreach (var b in recent)
+            foreach (var (_, name, ms) in b.Rows)
+            {
+                agg.TryGetValue(name, out var cur);
+                agg[name] = (cur.Sum + ms, Math.Max(cur.Max, ms), cur.Count + 1);
+            }
+        Console.WriteLine($"--- worst phases (mean over {recent.Count} reloads) ---");
+        foreach (var kv in agg.OrderByDescending(k => k.Value.Sum / Math.Max(1, k.Value.Count)).Take(8))
+            Console.WriteLine($"  {kv.Key,-38} mean {kv.Value.Sum / Math.Max(1, kv.Value.Count),6}ms   max {kv.Value.Max,6}ms");
+
+        if (agg.TryGetValue("SetupLoadedEditorAssemblies", out var setup) && setup.Count > 0)
+        {
+            int mean = setup.Sum / setup.Count;
+            Console.WriteLine();
+            Console.WriteLine($"note: SetupLoadedEditorAssemblies averages {mean}ms — this is where [InitializeOnLoad] and");
+            Console.WriteLine("      [DidReloadScripts] run. If it dominates, the cost is your own editor startup code.");
+        }
+        return EXIT_SUCCESS;
+    }
+
+    static int Median(List<int> xs)
+    {
+        var s = xs.OrderBy(x => x).ToList();
+        return s.Count == 0 ? 0 : (s.Count % 2 == 1 ? s[s.Count / 2] : (s[s.Count / 2 - 1] + s[s.Count / 2]) / 2);
+    }
+
     static int HandleEditorLog(string projectPath, UnityProcessInfo unityInfo, string data)
     {
-        // Resolve the log path, most-specific first.
+        // Resolve the log path, most-specific first. Track HOW it was resolved: the last step is a
+        // blind fallback to the shared default, which several editors target at once when none was
+        // launched with -logFile. Whoever opened first owns it, so the file can easily belong to a
+        // different project — reporting its contents as this project's is worse than saying nothing.
+        bool logIsAttributed = true;
         string logPath = unityInfo?.EditorLogPath;
         if (logPath == null || !File.Exists(logPath))
             logPath = FindEditorLogForProject(projectPath);
@@ -5082,7 +5240,7 @@ class Program
             string fallback = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "Unity", "Editor", "Editor.log");
-            if (File.Exists(fallback)) logPath = fallback;
+            if (File.Exists(fallback)) { logPath = fallback; logIsAttributed = false; }
         }
         if (logPath == null || !File.Exists(logPath))
         {
@@ -5101,6 +5259,17 @@ class Program
         {
             Console.WriteLine(logPath);
             return EXIT_SUCCESS;
+        }
+
+        // EDITORLOG reload — where domain-reload time actually goes. Unity already measures this and
+        // writes it to the log; nothing else surfaces it. Answers "why is my compile slow" with the
+        // editor's own numbers instead of guesswork, and needs no pipe, so it works on a wedged or
+        // closed editor.
+        if (first == "reload" || first == "reloads")
+        {
+            int want = 5;
+            if (tokens.Length > 1 && int.TryParse(tokens[1], out int n) && n > 0) want = Math.Min(n, 50);
+            return ShowReloadProfiles(logPath, want, logIsAttributed, projectPath);
         }
 
         var fi = new FileInfo(logPath);

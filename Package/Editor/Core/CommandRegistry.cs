@@ -29,6 +29,7 @@ namespace clibridge4unity
         public bool RequiresMainThread { get; set; }
         public bool IsStreaming { get; set; }
         public int TimeoutSeconds { get; set; }
+        public int DetachAfterSeconds { get; set; }
         public string[] RelatedCommands { get; set; }
         public string[] Aliases { get; set; }
         public MethodInfo Method { get; set; }
@@ -68,6 +69,39 @@ namespace clibridge4unity
         private static readonly ConcurrentQueue<MainThreadWork> _mainThreadQueue = new ConcurrentQueue<MainThreadWork>();
         private static volatile bool _isRunning = true;
         private static bool _editorUpdateSubscribed;
+
+        // Cross-process "a client is waiting" lease, honoured while the local work queue is empty —
+        // i.e. the domain-reload window, where the pipe is down and this process cannot otherwise
+        // know the CLI is still there. Opened lazily; null whenever the flag file is absent, which
+        // simply restores the previous behaviour.
+        private static TickSignal _tickSignal;
+        private static bool _tickSignalTried;
+        private static string _projectRootCached; // captured on the main thread; see the ctor
+
+        // EditorApplication.SignalTick is internal: it schedules the next editor tick immediately,
+        // which is what keeps the loop at full rate while unfocused. Bound by reflection because it
+        // is not public API — a null binding just means this fallback is unavailable on this version.
+        private static Action _signalTick;
+        private static bool _signalTickTried;
+
+        private static void EnsureSignalTickBound()
+        {
+            if (_signalTickTried) return;
+            _signalTickTried = true;
+            try
+            {
+                var m = typeof(EditorApplication).GetMethod("SignalTick",
+                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                if (m != null)
+                    _signalTick = (Action)Delegate.CreateDelegate(typeof(Action), m);
+                BridgeDiagnostics.Log("CommandRegistry", _signalTick != null
+                    ? "SignalTick bound" : "SignalTick unavailable on this Unity version");
+            }
+            catch (Exception ex)
+            {
+                BridgeDiagnostics.Log("CommandRegistry", $"SignalTick bind failed: {ex.GetType().Name}");
+            }
+        }
 
         // Win32 APIs for waking Unity's message pump when in background
         [DllImport("user32.dll")]
@@ -158,6 +192,10 @@ namespace clibridge4unity
             _mainThreadContext = SynchronizationContext.Current;
             _lastTimerTick = DateTime.Now;
             BridgeDiagnostics.Log("CommandRegistry", $"sync context: {_mainThreadContext?.GetType().Name ?? "null"}");
+
+            // Application.dataPath is main-thread-only; the wake loop needs the project root, so
+            // capture it here (this ctor runs on the main thread via [InitializeOnLoad]).
+            try { _projectRootCached = System.IO.Directory.GetParent(Application.dataPath)?.FullName; } catch { }
 
             StartBuildPolling();
 
@@ -276,6 +314,33 @@ namespace clibridge4unity
             }
         }
 
+        /// <summary>True while some CLI process holds a live tick lease. Opened lazily and only
+        /// once — a missing flag file means no client ever asked, so we stay on the old behaviour.</summary>
+        private static bool IsClientWaiting()
+        {
+            try
+            {
+                if (!_tickSignalTried)
+                {
+                    _tickSignalTried = true;
+                    // Cached at init — Application.dataPath cannot be read from this thread.
+                    if (!string.IsNullOrEmpty(_projectRootCached))
+                        _tickSignal = TickSignal.Open(_projectRootCached, create: false);
+                }
+                return _tickSignal != null && _tickSignal.IsActive(out _, out _);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Main-thread half of the wake: drain anything queued, then ask Unity to schedule
+        /// the next tick straight away so a backgrounded editor keeps moving.</summary>
+        private static void PumpTick()
+        {
+            ProcessAllPendingWork();
+            EnsureSignalTickBound();
+            try { _signalTick?.Invoke(); } catch { }
+        }
+
         /// <summary>
         /// Background thread that posts work via SynchronizationContext AND
         /// sends Win32 messages to wake Unity's editor loop.
@@ -314,6 +379,19 @@ namespace clibridge4unity
                     else
                     {
                         cycle = 0;
+                        // Queue empty, but a client may still be waiting on the other side of a
+                        // domain reload. Reading the lease is ~61 ns, so polling it every idle cycle
+                        // is free; when it is live, wake the editor exactly as if work were pending.
+                        if (IsClientWaiting())
+                        {
+                            _mainThreadContext?.Post(_ => { EnsureEditorUpdateSubscribed(); PumpTick(); }, null);
+                            var waitHwnd = _unityWindowHandle;
+                            if (waitHwnd != IntPtr.Zero)
+                            {
+                                PostMessage(waitHwnd, WM_NULL, IntPtr.Zero, IntPtr.Zero);
+                                PostMessage(waitHwnd, WM_TIMER, IntPtr.Zero, IntPtr.Zero);
+                            }
+                        }
                         Thread.Sleep(10);
                     }
                 }
@@ -563,6 +641,7 @@ namespace clibridge4unity
                                 IsStreaming = attr.Streaming,
                                 TimeoutSeconds = attr.TimeoutSeconds > 0 ? attr.TimeoutSeconds
                                     : attr.RequiresMainThread ? 25 : 10,
+                                DetachAfterSeconds = attr.DetachAfterSeconds,
                                 RelatedCommands = attr.RelatedCommands ?? Array.Empty<string>(),
                                 Aliases = attr.Aliases ?? Array.Empty<string>(),
                                 Method = method,
@@ -906,11 +985,45 @@ namespace clibridge4unity
                 if (cmd.RequiresMainThread)
                 {
                     string desc = data?.Length > 80 ? $"{cmd.Name}|{data.Substring(0, 80)}..." : $"{cmd.Name}|{data}";
-                    result = await InvokeOnMainThread(
+                    var mainWork = InvokeOnMainThread(
                         () => cmd.Method.Invoke(cmd.Instance, args),
                         desc,
                         Math.Max(1000, cmd.TimeoutSeconds * 1000),
                         ct);
+
+                    if (cmd.DetachAfterSeconds > 0)
+                    {
+                        // Answer as soon as the grace period is up rather than holding the caller for
+                        // an operation with no upper bound. The work is left running — this is a
+                        // reply, not a cancellation — so its effects still land.
+                        var finished = await Task.WhenAny(mainWork, Task.Delay(cmd.DetachAfterSeconds * 1000, ct));
+                        if (finished != mainWork)
+                        {
+                            // Nobody will await mainWork now; observe its outcome so a later timeout
+                            // doesn't surface as an unobserved task exception.
+                            _ = mainWork.ContinueWith(t => { _ = t.Exception; },
+                                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+
+                            BridgeDiagnostics.Log("CommandRegistry",
+                                $"detached after {cmd.DetachAfterSeconds}s, still running: {desc}");
+
+                            Profiler.EndSample();
+                            return Response.SuccessWithData(new
+                            {
+                                status = "running",
+                                command = cmd.Name,
+                                detached = true,
+                                afterSeconds = cmd.DetachAfterSeconds,
+                                message = $"{cmd.Name} is still running on Unity's main thread after "
+                                        + $"{cmd.DetachAfterSeconds}s. It has NOT been cancelled — it keeps going and its "
+                                        + "effects will land. This reply is early so you are not left waiting.",
+                                followUp = "DIAG shows it under 'executingMainThreadWork'; STATUS reports when Unity is idle again.",
+                                note = "Do not re-issue the command — a second copy would queue behind this one."
+                            });
+                        }
+                    }
+
+                    result = await mainWork;
                 }
                 else
                 {

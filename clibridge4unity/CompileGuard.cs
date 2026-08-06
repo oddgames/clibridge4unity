@@ -154,18 +154,25 @@ static class CompileGuard
             if (asm >= srcTicks)
             {
                 var when = new DateTime(asm, DateTimeKind.Utc).ToLocalTime();
+                // The closing line deliberately carries the same wording a real compile emits.
+                // Callers routinely filter this command through `grep -E "Compilation completed|error"`,
+                // and a success that matches no known pattern reads as failure — which sends agents
+                // into a retry loop against a command that already succeeded.
                 return new Result(Verdict.UpToDate,
                     $"Already compiled — assemblies are newer than every source file.\n" +
                     $"  last compile : {when:yyyy-MM-dd HH:mm:ss} (Library/ScriptAssemblies)\n" +
                     $"  newest source: {Rel(srcPath, projectPath)}\n" +
-                    $"  Nothing to compile. Use 'COMPILE force' to reload anyway.");
+                    $"  Use 'COMPILE force' to reload anyway.\n" +
+                    $"Compilation completed — nothing to do (already up to date).");
             }
 
             // 2. Same inputs as the last N attempts and still not compiled — the request is looping.
             if (count > MaxIdenticalAttempts)
             {
+                // Leads with "Error:" for the same reason — a refusal that matches no filter is a
+                // silent failure, and silence is what makes a caller try again.
                 return new Result(Verdict.Looping,
-                    $"Refusing COMPILE — {count} consecutive attempts with no change in between.\n" +
+                    $"Error: refusing COMPILE — {count} consecutive attempts with no change in between.\n" +
                     $"  newest source: {Rel(srcPath, projectPath)} (unchanged since attempt 1)\n" +
                     $"  assemblies   : unchanged, so no compile has completed\n" +
                     $"  Something is blocking compilation (play mode, a Player Build, an open modal,\n" +

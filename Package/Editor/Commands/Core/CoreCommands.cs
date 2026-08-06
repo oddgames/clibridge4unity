@@ -749,6 +749,10 @@ namespace clibridge4unity
             Streaming = false,
             RequiresMainThread = true,
             TimeoutSeconds = 300,
+            // AssetDatabase.Refresh runs synchronously here, so the caller previously got nothing
+            // until the whole import sweep finished — minutes on a large project, and a reload will
+            // drop the pipe partway regardless. Answer once it is clearly a long sweep.
+            DetachAfterSeconds = 10,
             RelatedCommands = new[] { "COMPILE", "STATUS", "LOG" })]
         public static string Refresh()
         {
@@ -789,7 +793,11 @@ namespace clibridge4unity
             Usage = "MENU Window/General/Console\n" +
                     "  MENU Edit/Preferences\n" +
                     "  MENU GameObject/3D Object/Cube",
-            RequiresMainThread = true)]
+            RequiresMainThread = true,
+            // ExecuteMenuItem is completely unbounded — the item may open a modal, which blocks the
+            // main thread until a human clicks it. Answer after 3s rather than holding the caller
+            // (and every other window's queued work) hostage to an arbitrary editor action.
+            DetachAfterSeconds = 3)]
         public static string Menu(string data)
         {
             using var _profile = _markerMenu.Auto();
