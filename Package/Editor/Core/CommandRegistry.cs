@@ -1323,9 +1323,26 @@ namespace clibridge4unity
         public static string GetHeartbeatInfo()
         {
             var sb = new StringBuilder();
+            var snapshot = _mainThreadQueue.ToArray();
+            int pendingCount = snapshot.Count(w => !w.CompletionSource.Task.IsCanceled && !w.CompletionSource.Task.IsCompleted);
+
             if (_timerTickCount == 0)
             {
-                sb.AppendLine("heartbeat: no ticks yet (Unity may still be initializing)");
+                // OnEditorUpdate unsubscribes and returns BEFORE incrementing the counter whenever
+                // the queue is empty, and the counter is static so it resets on every domain reload.
+                // A healthy idle editor therefore reports zero ticks — reporting that as "may still
+                // be initializing" describes a fault that isn't there, on what is the normal state.
+                // Zero ticks only means something is wrong if work is actually waiting to run.
+                if (pendingCount > 0)
+                {
+                    sb.AppendLine($"heartbeat: {pendingCount} item(s) queued but the editor loop has not ticked since the last reload");
+                    sb.AppendLine("mainThreadResponsive: no");
+                }
+                else
+                {
+                    sb.AppendLine("heartbeat: idle — editor loop runs only while work is queued, so zero ticks here is normal");
+                    sb.AppendLine("mainThreadResponsive: idle (send a command to measure it)");
+                }
             }
             else
             {
@@ -1333,10 +1350,8 @@ namespace clibridge4unity
                 sb.AppendLine($"heartbeat: {staleness:F1}s since last main thread tick");
                 sb.AppendLine($"mainThreadResponsive: {(staleness < 0.5 ? "yes" : staleness < 5 ? "slow" : "no")}");
             }
-            sb.AppendLine($"timerTicks: {_timerTickCount}");
-            sb.AppendLine($"lastTimerTick: {_lastTimerTick:HH:mm:ss.fff}");
-            var snapshot = _mainThreadQueue.ToArray();
-            int pendingCount = snapshot.Count(w => !w.CompletionSource.Task.IsCanceled && !w.CompletionSource.Task.IsCompleted);
+            sb.AppendLine($"timerTicks: {_timerTickCount}{(_timerTickCount == 0 ? "  (resets each domain reload; only counts while work is queued)" : "")}");
+            sb.AppendLine($"lastTimerTick: {_lastTimerTick:HH:mm:ss.fff}{(_timerTickCount == 0 ? "  (bridge start time — no tick has occurred)" : "")}");
             if (pendingCount > 0)
                 sb.AppendLine($"pendingMainThreadWork: {pendingCount}");
             var executingInfo = GetExecutingWorkInfo();

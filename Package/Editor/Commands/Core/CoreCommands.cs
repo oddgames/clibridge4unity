@@ -300,8 +300,13 @@ namespace clibridge4unity
         public static string Ping()
         {
             var staleness = CommandRegistry.GetHeartbeatStaleness();
+            // staleness < 0 means the tick counter is still zero — which is the normal resting state,
+            // not a fault. The queue is usually drained straight from the SynchronizationContext
+            // callback, a path that never touches the counter, so it rarely advances at all. And this
+            // method is itself main-thread work: reaching this line proves the main thread is alive,
+            // which made the old "Unity may still be initializing" warning self-refuting.
             if (staleness < 0)
-                return "Pong (WARNING: no heartbeat ticks yet — Unity may still be initializing)";
+                return Response.Success("Pong");
             if (staleness > 5.0)
                 return $"Pong (WARNING: main thread unresponsive — last heartbeat {staleness:F1}s ago. Run DIAG for details.)";
             if (staleness > 1.0)

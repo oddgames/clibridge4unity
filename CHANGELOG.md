@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.1.70 — 2026-08-07
+
+## v1.1.70
+
+### Fixed
+
+- **`DIAG` and `PING` reported a healthy idle editor as possibly broken.** Both claimed
+  *"no heartbeat ticks yet — Unity may still be initializing"* against editors that were fully
+  started, idle and answering commands normally.
+
+  `timerTicks` is incremented in exactly one place, `OnEditorUpdate` — and that method's first
+  action is to unsubscribe and return when the work queue is empty, *before* the increment. The
+  queue is also normally drained by direct `ProcessAllPendingWork()` calls from the
+  SynchronizationContext callback and the wake loop, paths that never touch the counter at all. So
+  by the time the update handler runs there is nothing left to count, and the counter (static, and
+  therefore reset by every domain reload) sits at zero on a perfectly healthy editor. Zero ticks is
+  the resting state, not a fault.
+
+  `DIAG` now distinguishes the two cases: idle with an empty queue reports
+  *"editor loop runs only while work is queued, so zero ticks here is normal"*, while work queued
+  with no ticks still reports `mainThreadResponsive: no`. The `timerTicks` and `lastTimerTick` lines
+  say what they actually mean rather than implying a stall.
+
+  `PING`'s warning is removed outright — it was self-refuting. `Ping()` is main-thread work, so
+  reaching the line that warns Unity might still be initializing proves the main thread is running.
+  A genuine stall is still reported through the staleness thresholds once ticks exist.
+
+  This mattered beyond cosmetics: the bogus reading was being used as evidence when diagnosing a
+  genuinely wedged editor, where the real signals were a pinned CPU core and an unresponsive window.
+
+### Internal
+
+- Deploy note: a `dotnet publish` can fail with `UnauthorizedAccessException` on the output exe when
+  a daemon spawned from `bin/Release/.../publish/` is still running and holding it open. Kill any
+  process running from the publish path before building.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.69 — 2026-08-06
 
 ## v1.1.69
