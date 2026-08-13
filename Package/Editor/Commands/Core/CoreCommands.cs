@@ -25,6 +25,14 @@ namespace clibridge4unity
         static readonly ProfilerMarker _markerRefresh = new ProfilerMarker("Bridge.Core.Refresh");
         static readonly ProfilerMarker _markerMenu = new ProfilerMarker("Bridge.Core.Menu");
         static readonly ProfilerMarker _markerProfile = new ProfilerMarker("Bridge.Core.Profile");
+
+        // PROFILE analysis budgets. These commands read frame views on the main thread, so they are
+        // bounded by wall clock rather than by frame count: a deep-profiled capture carries ~250k
+        // samples per frame, and a full sweep would stall the editor for minutes. Partial results
+        // labelled "N of M scanned" are strictly better than a complete answer that freezes Unity.
+        private const int PROFILE_SCAN_BUDGET_MS = 8000;   // cheap raw-view sweep for frame times
+        private const int PROFILE_AGG_BUDGET_MS = 12000;   // hierarchy walk, the expensive half
+        private const int PROFILE_SAMPLE_FRAMES = 40;      // frames folded into any one ranking
         static readonly ProfilerMarker _markerDiag = new ProfilerMarker("Bridge.Core.Diag");
         // Sub-markers inside STATUS to find which sub-call dominates a slow tick.
         static readonly ProfilerMarker _markerStatusWindowList = new ProfilerMarker("Bridge.Core.Status.OpenEditorWindows");
@@ -821,16 +829,24 @@ namespace clibridge4unity
             return Response.Success($"Executed: {menuPath}");
         }
 
-        [BridgeCommand("PROFILE", "Control the Unity Profiler and read performance data",
+        [BridgeCommand("PROFILE", "Control the Unity Profiler and analyse captured performance data",
             Category = "Core",
-            Usage = "PROFILE                          - Status\n" +
-                    "  PROFILE enable                   - Start profiling\n" +
-                    "  PROFILE disable                  - Stop profiling\n" +
-                    "  PROFILE clear                    - Clear all frames\n" +
-                    "  PROFILE hierarchy                - Last frame hierarchy\n" +
-                    "  PROFILE hierarchy min:1.0         - Filter items >1ms\n" +
-                    "  PROFILE hierarchy depth:2         - Limit tree depth",
-            RequiresMainThread = true)]
+            Usage = "PROFILE                          - Status + capture flags\n" +
+                    "  PROFILE enable | disable | clear  - Control recording\n" +
+                    "  PROFILE deep on|off              - Deep profiling (per-method rows; forces recompile)\n" +
+                    "  PROFILE load <path.data>         - Load a .data capture (replaces current frames)\n" +
+                    "  PROFILE save <path.data>         - Save current frames to a capture\n" +
+                    "  PROFILE breakdown                - Full report: where time goes, calls, GC, spikes\n" +
+                    "  PROFILE frames [top:N]           - Most expensive frames\n" +
+                    "  PROFILE top [count:N] [by:self|total|calls|gc] [spikes]\n" +
+                    "                                   - Most expensive methods/markers\n" +
+                    "  PROFILE threads [frame:N]        - Threads present in a frame\n" +
+                    "  PROFILE hierarchy [min:1.0] [depth:2] [frame:N] [thread:N]\n" +
+                    "  Options: thread:N from:N to:N    - Apply to frames/top/breakdown",
+            RequiresMainThread = true,
+            // A .data capture can be gigabytes; LoadProfile is a synchronous main-thread read.
+            // The server sends this as a __timeout hint so the CLI widens its own read window.
+            TimeoutSeconds = 600)]
         public static string Profile(string data)
         {
             using var _profile = _markerProfile.Auto();
@@ -854,25 +870,462 @@ namespace clibridge4unity
                         ProfilerDriver.ClearAllFrames();
                         return Response.Success("Profiler frames cleared");
 
+                    case "deep":
+                        return ProfileDeep(data);
+
+                    case "load":
+                        return ProfileLoad(data);
+
+                    case "save":
+                        return ProfileSave(data);
+
                     case "status":
-                        return Response.SuccessWithData(new
-                        {
-                            enabled = ProfilerDriver.enabled,
-                            firstFrame = ProfilerDriver.firstFrameIndex,
-                            lastFrame = ProfilerDriver.lastFrameIndex
-                        });
+                        return ProfileStatus();
+
+                    case "threads":
+                        return ProfileThreads(data);
+
+                    case "frames":
+                        return ProfileFrames(data);
+
+                    case "top":
+                        return ProfileTop(data);
+
+                    case "breakdown":
+                    case "report":
+                        return ProfileBreakdown(data);
+
+                    case "group":
+                        return ProfileGroup(data);
+
+                    case "tree":
+                        return ProfileTree(data);
+
+                    case "callers":
+                        return ProfileCallers(data);
 
                     case "hierarchy":
                         return ProfileHierarchy(data);
 
                     default:
-                        return Response.Error($"Unknown action: {action}. Use: enable, disable, clear, status, hierarchy");
+                        return Response.Error($"Unknown action: {action}. Use: enable, disable, clear, deep, " +
+                                              "load, save, status, threads, frames, top, breakdown, group, tree, " +
+                                              "callers, hierarchy");
                 }
             }
             catch (System.Exception ex)
             {
                 return Response.Exception(ex);
             }
+        }
+
+        // ---- PROFILE option parsing -------------------------------------------------------
+        // Shared "key:value" scanner. Options are positional-free so "PROFILE top by:calls
+        // count:30 thread:1" reads in any order.
+
+        private static int ProfileIntOpt(string data, string key, int fallback)
+        {
+            if (string.IsNullOrEmpty(data)) return fallback;
+            foreach (var part in data.Split(' '))
+                if (part.StartsWith(key + ":", System.StringComparison.OrdinalIgnoreCase)
+                    && int.TryParse(part.Substring(key.Length + 1), out var v)) return v;
+            return fallback;
+        }
+
+        private static string ProfileStrOpt(string data, string key, string fallback)
+        {
+            if (string.IsNullOrEmpty(data)) return fallback;
+            foreach (var part in data.Split(' '))
+                if (part.StartsWith(key + ":", System.StringComparison.OrdinalIgnoreCase))
+                    return part.Substring(key.Length + 1);
+            return fallback;
+        }
+
+        private static bool ProfileHasFlag(string data, string flag)
+        {
+            if (string.IsNullOrEmpty(data)) return false;
+            foreach (var part in data.Split(' '))
+                if (string.Equals(part, flag, System.StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>Everything after the sub-action verb, untouched — paths may contain spaces.</summary>
+        private static string ProfileArgTail(string data)
+        {
+            if (string.IsNullOrWhiteSpace(data)) return "";
+            var trimmed = data.Trim();
+            int sp = trimmed.IndexOf(' ');
+            return sp < 0 ? "" : trimmed.Substring(sp + 1).Trim().Trim('"');
+        }
+
+        private static string ProfileStatus()
+        {
+            var sb = new StringBuilder();
+            ProfilerAnalysis.AppendCaptureFlags(sb);
+            int first = ProfilerDriver.firstFrameIndex, last = ProfilerDriver.lastFrameIndex;
+            sb.AppendLine($"frames: {first}..{last} ({(last >= first ? last - first + 1 : 0)} buffered)");
+            if (last >= first)
+                sb.AppendLine($"threads in last frame: {ProfilerAnalysis.ListThreads(last).Count}");
+            else
+                sb.AppendLine("no frames — record with PROFILE enable, or read a capture with PROFILE load <path>");
+            return sb.ToString().TrimEnd();
+        }
+
+        private static string ProfileDeep(string data)
+        {
+            string arg = ProfileArgTail(data).ToLower();
+            if (arg != "on" && arg != "off")
+                return Response.Error($"Usage: PROFILE deep on|off   (currently {ProfilerDriver.deepProfiling})");
+
+            bool want = arg == "on";
+            if (ProfilerDriver.deepProfiling == want)
+                return Response.Success($"Deep profiling already {(want ? "on" : "off")}");
+
+            // Toggling reinstruments every managed method, so Unity recompiles and reloads the
+            // domain — the pipe dies exactly as it does for COMPILE. Say so rather than time out.
+            ProfilerDriver.deepProfiling = want;
+            return Response.Success(
+                $"Deep profiling -> {(want ? "on" : "off")}. Unity will recompile and reload the domain " +
+                "(this connection drops; reconnect and re-check with PROFILE). " +
+                (want
+                    ? "Deep profiling inflates absolute timings — read ratios, not milliseconds."
+                    : "Per-method rows are gone; only instrumented markers remain."));
+        }
+
+        private static string ProfileLoad(string data)
+        {
+            string path = ProfileArgTail(data);
+            if (string.IsNullOrEmpty(path))
+                return Response.Error("Usage: PROFILE load <path to .data capture>");
+            if (!File.Exists(path))
+                return Response.Error($"Capture not found: {path}");
+
+            var info = new FileInfo(path);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            // keepExistingData:false — a capture is read as its own timeline; merging it into
+            // whatever the editor happened to be recording produces a meaningless frame range.
+            bool ok = ProfilerDriver.LoadProfile(path, false);
+            sw.Stop();
+
+            if (!ok)
+                return Response.Error($"LoadProfile failed for {path} ({info.Length / (1024 * 1024)}MB). " +
+                                      "Unity rejects captures written by a different Editor version.");
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"Loaded {Path.GetFileName(path)} ({info.Length / (1024.0 * 1024.0):F1}MB) in {sw.ElapsedMilliseconds}ms");
+            sb.AppendLine();
+            sb.Append(ProfileStatus());
+            return sb.ToString();
+        }
+
+        private static string ProfileSave(string data)
+        {
+            string path = ProfileArgTail(data);
+            if (string.IsNullOrEmpty(path))
+                return Response.Error("Usage: PROFILE save <path to .data>");
+            var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            if (!ProfilerDriver.SaveProfile(path)) return Response.Error($"SaveProfile failed: {path}");
+            var len = File.Exists(path) ? new FileInfo(path).Length : 0;
+            return Response.Success($"Saved {path} ({len / (1024.0 * 1024.0):F1}MB)");
+        }
+
+        private static string ProfileThreads(string data)
+        {
+            int frame = ProfileIntOpt(data, "frame", ProfilerDriver.lastFrameIndex);
+            int minSamples = ProfileIntOpt(data, "min", 0);
+            var threads = ProfilerAnalysis.ListThreads(frame, 64, minSamples);
+            if (threads.Count == 0) return Response.Error($"No thread data for frame {frame}");
+            var sb = new StringBuilder();
+            sb.AppendLine($"Threads in frame {frame} ({threads.Count}):");
+            foreach (var t in threads) sb.AppendLine("  " + t);
+            return sb.ToString().TrimEnd();
+        }
+
+        private static string ProfileFrames(string data)
+        {
+            int thread = ProfileIntOpt(data, "thread", ProfilerAnalysis.MainThreadIndex);
+            int topN = ProfileIntOpt(data, "top", 15);
+            var scan = ProfilerAnalysis.ScanFrames(thread, PROFILE_SCAN_BUDGET_MS,
+                ProfileIntOpt(data, "from", -1), ProfileIntOpt(data, "to", -1));
+
+            if (scan.Frames.Count == 0)
+                return Response.Error("No profiler frames. Record with PROFILE enable, or PROFILE load <path>.");
+
+            var sb = new StringBuilder();
+            ProfilerAnalysis.AppendCaptureFlags(sb);
+            ProfilerAnalysis.AppendScanHeader(sb, scan, thread);
+            sb.AppendLine();
+            sb.AppendLine("=== MOST EXPENSIVE FRAMES ===");
+            sb.AppendLine($"{"frame",-10} {"ms",10} {"xMedian",8}  heaviest marker (self)");
+            foreach (var fc in scan.Frames.OrderByDescending(f => f.Ms).Take(topN))
+                sb.AppendLine($"{fc.Frame,-10} {fc.Ms,9:F2}ms {(scan.Median > 0 ? fc.Ms / scan.Median : 0),7:F1}x  " +
+                              ProfilerAnalysis.TopMarkerInFrame(fc.Frame, thread));
+            return sb.ToString().TrimEnd();
+        }
+
+        private static string ProfileTop(string data)
+        {
+            int thread = ProfileIntOpt(data, "thread", ProfilerAnalysis.MainThreadIndex);
+            int count = ProfileIntOpt(data, "count", 25);
+            string by = ProfileStrOpt(data, "by", "self").ToLower();
+            bool spikesOnly = ProfileHasFlag(data, "spikes");
+
+            var scan = ProfilerAnalysis.ScanFrames(thread, PROFILE_SCAN_BUDGET_MS,
+                ProfileIntOpt(data, "from", -1), ProfileIntOpt(data, "to", -1));
+            if (scan.Frames.Count == 0)
+                return Response.Error("No profiler frames. Record with PROFILE enable, or PROFILE load <path>.");
+
+            // Steady state by default: spikes have their own causes and would otherwise dominate
+            // an average that is supposed to describe the normal frame.
+            var pool = spikesOnly ? scan.Spikes : scan.Steady;
+            var frames = ProfilerAnalysis.EvenSample(pool, PROFILE_SAMPLE_FRAMES);
+            var stats = ProfilerAnalysis.AggregateMarkers(frames, thread, PROFILE_AGG_BUDGET_MS, out int analyzed);
+            if (analyzed == 0) return Response.Error("No readable frames in the selected set.");
+
+            // filter: scopes the ranking to one subsystem — "filter:MTD2" strips Unity and editor
+            // rows so your own code is ranked against itself rather than buried under the engine.
+            string filter = ProfileStrOpt(data, "filter", null);
+            if (!string.IsNullOrEmpty(filter))
+                stats = stats.Where(s => s.Name.IndexOf(filter, System.StringComparison.OrdinalIgnoreCase) >= 0)
+                             .ToList();
+
+            var ordered = by == "total" ? stats.OrderByDescending(s => s.TotalMs)
+                        : by == "calls" ? stats.OrderByDescending(s => s.Calls)
+                        : by == "gc" ? stats.OrderByDescending(s => s.GcBytes)
+                        : stats.OrderByDescending(s => s.SelfMs);
+
+            var sb = new StringBuilder();
+            ProfilerAnalysis.AppendCaptureFlags(sb);
+            ProfilerAnalysis.AppendScanHeader(sb, scan, thread);
+            sb.AppendLine();
+            sb.AppendLine($"=== TOP MARKERS by {by} ({(spikesOnly ? "SPIKE" : "steady-state")} frames: " +
+                          $"{analyzed} sampled of {pool.Count}" +
+                          $"{(string.IsNullOrEmpty(filter) ? "" : $", filter '{filter}'")}) ===");
+            sb.AppendLine($"{"self/f",10} {"total/f",10} {"calls/f",9} {"us/call",9} {"gc/f",10}  name");
+            foreach (var s in ordered.Take(count))
+                sb.AppendLine($"{s.SelfMs / analyzed,9:F3}ms {s.TotalMs / analyzed,9:F3}ms " +
+                              $"{s.Calls / analyzed,8:F0} {s.UsPerCall(analyzed),8:F1}u " +
+                              $"{s.GcBytes / analyzed,9:F0}B  {s.Name}");
+            return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>
+        /// The report you read before forming an opinion. A flat "slowest methods" list is not
+        /// enough on its own: it hides how much of the frame is editor/profiler overhead, hides
+        /// cost that is spread over thousands of cheap calls, and averages hitches into the steady
+        /// state. This assembles those separately so each conclusion rests on the right evidence.
+        /// </summary>
+        private static string ProfileBreakdown(string data)
+        {
+            int thread = ProfileIntOpt(data, "thread", ProfilerAnalysis.MainThreadIndex);
+            var scan = ProfilerAnalysis.ScanFrames(thread, PROFILE_SCAN_BUDGET_MS,
+                ProfileIntOpt(data, "from", -1), ProfileIntOpt(data, "to", -1));
+            if (scan.Frames.Count == 0)
+                return Response.Error("No profiler frames. Record with PROFILE enable, or PROFILE load <path>.");
+
+            var steady = scan.Steady;
+            var spikes = scan.Spikes;
+            var sample = ProfilerAnalysis.EvenSample(steady, PROFILE_SAMPLE_FRAMES);
+
+            var sb = new StringBuilder();
+            sb.AppendLine("=== CAPTURE FLAGS (read before trusting any number below) ===");
+            ProfilerAnalysis.AppendCaptureFlags(sb);
+            ProfilerAnalysis.AppendScanHeader(sb, scan, thread);
+            sb.AppendLine($"steady-state frames (<=1.5x median): {steady.Count}   spikes (>=2x median): {spikes.Count}");
+            sb.AppendLine();
+
+            // 1. Structural split — decides whether the capture describes the game at all.
+            var roots = ProfilerAnalysis.RootBreakdown(sample, thread, out double avgFrame, out int rootFrames);
+            sb.AppendLine($"=== WHERE THE TIME GOES (top level, {rootFrames} steady frames, avg frame {avgFrame:F2}ms) ===");
+            double overhead = 0;
+            foreach (var kv in roots.Take(12))
+            {
+                if (ProfilerAnalysis.IsOverheadMarker(kv.Key)) overhead += kv.Value;
+                sb.AppendLine($"  {kv.Value,8:F2}ms {(avgFrame > 0 ? kv.Value / avgFrame * 100 : 0),7:F1}%  {kv.Key}" +
+                              (ProfilerAnalysis.IsOverheadMarker(kv.Key) ? "   <- not present in a player build" : ""));
+            }
+            if (overhead > 0 && avgFrame > 0)
+                sb.AppendLine($"  --> editor/profiler overhead is {overhead / avgFrame * 100:F0}% of this frame; " +
+                              "game cost is the remainder.");
+            sb.AppendLine();
+
+            // 2. Thread balance — main-bound vs render-bound.
+            int probe = steady.Count > 0 ? steady[steady.Count / 2] : scan.Frames[0].Frame;
+            sb.AppendLine($"=== THREAD BALANCE (frame {probe}) ===");
+            foreach (var t in ProfilerAnalysis.ListThreads(probe, 8, 3)) sb.AppendLine("  " + t);
+            sb.AppendLine();
+
+            var stats = ProfilerAnalysis.AggregateMarkers(sample, thread, PROFILE_AGG_BUDGET_MS, out int analyzed);
+            if (analyzed > 0)
+            {
+                AppendMarkerTable(sb, $"TOP BY TOTAL TIME (inclusive — structural cost, {analyzed} frames)",
+                    stats.OrderByDescending(s => s.TotalMs).Take(15), analyzed);
+                AppendMarkerTable(sb, "TOP BY SELF TIME (leaf cost — the actual work)",
+                    stats.OrderByDescending(s => s.SelfMs).Take(15), analyzed);
+                AppendMarkerTable(sb, "TOP BY CALL COUNT (structural bloat — many cheap calls)",
+                    stats.OrderByDescending(s => s.Calls).Take(15), analyzed);
+                var gc = stats.Where(s => s.GcBytes > 0).OrderByDescending(s => s.GcBytes).Take(12).ToList();
+                if (gc.Count > 0)
+                    AppendMarkerTable(sb, "TOP BY GC ALLOC (per frame — drives collection spikes)", gc, analyzed);
+            }
+
+            // 3. Spikes last, and never averaged into the above.
+            if (spikes.Count > 0)
+            {
+                sb.AppendLine("=== SPIKE FRAMES (distinct cause from steady state) ===");
+                foreach (int f in spikes.Take(10))
+                {
+                    float ms = scan.MsOf(f);
+                    sb.AppendLine($"  frame {f,-9} {ms,9:F2}ms {(scan.Median > 0 ? ms / scan.Median : 0),6:F1}x  " +
+                                  ProfilerAnalysis.TopMarkerInFrame(f, thread));
+                }
+            }
+            return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>
+        /// Re-aggregate the same frames at a coarser grain. The leaf ranking answers "which call is
+        /// slow"; this answers "which assembly / class / system owns the frame" — the question you
+        /// actually act on, and one a 2000-row leaf list cannot show.
+        /// </summary>
+        private static string ProfileGroup(string data)
+        {
+            int thread = ProfileIntOpt(data, "thread", ProfilerAnalysis.MainThreadIndex);
+            int count = ProfileIntOpt(data, "count", 25);
+            string mode = ProfileStrOpt(data, "by", "assembly").ToLower();
+            string filter = ProfileStrOpt(data, "filter", null);
+            string sort = ProfileStrOpt(data, "sort", "self").ToLower();
+            bool spikesOnly = ProfileHasFlag(data, "spikes");
+
+            if (mode != "assembly" && mode != "namespace" && mode != "class" && mode != "prefix")
+                return Response.Error($"Unknown grouping '{mode}'. Use by:assembly|namespace|class|prefix");
+
+            var scan = ProfilerAnalysis.ScanFrames(thread, PROFILE_SCAN_BUDGET_MS,
+                ProfileIntOpt(data, "from", -1), ProfileIntOpt(data, "to", -1));
+            if (scan.Frames.Count == 0)
+                return Response.Error("No profiler frames. Record with PROFILE enable, or PROFILE load <path>.");
+
+            var pool = spikesOnly ? scan.Spikes : scan.Steady;
+            var frames = ProfilerAnalysis.EvenSample(pool, PROFILE_SAMPLE_FRAMES);
+            var stats = ProfilerAnalysis.AggregateMarkers(frames, thread, PROFILE_AGG_BUDGET_MS, out int analyzed);
+            if (analyzed == 0) return Response.Error("No readable frames in the selected set.");
+
+            var grouped = ProfilerAnalysis.Regroup(stats, mode, filter);
+            var ordered = sort == "total" ? grouped.OrderByDescending(s => s.TotalMs)
+                        : sort == "calls" ? grouped.OrderByDescending(s => s.Calls)
+                        : sort == "gc" ? grouped.OrderByDescending(s => s.GcBytes)
+                        : grouped.OrderByDescending(s => s.SelfMs);
+
+            var sb = new StringBuilder();
+            ProfilerAnalysis.AppendCaptureFlags(sb);
+            ProfilerAnalysis.AppendScanHeader(sb, scan, thread);
+            sb.AppendLine();
+            sb.AppendLine($"=== GROUPED BY {mode.ToUpper()} sorted by {sort} " +
+                          $"({(spikesOnly ? "SPIKE" : "steady-state")}, {analyzed} frames" +
+                          $"{(string.IsNullOrEmpty(filter) ? "" : $", filter '{filter}'")}) ===");
+            sb.AppendLine($"{"self/f",10} {"total/f",10} {"calls/f",9} {"gc/f",10}  group");
+            foreach (var s in ordered.Take(count))
+                sb.AppendLine($"{s.SelfMs / analyzed,9:F3}ms {s.TotalMs / analyzed,9:F3}ms " +
+                              $"{s.Calls / analyzed,8:F0} {s.GcBytes / analyzed,9:F0}B  {s.Name}");
+
+            double totSelf = grouped.Sum(g => g.SelfMs) / analyzed;
+            sb.AppendLine($"  -- {grouped.Count} groups, {totSelf:F2}ms total self/frame --");
+            return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>
+        /// Drill into the call tree under a marker. Deliberately single-frame: a tree is a shape,
+        /// and averaging shapes across frames invents parent/child pairs that never co-occurred.
+        /// Defaults to the median steady frame; pin a spike with frame:N.
+        /// </summary>
+        private static string ProfileTree(string data)
+        {
+            int thread = ProfileIntOpt(data, "thread", ProfilerAnalysis.MainThreadIndex);
+            int depth = ProfileIntOpt(data, "depth", 4);
+            int rows = ProfileIntOpt(data, "rows", 200);
+            float min = 0f;
+            var minStr = ProfileStrOpt(data, "min", null);
+            if (minStr != null) float.TryParse(minStr, out min);
+
+            // Everything that is not an option is the marker to expand (may contain spaces).
+            var tail = ProfileArgTail(data);
+            var markerParts = tail.Split(' ')
+                .Where(p => p.Length > 0 && p.IndexOf(':') < 0)
+                .ToArray();
+            string marker = string.Join(" ", markerParts);
+
+            int frame = ProfileIntOpt(data, "frame", -1);
+            var scan = ProfilerAnalysis.ScanFrames(thread, PROFILE_SCAN_BUDGET_MS);
+            if (scan.Frames.Count == 0)
+                return Response.Error("No profiler frames. Record with PROFILE enable, or PROFILE load <path>.");
+            if (frame < 0)
+            {
+                var steady = scan.Steady;
+                frame = steady.Count > 0 ? steady[steady.Count / 2] : scan.Frames[0].Frame;
+            }
+
+            using var h = ProfilerAnalysis.OpenHierarchy(frame, thread);
+            if (h == null || !h.valid)
+                return Response.Error($"No valid data for frame {frame}, thread {thread}");
+
+            var sb = new StringBuilder();
+            ProfilerAnalysis.AppendCaptureFlags(sb);
+            sb.AppendLine($"=== CALL TREE  frame {frame} ({h.frameTimeMs:F2}ms, thread {thread}), " +
+                          $"depth {depth}{(min > 0 ? $", >={min}ms" : "")}" +
+                          $"{(string.IsNullOrEmpty(marker) ? "" : $", under '{marker}'")} ===");
+            sb.AppendLine($"{"total",10} {"self",9} {"calls",7} {"gc",10}  name");
+            ProfilerAnalysis.AppendSubtree(h, marker, depth, min, sb, rows);
+            return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>Reverse view: which parents issue a marker, and what each costs.</summary>
+        private static string ProfileCallers(string data)
+        {
+            int thread = ProfileIntOpt(data, "thread", ProfilerAnalysis.MainThreadIndex);
+            int count = ProfileIntOpt(data, "count", 20);
+            bool spikesOnly = ProfileHasFlag(data, "spikes");
+
+            var tail = ProfileArgTail(data);
+            string marker = string.Join(" ", tail.Split(' ')
+                .Where(p => p.Length > 0 && p.IndexOf(':') < 0 &&
+                            !string.Equals(p, "spikes", System.StringComparison.OrdinalIgnoreCase)));
+            if (string.IsNullOrWhiteSpace(marker))
+                return Response.Error("Usage: PROFILE callers <marker substring> [count:N] [thread:N] [spikes]");
+
+            var scan = ProfilerAnalysis.ScanFrames(thread, PROFILE_SCAN_BUDGET_MS);
+            if (scan.Frames.Count == 0)
+                return Response.Error("No profiler frames. Record with PROFILE enable, or PROFILE load <path>.");
+
+            var pool = spikesOnly ? scan.Spikes : scan.Steady;
+            var frames = ProfilerAnalysis.EvenSample(pool, PROFILE_SAMPLE_FRAMES);
+            var callers = ProfilerAnalysis.FindCallers(frames, thread, marker, PROFILE_AGG_BUDGET_MS, out int analyzed);
+            if (analyzed == 0) return Response.Error("No readable frames in the selected set.");
+            if (callers.Count == 0)
+                return Response.Error($"No marker matching '{marker}' in {analyzed} sampled frames.");
+
+            var sb = new StringBuilder();
+            ProfilerAnalysis.AppendCaptureFlags(sb);
+            sb.AppendLine($"=== CALLERS OF '{marker}' ({(spikesOnly ? "SPIKE" : "steady-state")}, {analyzed} frames) ===");
+            sb.AppendLine($"{"total/f",10} {"self/f",10} {"calls/f",9} {"gc/f",10}  parent");
+            foreach (var c in callers.Take(count))
+                sb.AppendLine($"{c.TotalMs / analyzed,9:F3}ms {c.SelfMs / analyzed,9:F3}ms " +
+                              $"{c.Calls / analyzed,8:F0} {c.GcBytes / analyzed,9:F0}B  {c.Name}");
+            sb.AppendLine($"  -- {callers.Count} distinct parents, " +
+                          $"{callers.Sum(c => c.Calls) / analyzed:F0} calls/frame total --");
+            return sb.ToString().TrimEnd();
+        }
+
+        private static void AppendMarkerTable(StringBuilder sb, string title,
+            IEnumerable<ProfilerAnalysis.MarkerStat> rows, int frames)
+        {
+            sb.AppendLine($"=== {title} ===");
+            sb.AppendLine($"{"self/f",10} {"total/f",10} {"calls/f",9} {"us/call",9} {"gc/f",10}  name");
+            foreach (var s in rows)
+                sb.AppendLine($"{s.SelfMs / frames,9:F3}ms {s.TotalMs / frames,9:F3}ms " +
+                              $"{s.Calls / frames,8:F0} {s.UsPerCall(frames),8:F1}u " +
+                              $"{s.GcBytes / frames,9:F0}B  {s.Name}");
+            sb.AppendLine();
         }
 
         private static string ProfileHierarchy(string data)

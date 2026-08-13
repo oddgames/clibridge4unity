@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.1.71 — 2026-08-13
+
+## v1.1.71
+
+### New
+- **`PROFILE` becomes a profiler-capture analyser.** Previously it could only enable/disable/clear recording and print one frame's hierarchy. It now reads and analyses the whole frame buffer. Because `ProfilerDriver` serves a loaded `.data` capture, a live play-mode session, and a paused game through the same frame views, **every analysis subcommand works identically on all three** — no separate code path for captures vs live data.
+- `PROFILE load <path.data>` / `PROFILE save <path.data>` — read and write Unity profiler captures. `load` replaces the current frames (a capture is its own timeline; merging it into whatever the editor was recording produces a meaningless frame range). Multi-GB captures are a synchronous main-thread read, so `PROFILE` now carries a 600s `TimeoutSeconds`, which the server sends as a `__timeout` hint so the CLI widens its own read window automatically.
+- `PROFILE deep on|off` — toggle deep profiling, the setting that decides whether you get per-method rows or only instrumented markers. Warns that it recompiles and reloads the domain (dropping the pipe, like COMPILE) and that it inflates absolute timings.
+- `PROFILE breakdown` — the report to read before forming an opinion. Leads with capture flags, then frame distribution, the top-level split (PlayerLoop vs EditorLoop vs profiler overhead, with an explicit "editor/profiler overhead is N% of this frame" line), thread balance, and four *separate* rankings: total time (structural), self time (leaf cost), call count (many-cheap-calls bloat), and GC alloc.
+- `PROFILE frames [top:N]` — most expensive frames, each annotated with its heaviest marker.
+- `PROFILE top [count:N] [by:self|total|calls|gc] [filter:X] [spikes]` — leaf marker ranking. `filter:` scopes it to one subsystem so your own code is ranked against itself rather than buried under the engine.
+- `PROFILE group [by:assembly|namespace|class|prefix] [filter:X] [sort:…]` — re-aggregate the same frames at a coarser grain. Parses the deep-profile name format (`Asm.dll!Namespace::Class.Method()`) and the dotted native-marker convention, answering "which assembly/class owns the frame" — a question a 2000-row leaf list cannot.
+- `PROFILE tree <marker> [depth:N] [min:ms] [frame:N]` — drill into the call tree under a marker, heaviest child first. Deliberately single-frame: a tree is a shape, and averaging shapes across frames invents parent/child pairs that never co-occurred. Defaults to the median steady frame; pin a hitch with `frame:N`.
+- `PROFILE callers <marker> [spikes]` — reverse view, grouping a marker's cost by its immediate parent. Turns "290 SRPBatcher.Flush calls per frame" into "167 of them are the shadow pass" when a top-down tree cannot, because the marker appears under many parents.
+- `PROFILE threads [frame:N]` — threads present in a frame, with per-thread frame time and sample counts (main vs render saturation).
+
+### Changed
+- Rankings default to **steady-state frames** (≤1.5× median). Hitches are listed separately rather than averaged into the normal frame, since a spike's cause is usually distinct from steady-state cost.
+- Every analysis subcommand leads with capture provenance (`deepProfiling`, `profileEditor`, `enabled`, `connected`) and labels rows that do not exist in a player build (`EditorLoop`, `Profiler.*`, `Mono.JIT`), so an in-editor capture is not misread as game cost.
+- `PROFILE status` now reports the buffered frame range and thread count, and points at `PROFILE load` when the buffer is empty.
+
+### Internal
+- New `ProfilerAnalysis` helper (`Package/Editor/Commands/Core/ProfilerAnalysis.cs`) holding frame scanning, marker aggregation, re-grouping, subtree rendering and caller attribution; the `[BridgeCommand]` dispatch stays in `CoreCommands`.
+- All analysis runs under explicit wall-clock budgets (8s frame sweep, 12s hierarchy walk, 40 frames per ranking) and reports "N of M scanned". A deep-profiled capture carries ~250k samples per frame, so an unbounded sweep would stall the editor for minutes — partial results labelled honestly beat a complete answer that freezes Unity.
+- Frame-cost sweeps use `RawFrameDataView` (carries `frameTimeMs` without building the hierarchy tree), reserving the expensive `HierarchyFrameDataView` walk for frames actually being ranked.
+- Parent tracking is supplied by the traversal rather than a lookup — `HierarchyFrameDataView` exposes no `GetItemParent`.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.70 — 2026-08-07
 
 ## v1.1.70

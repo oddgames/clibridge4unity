@@ -279,6 +279,16 @@ namespace clibridge4unity
         /// </summary>
         private static void ProcessAllPendingWork()
         {
+            // Re-discover the editor HWND here, because this is the main-thread path that actually
+            // runs. The refresh used to hang off OnEditorUpdate, which returns early whenever the
+            // queue is empty — and the queue is normally drained right here, from the
+            // SynchronizationContext callback, so that handler rarely executes. The result was a
+            // handle that stayed zero for the whole session once the first discovery missed (Unity 6
+            // splits the editor window into another process, so it is commonly zero at startup),
+            // leaving PostMessage(WM_NULL) unable to wake a backgrounded editor at all.
+            // Guarded on zero + rate-limited, so the normal case costs one comparison.
+            TryRefreshUnityHwndThrottled();
+
             // Drain the queue - process everything available
             while (_mainThreadQueue.TryDequeue(out var work))
             {
@@ -427,6 +437,14 @@ namespace clibridge4unity
                 Application.dataPath.Replace("/Assets", ""));
 
             IntPtr found = IntPtr.Zero;
+            // Fallback for when no title matches: a visible container window owned by THIS process.
+            // The title is empty while Unity is still bringing the editor up, and the old code had no
+            // second option — it returned zero and, because nothing retried, the handle stayed zero
+            // for the rest of the session. Process ownership is unambiguous when it applies; the
+            // title match stays first because several editors share this desktop and only the title
+            // distinguishes their windows.
+            IntPtr ownProcessCandidate = IntPtr.Zero;
+            uint selfPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
             var classNameBuf = new StringBuilder(256);
 
             EnumWindows((hwnd, _) =>
@@ -443,10 +461,39 @@ namespace clibridge4unity
                     return false;
                 }
 
+                if (ownProcessCandidate == IntPtr.Zero && IsWindowVisible(hwnd))
+                {
+                    GetWindowThreadProcessId(hwnd, out uint owner);
+                    if (owner == selfPid) ownProcessCandidate = hwnd;
+                }
+
                 return true;
             }, IntPtr.Zero);
 
+            if (found == IntPtr.Zero && ownProcessCandidate != IntPtr.Zero)
+            {
+                BridgeDiagnostics.Log("CommandRegistry",
+                    $"hwnd: no title match for '{projectName}', using own-process container window {ownProcessCandidate}");
+                found = ownProcessCandidate;
+            }
+
             return found;
+        }
+
+        /// <summary>Main-thread-only lazy HWND discovery. No-op once we have a handle.</summary>
+        private static void TryRefreshUnityHwndThrottled()
+        {
+            if (_unityWindowHandle != IntPtr.Zero) return;
+            try
+            {
+                // Enumerating windows mid-reload can block, and the title we match on isn't set yet.
+                if (EditorApplication.isCompiling || EditorApplication.isUpdating) return;
+                double now = EditorApplication.timeSinceStartup;
+                if (now - _lastHwndRefreshTime <= 1.0) return;
+                _lastHwndRefreshTime = now;
+                TryRefreshUnityHwnd();
+            }
+            catch { }
         }
 
         private static void TryRefreshUnityHwnd()

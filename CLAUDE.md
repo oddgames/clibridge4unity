@@ -111,7 +111,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.70)
+│   └── package.json           # UPM manifest (v1.1.71)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -246,7 +246,19 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
   - Commands that reference `.uss`, `.uxml`, or `.tss` assets append matching UI Toolkit import errors automatically
   - `LOG` needs the bridge running and reads Unity's in-memory console — when it's empty or the pipe is down, use `EDITORLOG` (CLI-side) to read the on-disk `Editor.log` instead
 - `MENU path` - Execute a Unity menu item (e.g. `MENU Window/General/Console`)
-- `PROFILE [enable|disable|clear|hierarchy]` - Control profiler and read performance data
+- `PROFILE` - Control the profiler and analyse captured performance data. Reads the frame buffer, so **every analysis subcommand works identically on a loaded `.data` capture, a live play-mode session, and a paused game** — `ProfilerDriver` serves all three through the same frame views.
+  - `PROFILE` / `enable` / `disable` / `clear` - status (leads with capture flags) and recording control
+  - `PROFILE deep on|off` - deep profiling. **This is the lever that decides whether you get per-method rows or only instrumented markers.** Off = engine markers + MonoBehaviour `[Invoke]` rows only; on = every managed method. Toggling recompiles and reloads the domain (drops the pipe, like COMPILE), and inflates absolute timings — read ratios, not milliseconds
+  - `PROFILE load <path.data>` / `PROFILE save <path.data>` - read/write a capture. Load replaces the current frames; a multi-GB capture is a synchronous main-thread read, hence the 600s timeout hint
+  - `PROFILE breakdown` - **start here.** The evidence pack: capture flags, frame distribution, top-level split (PlayerLoop vs EditorLoop vs profiler overhead, with a "% of frame is overhead" line), thread balance, then four separate rankings (total / self / calls / GC alloc), and spike frames listed apart from the steady state
+  - `PROFILE frames [top:N]` - most expensive frames, each with its heaviest marker
+  - `PROFILE top [count:N] [by:self|total|calls|gc] [filter:X] [spikes]` - leaf ranking. `filter:MTD2` scopes it to your own code
+  - `PROFILE group [by:assembly|namespace|class|prefix] [filter:X] [sort:…]` - **re-aggregate at a coarser grain.** Answers "which assembly/class owns the frame", which a 2000-row leaf list cannot
+  - `PROFILE tree <marker> [depth:N] [min:ms] [frame:N]` - drill into the call tree under a marker. Single-frame by design (averaging tree *shapes* invents parents that never co-occurred); defaults to the median steady frame, pin a spike with `frame:N`
+  - `PROFILE callers <marker> [spikes]` - reverse view: which parents issue a marker and what each costs. The way to turn "290 SRPBatcher.Flush calls" into "167 of them are the shadow pass"
+  - `PROFILE threads [frame:N]` / `PROFILE hierarchy [min:] [depth:] [frame:] [thread:]`
+  - Common options: `thread:N from:N to:N`. Rankings default to **steady-state frames** (≤1.5× median); hitches are reported separately rather than averaged in
+  - **Interpreting:** an in-editor capture spends a large share of each frame in `EditorLoop` + `Profiler.*`, none of which exists in a player build — `breakdown` labels those rows and prints the overhead share. For trustworthy absolute numbers, capture from a player build with deep profiling off; use deep profiling only to find *which* method inside an already-identified hot marker is responsible
 - `BUILD [--run] [--dev] [--output <path>]` - Build the Unity Player (active target). Streams progress + errors. `--run` launches Standalone after success. Default output: `Builds/<Target>/<ProductName>`. Other commands auto-block during the build.
 
 ### Code
