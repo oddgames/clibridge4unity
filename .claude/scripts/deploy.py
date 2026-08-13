@@ -139,6 +139,48 @@ def prepend_changelog(root, tag, version, notes_body):
     with open(changelog, "w", encoding="utf-8") as f:
         f.write("# Changelog\n\n" + new_entry)
 
+def check_package_metas(root):
+    """Fail the deploy if any Package/ asset lacks a .meta sibling.
+
+    A UPM package installed from a git URL lands in Library/PackageCache, which Unity treats as
+    immutable — it cannot write the .meta files it would normally generate on import, so a source
+    file without one is silently excluded from its assembly. The symptom lands on the consumer as
+    a bare CS0246 ("type could not be found") pointing at a file that is plainly right there,
+    which is a genuinely confusing thing to debug from the other side of a release.
+    v1.1.71 shipped ProfilerAnalysis.cs this way; this check exists so it cannot recur.
+    """
+    pkg = os.path.join(root, "Package")
+    if not os.path.isdir(pkg):
+        return
+    missing = []
+    for dirpath, dirnames, filenames in os.walk(pkg):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", "~")]
+        for fn in filenames:
+            if fn.endswith(".meta") or fn.startswith("."):
+                continue
+            full = os.path.join(dirpath, fn)
+            if not os.path.exists(full + ".meta"):
+                missing.append(os.path.relpath(full, root).replace("\\", "/"))
+    # Directories need .meta files too — a folder Unity cannot register hides everything under it.
+    for dirpath, dirnames, filenames in os.walk(pkg):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", "~")]
+        for d in dirnames:
+            full = os.path.join(dirpath, d)
+            if not os.path.exists(full + ".meta"):
+                missing.append(os.path.relpath(full, root).replace("\\", "/") + "/")
+
+    if missing:
+        print("\nERROR: Package assets are missing .meta files — Unity will exclude them "
+              "from the installed package:", file=sys.stderr)
+        for m in sorted(missing):
+            print(f"  {m}", file=sys.stderr)
+        print("\nOpen the project in Unity to generate them, or create them by hand:\n"
+              "  printf 'fileFormatVersion: 2\\nguid: %s\\n' \"$(python -c "
+              "'import uuid;print(uuid.uuid4().hex)')\" > <file>.meta", file=sys.stderr)
+        sys.exit(1)
+    print("  Package .meta check: OK")
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: deploy.py <version>", file=sys.stderr)
@@ -158,6 +200,8 @@ def main():
 
     exe_path = os.path.join(root, "clibridge4unity/bin/Release/net8.0/win-x64/publish/clibridge4unity.exe")
     package_exe = os.path.join(root, "Package", "Tools", "win-x64", "clibridge4unity.exe")
+
+    check_package_metas(root)
 
     # Step 0: Build + package the VSCode extension into a .vsix and stage it for embedding.
     # MUST run before `dotnet publish` so the csproj `vscode\*.vsix` EmbeddedResource picks it up.

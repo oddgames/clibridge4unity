@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.72 — 2026-08-13
+
+## v1.1.72
+
+### Fixed
+- **v1.1.71 was broken on install — upgrade straight to this version.** `ProfilerAnalysis.cs` shipped without its `.cs.meta` sibling. A package installed from a git URL lands in `Library/PackageCache`, which Unity treats as immutable: it cannot write the `.meta` it would normally generate on import, so the file was silently excluded from the `clibridge4unity.Commands.Core` assembly. Consumers got `CS0246: The type or namespace name 'ProfilerAnalysis' could not be found` pointing at a file plainly sitting in the package, which took the whole Editor's compilation down with it. The meta file is now present.
+
+### Internal
+- `deploy.py` gained a preflight check that fails the release if any file or folder under `Package/` lacks a `.meta` sibling. This exact defect is invisible in the source repo (where Unity generates metas on demand from a mutable folder) and only appears on the consumer's side after a release, so it needs to be caught at publish time rather than found downstream.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.71 — 2026-08-13
 
 ## v1.1.71
