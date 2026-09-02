@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.1.73 — 2026-09-03
+
+## v1.1.73
+
+### New
+- **Play-mode ownership.** Unity never reports *why* play mode changed, so `PLAY` now stamps a short-lived claim immediately before the transition and the state-change handler resolves it. A transition with no fresh claim means a person pressed Play. `PLAYMODE` reports `owner: user (entered manually)` or `owner: agent <peer-id>`, with elapsed time.
+- **Play-mode gate.** One editor is shared by a person and several agent windows, and a play session someone else started must not be trampled. Anything that could change the editor is now gated while another window — or the user — owns play mode. Read-only commands (`PING STATUS LOG FIND INSPECTOR SCREENSHOT ANALYZE …`) pass through untouched.
+- **Desktop prompt with actions.** The gate raises a real Windows dialog offering three answers: *run it now in my play session* (play mode keeps running — the right answer for `CODE_EXEC`, which carries its own compiler and needs no edit mode), *exit play mode and let the agent take over* (issues `STOP --force`, then runs), or *not now*.
+- **`REQUESTS` / `ALLOW` / `DENY`** — answer a pending request from any terminal, with no pipe. `ALLOW <id>` runs it in the live session; `ALLOW <id> yield` exits play mode and hands over. Deliberately pipe-free: the editor is busy in a play session exactly when you need to answer.
+- **`STOP` refuses to end a session it does not own.** `STOP --force` overrides. Stopping someone else's play session destroys state with no way to recover it, so it takes an explicit override rather than happening silently.
+- `playOwner` now rides in the heartbeat status file, so the CLI can decide whether a command would disturb a session without opening a pipe.
+
+### Fixed
+- Nothing user-facing; the release is additive.
+
+### Internal
+- Gate scope is an **allowlist of read-only commands** rather than a list of dangerous ones, so a command added later defaults to asking instead of silently mutating a running session.
+- Ownership state lives in `SessionState` — entering play mode can trigger a domain reload *between* the claim and the state change that resolves it, which would destroy statics.
+- Claims expire after 15s so a stale claim from an earlier session cannot misattribute a manual Play to whichever agent last ran `PLAY`.
+- Requests record the caller's PID (same liveness convention as `PeerLedger`) and are swept when that process exits — no prompting for a decision nobody is waiting on.
+- The gate sits in `SendCommand`, the single choke point every pipe command passes through.
+- `TaskDialogIndirect` (comctl32 v6, added to `app.manifest`) rather than toast notifications: a toast from an unpackaged single-file exe needs an AppUserModelID plus a Start Menu shortcut, and its buttons need a COM activator or a registry URI handler — setup that can rot silently and leave dead buttons. The dialog is best-effort; if it cannot be shown, the CLI falls back to waiting on the request file so any other surface can answer.
+- `PlayGate` uses hand-rolled `JsonDocument`/`Utf8JsonWriter`. This app publishes trimmed with reflection-based serialization disabled, so `JsonSerializer` throws at runtime — and inside the defensive reads that surfaced as "no pending requests" rather than an error.
+- Build/test cadence written into `CLAUDE.md` and the `clibridge4unity-lint` skill: finish the whole change, then verify once. Per-edit builds cost ~30s each and collide with the Roslyn daemon's lock on the CLI exe.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.72 — 2026-08-13
 
 ## v1.1.72

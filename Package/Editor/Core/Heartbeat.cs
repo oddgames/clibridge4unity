@@ -110,8 +110,11 @@ namespace clibridge4unity
             WriteStatusNow(GetState(), forceStateEnteredAt: true);
         }
 
-        static void OnPlayModeStateChanged(PlayModeStateChange _)
+        static void OnPlayModeStateChanged(PlayModeStateChange change)
         {
+            // Resolve who caused this before anything else — the claim PLAY leaves is
+            // short-lived, and this is the only moment it can be attributed.
+            PlayOwnership.OnPlayModeStateChanged(change);
             WriteStatusNow(GetState(), forceStateEnteredAt: true);
         }
 
@@ -141,9 +144,14 @@ namespace clibridge4unity
 
         static string BuildStatusJson(string state, long nowUnix)
         {
+            // playOwner rides along so the CLI can decide whether a command would disturb
+            // someone else's play session without opening a pipe — which matters precisely
+            // when the editor is busy in that session and slow to answer.
+            string owner = PlayOwnership.Owner ?? "";
             return "{\n" +
                    $"  \"state\": \"{state}\",\n" +
                    _statusJsonStaticFields +
+                   $"  \"playOwner\": \"{owner}\",\n" +
                    $"  \"stateEnteredAt\": {_stateEnteredAtUnix},\n" +
                    $"  \"timestamp\": {nowUnix}\n" +
                    "}";

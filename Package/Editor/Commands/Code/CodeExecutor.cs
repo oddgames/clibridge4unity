@@ -945,6 +945,26 @@ namespace clibridge4unity
             return await work;
         }
 
+        /// <summary>
+        /// True only for a using *directive* (`using System.Text;`, `using static X;`,
+        /// `using Alias = Some.Type;`).
+        ///
+        /// A C# 8 using *declaration* — `using var x = Foo();`, `using StreamReader r = new(...);` —
+        /// also starts with "using " and ends with ";", but it is a statement. Hoisting one into the
+        /// directive block moved it outside the generated Runner class, where it became a top-level
+        /// statement: CS8805, plus CS0103/CS8801 as the rest of the body lost the variable and its
+        /// enclosing scope. The failure names the wrapper, not the offending line, so it reads as a
+        /// broken harness rather than a mis-parsed `using`. An initializer expression is the tell —
+        /// a directive never contains one.
+        /// </summary>
+        private static bool IsUsingDirective(string line)
+        {
+            if (!line.StartsWith("using ") || !line.EndsWith(";")) return false;
+            if (line.StartsWith("using var ")) return false;  // implicitly-typed using declaration
+            if (line.Contains("(")) return false;             // initializer => declaration, not directive
+            return true;
+        }
+
         internal static string WrapCode(string code)
         {
             code = code.Trim();
@@ -964,7 +984,7 @@ namespace clibridge4unity
             var nonUsingLines = new List<string>();
             foreach (var line in codeLines)
             {
-                if (line.StartsWith("using ") && line.EndsWith(";"))
+                if (IsUsingDirective(line))
                     customUsings.Add(line);
                 else
                     nonUsingLines.Add(line);

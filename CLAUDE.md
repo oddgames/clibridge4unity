@@ -111,7 +111,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.72)
+│   └── package.json           # UPM manifest (v1.1.73)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -148,6 +148,16 @@ clibridge4unity -d C:\Workspaces\tool_claude_unity_bridge\UnityTestProject STATU
 After building, install to PATH: `cp clibridge4unity/bin/Release/net8.0/win-x64/publish/clibridge4unity.exe ~/.clibridge4unity/`
 
 ## Build Instructions
+
+### CRITICAL: Build/test cadence — batch, don't iterate
+**Finish the whole change before compiling or testing it. One verify pass at the end, not one per edit.**
+
+- A `dotnet build` is ~30s and a publish is minutes; a build after each edit turns a 5-edit change into 3 idle minutes and burns a turn each time
+- Related edits across several files are one unit of work — make them all, then build once
+- Rebuilding mid-change also collides with running processes: the Roslyn `DAEMON` and any in-flight command hold `bin/Debug/.../clibridge4unity.exe`, so a needless build fails with `MSB3027 file is locked` and costs another turn to clear
+- Exceptions, where an early build genuinely informs the next edit: an unfamiliar API whose signature you're guessing at, or a syntax-level change to a file you can't otherwise validate
+- Same rule for tests — run the suite when the feature is done, not after each piece
+- Test failures on Package code usually mean **Unity hasn't recompiled**, not that the code is broken (see the Testing Mandate above)
 
 ### Building the CLI
 ```bash
@@ -296,7 +306,16 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `STOP` - Exit play mode
 - `PAUSE` - Toggle pause
 - `STEP` - Single frame step
-- `PLAYMODE` - Get current play mode state
+- `PLAYMODE` - Get current play mode state, including **who owns it** (`owner: user (entered manually)` vs `owner: agent <peer-id>`)
+
+### Play-mode gate (cross-window, automatic)
+One editor is shared by a person and several agent windows. A play session someone else started must not be trampled, so anything that could **change** the editor is gated while another window (or the user) owns play mode. See [PlayGate.cs](clibridge4unity/PlayGate.cs), [GateNotify.cs](clibridge4unity/GateNotify.cs), [PlayOwnership.cs](Package/Editor/Core/PlayOwnership.cs).
+- **Attribution**: Unity never reports *why* play mode changed, so `PLAY` stamps a short-lived claim (15s) in `SessionState` immediately before the transition; the `playModeStateChanged` handler resolves it. No fresh claim = a human pressed Play. SessionState because entering play mode can domain-reload *between* the claim and its resolution.
+- **Scope is an allowlist of read-only commands** (`PING STATUS LOG FIND INSPECTOR SCREENSHOT ANALYZE …`); everything else gates. A command added later defaults to asking rather than silently mutating someone's session.
+- **Prompt**: a `TaskDialogIndirect` desktop dialog with three actions — *run it now in my play session* (play mode untouched; right for `CODE_EXEC`, which carries its own compiler), *exit play mode and hand over* (issues `STOP --force` then runs), *not now*. Not a toast: toasts from an unpackaged single-file exe need an AUMID + Start Menu shortcut and a COM/URI activator, all of which can rot silently.
+- **Owner is read from the heartbeat file, not the pipe** — the editor is busy in a play session exactly when we need to ask.
+- **Answer from any terminal** (works with no pipe): `REQUESTS` lists what's waiting · `ALLOW <id>` runs it in the live session · `ALLOW <id> yield` exits play mode and hands over · `DENY <id>`. Requests carry the caller's PID and are swept when that process exits — nobody is waiting for the answer.
+- `STOP` refuses to end a session it doesn't own; `STOP --force` overrides.
 - `GAMEVIEW 1280x720` - Set Game view resolution
 
 ### Prefab
@@ -361,4 +380,13 @@ Multiple Claude/CLI windows share **one** Unity editor, so commands collide (COM
 - `SCREENSHOT` - CLI-side window capture (see Screenshot section)
 - `EDITORLOG [N|errors|grep PAT|path]` - Tail Unity's on-disk `Editor.log` (aliases: `EDITORLOGS`, `ELOG`). No pipe needed — works when the bridge isn't running in that instance (clones, crashed/busy Unity) and surfaces import/compile/crash/load lines `LOG` can't reach. Resolves the per-instance log (`-logFile` arg → header-matched `Editor*.log` → default `%LOCALAPPDATA%\Unity\Editor\Editor.log`) and prints which file it read. `errors` filters to error/exception/fail lines; `grep PAT` is a case-insensitive regex; `path` prints the resolved path only.
 - `VSCODE` - Install the bundled VSCode/Cursor status-bar extension into detected editors (`code`/`code-insiders`/`cursor`/`codium`/`windsurf`). The `.vsix` is embedded in the CLI exe (built from `vscode-extension/`, version-locked to the CLI) and installed via `<editor> --install-extension <vsix> --force`; idempotent (skips if the editor already has an equal-or-newer version). `SETUP` prints a hint pointing here but does not auto-install.
+- `PACKAGES <sub>` - Asset Store library sync + `.unitypackage` extraction. No pipe, no Editor, no project — downloading an asset is otherwise a Package Manager window operation (i.e. boot Unity to pull a file). See [PackagesCommand.cs](clibridge4unity/PackagesCommand.cs).
+  - `PACKAGES auth <cookie>` - store + verify a Unity ID session. **The login is the Unity ID that owns the purchases** — there is no separate Asset Store account. Cookie is `__Secure-next-auth.session-token` from a logged-in `assetstore.unity.com` tab (DevTools > Application > Cookies); stored under `~/.clibridge4unity/packages/<account>/`.
+  - `PACKAGES list [filter]` · `PACKAGES cache [filter]` - owned assets / what the Editor already downloaded
+  - `PACKAGES download <folder> [filter]` - **sync, not a blind pull.** Anything already in `<folder>` at the right size is skipped on headers alone (no body transferred), so re-running to stay current is cheap. Live per-file progress with rate + ETA; `.part` + `Content-Length` verify + rename, so an interrupted run resumes (via `Range`) and a killed one never leaves a half-file looking complete. `-n` reports what's missing without transferring.
+  - `PACKAGES extract <src> [dest] [--meta] [--preview]` - offline, no login. Use `--meta` when the output goes into a real project or Unity regenerates GUIDs and in-package references break.
+  - `--account NAME` keeps a separate cookie + library list per Unity ID (a cache can span two accounts).
+  - Auth chain: cookie → `GET assetstore.unity.com/api/auth/session` → `.accessToken.genesis_access_token` (~2h) → `Authorization: Bearer` on `packages-v2.unity.com`. `packages-v2` rejects cookies outright and the cookie is host-scoped to the store, so the exchange is mandatory. The cookie outlives the token by weeks: a 401 mid-run re-mints and retries, it does not mean "log in again". A 403 on a signed URL means the signature aged out — that one package is re-resolved once.
+  - Delisted assets 404 on resolve. Expected, logged as `UNAVAILABLE`, not a failure.
+  - `pathname` inside a package is untrusted input: `..`, `/absolute` and drive-absolute destinations are refused rather than written.
 - `RELEASENOTES [from] [to] [-c Cat,Cat] [-g regex] [--format md|json|text] [-o file] [--url]` - Fetch Unity Editor release notes for a version range from `release-notes.ds.unity3d.com` (pure HTTP, no Unity/project needed). **Bare** = current project's Unity version (`ProjectVersion.txt`) → latest available; **from-only** = that version → latest. `--list [substr]` browses versions. `-c` filters categories (substring, comma-OR), `-g` regex-filters note text — use it to check whether a hard bug matches a known Unity fix/regression. Issue links (`UUM-####`) resolve to the issue tracker. Aliases: `UNITYNOTES`, `RELNOTES`. See [clibridge4unity-release-notes skill](clibridge4unity/skills/clibridge4unity-release-notes.md).

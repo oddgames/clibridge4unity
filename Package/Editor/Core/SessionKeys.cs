@@ -12,6 +12,12 @@ namespace clibridge4unity
         public static readonly string UnityHwnd = "Bridge_UnityHwnd";
         public static readonly string MainThreadId = "Bridge_MainThreadId";
         public static readonly string PlayModeStartTime = "Bridge_PlayModeStartTime";
+
+        // Who put the editor into play mode. The claim is written by PLAY just before the
+        // transition and consumed by the state-change handler; no claim means a human did it.
+        public static readonly string PlayClaim = "Bridge_PlayClaim";
+        public static readonly string PlayOwner = "Bridge_PlayOwner";
+        public static readonly string PlayOwnerSince = "Bridge_PlayOwnerSince";
         public static readonly string LastBuildPath = "Bridge_LastBuildPath";
         public static readonly string LastBuildTarget = "Bridge_LastBuildTarget";
 

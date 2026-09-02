@@ -5,6 +5,8 @@ description: Diagnose a suspected Unity compile error. Use LINT/COMPILE reactive
 
 Standard compile/lint discipline applies; below is only what's specific to this CLI. Default after editing C#: do nothing — Unity auto-recompiles on focus, and 99% of the time the user has already compiled by the time they ask you to test. Assume compiled; escalate only on evidence of a problem (wrong results, errors in STATUS, CODE_EXEC can't see a new type).
 
+**Batch the work, verify once.** The same rule governs every verify step, not just LINT: finish the whole change, then check it — one pass at the end, not one per edit. A multi-file change is one unit of work. Verifying mid-change is slow (each check costs seconds to minutes), noisy (partial edits report errors that your next edit was going to fix anyway), and on a shared editor it can collide with whatever else is running. Escalate early only when a check genuinely informs the next edit — an unfamiliar API, or a file you cannot otherwise validate.
+
 ## Tools, cheapest first
 
 `STATUS` — instant. Is Unity compiling, are there errors, what mode. No errors → stop.

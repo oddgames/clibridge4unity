@@ -212,7 +212,8 @@ class Program
     private static bool IsTrivialForTick(string cmdUpper)
         => cmdUpper is "PING" or "PROBE" or "DIAG" or "VERSION" or "HELP" or "LAST"
                     or "ANALYZE" or "CODE_ANALYZE" or "CODE_SEARCH" or "MAP" or "LINT"
-                    or "EDITORLOG" or "ELOG" or "EDITORLOGS" or "SETUP" or "UPDATE" or "HOOK";
+                    or "EDITORLOG" or "ELOG" or "EDITORLOGS" or "SETUP" or "UPDATE" or "HOOK"
+                    ;
 
     private static int SafeCurrentPid()
     {
@@ -649,6 +650,90 @@ class Program
         if (lastTimestamp > 0)
             Console.Error.WriteLine($"       lastHeartbeatAgeSec: {DateTimeOffset.UtcNow.ToUnixTimeSeconds() - lastTimestamp}");
         return EXIT_TIMEOUT;
+    }
+
+    /// <summary>
+    /// Who owns the running play session, straight from the heartbeat file — no pipe.
+    /// That matters here: the editor is busy in a play session exactly when we need to ask,
+    /// which is the worst moment to wait on a round trip. Empty means not in play mode.
+    /// </summary>
+    static string ReadPlayOwner(string projectPath)
+    {
+        try
+        {
+            string projectName = GetProjectName(projectPath);
+            string expected = NormalizeProjectPath(projectPath);
+            foreach (var file in Directory.GetFiles(Path.GetTempPath(),
+                                                    $"clibridge4unity_*_{projectName}.status"))
+            {
+                try
+                {
+                    string json = File.ReadAllText(file);
+                    string fromStatus = UnescapeJsonString(ExtractJsonString(json, "projectPath"));
+                    if (!string.IsNullOrEmpty(fromStatus) &&
+                        NormalizeProjectPath(fromStatus) != expected)
+                        continue;
+                    return UnescapeJsonString(ExtractJsonString(json, "playOwner")) ?? "";
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return "";
+    }
+
+    // Set while the gate issues its own STOP, so that STOP is not itself gated.
+    static bool _gateBypass;
+
+    /// <summary>
+    /// Ask the play-mode owner before running something that could change the editor.
+    /// Returns true to proceed. See PlayGate for why the answers are yield/run-now/deny.
+    /// </summary>
+    static bool PassesPlayGate(string pipeName, string projectPath, string command, string data)
+    {
+        if (_gateBypass) return true;
+        string cmdUpper = command.ToUpperInvariant();
+        if (!PlayGate.NeedsGate(cmdUpper)) return true;
+
+        string owner = ReadPlayOwner(projectPath);
+        if (string.IsNullOrEmpty(owner)) return true;                       // nobody is playing
+        if (owner.Equals(PeerLedger.SelfId, StringComparison.OrdinalIgnoreCase))
+            return true;                                                    // my own session
+
+        var req = PlayGate.File_(projectPath, command, data, owner);
+        string who = owner == PlayGate.OwnerUser ? "you (entered manually)" : "agent " + owner;
+        Console.Error.WriteLine($"[gate] Play mode belongs to {who}. Asking before running {cmdUpper}...");
+
+        // Prompt on the desktop; if that cannot be shown, fall back to waiting on the request
+        // file so another surface (a terminal, the editor) can answer instead.
+        string decision = GateNotify.Ask(req, who);
+        if (decision != null) PlayGate.Decide(projectPath, req.Id, decision);
+        else decision = PlayGate.Await(projectPath, req.Id, PlayGate.DefaultWait);
+
+        switch (decision)
+        {
+            case PlayGate.RunNow:
+                Console.Error.WriteLine("[gate] Allowed — running inside the live play session.");
+                return true;
+
+            case PlayGate.Yield:
+                Console.Error.WriteLine("[gate] Allowed — exiting play mode first.");
+                _gateBypass = true;
+                try { SendCommand(pipeName, projectPath, "STOP", $"--force --by {PeerLedger.SelfId}"); }
+                catch { }
+                finally { _gateBypass = false; }
+                return true;
+
+            case PlayGate.Deny:
+                Console.Error.WriteLine("[gate] Denied by the play-mode owner. Nothing was run.");
+                return false;
+
+            default:
+                PlayGate.Cancel(projectPath, req.Id);
+                Console.Error.WriteLine($"[gate] No answer in {PlayGate.DefaultWait.TotalSeconds:0}s. Nothing was run.");
+                Console.Error.WriteLine("       The owner can answer a future request with:  ALLOW <id> | ALLOW <id> yield | DENY <id>");
+                return false;
+        }
     }
 
     static (string state, long timestamp, bool found) ReadHeartbeatState(string projectPath)
@@ -1641,6 +1726,17 @@ class Program
             PeerLedger.MarkActive(projectPath, command, data);
             foreach (var w in PeerLedger.CheckConflicts(projectPath, cmdUpper, data))
                 Console.Error.WriteLine($"[conflict] WARNING: {w}");
+
+            // Identify this window on play-mode transitions so the editor can attribute the
+            // session. Without it every agent-entered play session is indistinguishable from
+            // a person pressing Play, and STOP cannot tell "mine" from "someone else's".
+            if ((cmdUpper == "PLAY" || cmdUpper == "STOP")
+                && (data == null || data.IndexOf("--by", StringComparison.OrdinalIgnoreCase) < 0))
+            {
+                data = string.IsNullOrWhiteSpace(data)
+                    ? $"--by {PeerLedger.SelfId}"
+                    : $"{data} --by {PeerLedger.SelfId}";
+            }
         }
         catch { }
 
@@ -1890,6 +1986,13 @@ class Program
             || command.Equals("ELOG", StringComparison.OrdinalIgnoreCase))
         {
             return HandleEditorLog(projectPath, unityInfo, data);
+        }
+
+        // REQUESTS / ALLOW / DENY: the owner's side of the play-mode gate. Pure file work —
+        // no pipe, so they answer even while the editor is busy in a play session.
+        if (cmdUpper == "REQUESTS" || cmdUpper == "ALLOW" || cmdUpper == "DENY")
+        {
+            return HandlePlayGate(projectPath, cmdUpper, data);
         }
 
         // CODE_ANALYZE: offline — served by the Roslyn daemon or single-pass source parsing.
@@ -2777,7 +2880,10 @@ class Program
     static readonly HashSet<string> NoPipeNeeded = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         "DISMISS", "LAST", "OPEN", "KILL", "WAKEUP", "CODE_ANALYZE", "MAP", "LINT", "SCREENSHOT",
-        "EDITORLOG", "EDITORLOGS", "ELOG", "RELEASENOTES", "UNITYNOTES", "RELNOTES"
+        "EDITORLOG", "EDITORLOGS", "ELOG", "RELEASENOTES", "UNITYNOTES", "RELNOTES",
+        // The gate must answer while the editor is busy in a play session — that is the
+        // entire situation it exists for, so it can never depend on the pipe.
+        "REQUESTS", "ALLOW", "DENY"
     };
 
     /// <summary>
@@ -3085,6 +3191,12 @@ class Program
     static int SendCommand(string pipeName, string projectPath, string command, string data)
     {
         CliTrace("SendCommand", $"begin command={command}, dataChars={data?.Length ?? 0}, pipe={pipeName}, project={projectPath}");
+
+        // Every pipe command funnels through here, so this is the one place the play-mode
+        // gate has to sit to cover anything that could change the editor.
+        if (!PassesPlayGate(pipeName, projectPath, command, data))
+            return EXIT_COMMAND_ERROR;
+
         try
         {
             // For CODE_EXEC commands, resolve file paths and fix shell mangling
@@ -5101,6 +5213,62 @@ class Program
     /// modified match (that's the currently-active session). Excludes user-made copies.
     /// </summary>
     /// <summary>
+    /// <summary>
+    /// The owner's side of the play-mode gate: see what an agent is asking for, and answer.
+    ///   REQUESTS            list what is waiting
+    ///   ALLOW &lt;id&gt;          run it inside the live play session (default)
+    ///   ALLOW &lt;id&gt; yield    leave play mode and hand the editor over
+    ///   DENY &lt;id&gt;
+    /// </summary>
+    static int HandlePlayGate(string projectPath, string cmdUpper, string data)
+    {
+        if (cmdUpper == "REQUESTS")
+        {
+            var pending = PlayGate.Pending(projectPath);
+            if (pending.Count == 0)
+            {
+                Console.WriteLine("No pending requests.");
+                return EXIT_SUCCESS;
+            }
+            Console.WriteLine($"{pending.Count} request(s) waiting on you:\n");
+            foreach (var r in pending)
+            {
+                Console.WriteLine($"  {r.Id}   from {r.From}   {PeerLedger.Ago(r.CreatedUtc)}");
+                Console.WriteLine($"           {r.Summary()}");
+            }
+            Console.WriteLine("\n  ALLOW <id>         run it in your play session (play mode untouched)");
+            Console.WriteLine("  ALLOW <id> yield   exit play mode and hand over");
+            Console.WriteLine("  DENY <id>");
+            return EXIT_SUCCESS;
+        }
+
+        var parts = (data ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0)
+        {
+            Console.Error.WriteLine($"Usage: {cmdUpper} <id>" + (cmdUpper == "ALLOW" ? " [yield]" : ""));
+            Console.Error.WriteLine("       REQUESTS   to see what is waiting");
+            return EXIT_USAGE_ERROR;
+        }
+
+        string id = parts[0];
+        string decision = cmdUpper == "DENY" ? PlayGate.Deny
+            : (parts.Length > 1 && parts[1].StartsWith("y", StringComparison.OrdinalIgnoreCase))
+                ? PlayGate.Yield : PlayGate.RunNow;
+
+        if (!PlayGate.Decide(projectPath, id, decision))
+        {
+            Console.Error.WriteLine($"Request '{id}' is unknown, expired, or already answered.");
+            return EXIT_COMMAND_ERROR;
+        }
+        Console.WriteLine(decision switch
+        {
+            PlayGate.Yield => $"{id}: leaving play mode and handing over.",
+            PlayGate.RunNow => $"{id}: allowed to run in your play session.",
+            _ => $"{id}: denied.",
+        });
+        return EXIT_SUCCESS;
+    }
+
     /// EDITORLOG — dump/tail Unity's Editor.log file from disk (CLI-side, no pipe). Resolves the
     /// per-instance log (-logFile arg via process detection, else header-matched scan, else the
     /// default %LOCALAPPDATA%\Unity\Editor\Editor.log), then prints a tail — optionally filtered

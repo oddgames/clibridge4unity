@@ -152,6 +152,11 @@ namespace clibridge4unity
             // live session, use `LOG errors`.
             try
             {
+                // `--by <id>` identifies the calling window so the session can be attributed.
+                // Stripped here so it never reaches the scene-path handling below.
+                string agentId = null;
+                data = ExtractAgentId(data, ref agentId);
+
                 string scenePath = string.IsNullOrWhiteSpace(data) ? null : data.Trim();
                 if (scenePath != null)
                 {
@@ -167,6 +172,9 @@ namespace clibridge4unity
 
                 SessionState.SetString(SessionKeys.PlayModeStartTime, DateTime.Now.Ticks.ToString());
                 StartPlayLogCapture();
+                // Claim immediately before the transition: the handler that resolves it runs
+                // on ExitingEditMode, and only a fresh claim is believed.
+                PlayOwnership.Claim(agentId);
                 EditorApplication.isPlaying = true;
                 return Response.Success("Entered play mode. Capturing errors — STOP returns the session log; `LOG errors` peeks live.");
             }
@@ -176,15 +184,51 @@ namespace clibridge4unity
             }
         }
 
+        /// <summary>
+        /// Pull `--by &lt;id&gt;` out of a command's data and return what remains.
+        /// Kept as plain string work so callers' own parsing is untouched.
+        /// </summary>
+        static string ExtractAgentId(string data, ref string agentId)
+        {
+            if (string.IsNullOrWhiteSpace(data)) return data;
+            const string flag = "--by";
+            int at = data.IndexOf(flag, StringComparison.OrdinalIgnoreCase);
+            if (at < 0) return data;
+
+            int start = at + flag.Length;
+            while (start < data.Length && (data[start] == '=' || data[start] == ' ')) start++;
+            int end = start;
+            while (end < data.Length && !char.IsWhiteSpace(data[end])) end++;
+            if (end > start) agentId = data.Substring(start, end - start);
+            return data.Remove(at, end - at).Trim();
+        }
+
         [BridgeCommand("STOP", "Exit play mode and return any errors/exceptions that fired during the play session",
             Category = "Scene",
-            Usage = "STOP",
+            Usage = "STOP  OR  STOP --force  (stop a session another window or the user started)",
             RequiresMainThread = true,
             RelatedCommands = new[] { "PLAY", "LOG" })]
-        public static string Stop()
+        public static string Stop(string data)
         {
             try
             {
+                string agentId = null;
+                bool force = !string.IsNullOrEmpty(data)
+                          && data.IndexOf("--force", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (force) data = data.Replace("--force", "").Replace("--FORCE", "");
+                ExtractAgentId(data, ref agentId);
+
+                // One editor, several drivers. Stopping someone else's play session destroys
+                // what they are watching and any state they built up, with no way to recover
+                // it — so it takes an explicit override rather than happening silently.
+                if (!force && PlayOwnership.OwnedByOther(agentId))
+                {
+                    return Response.Error(
+                        "Play mode is not yours — " + PlayOwnership.Describe() + ".\n" +
+                        "Stopping it would end a session someone else is using.\n" +
+                        "  STOP --force   stop anyway");
+                }
+
                 if (!EditorApplication.isPlaying)
                 {
                     // Unsubscribe defensively in case PLAY left a dangling capture (e.g. crash mid-session).
@@ -261,6 +305,7 @@ namespace clibridge4unity
                 sb.AppendLine($"isPlaying: {EditorApplication.isPlaying}");
                 sb.AppendLine($"isPaused: {EditorApplication.isPaused}");
                 sb.AppendLine($"isCompiling: {EditorApplication.isCompiling}");
+                sb.AppendLine(PlayOwnership.Describe());
                 return sb.ToString().TrimEnd();
             }
             catch (Exception ex)
