@@ -1025,8 +1025,20 @@ namespace clibridge4unity
                 return Response.Error("Usage: PROFILE save <path to .data>");
             var dir = Path.GetDirectoryName(Path.GetFullPath(path));
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            if (!ProfilerDriver.SaveProfile(path)) return Response.Error($"SaveProfile failed: {path}");
-            var len = File.Exists(path) ? new FileInfo(path).Length : 0;
+            // SaveProfile returns void on Unity 6000.4+ and bool on older versions, so its result
+            // cannot be tested directly without breaking one of them. A call as an
+            // expression-statement compiles under both (the bool is simply discarded).
+            //
+            // Success is therefore inferred from the file. Note the write time as well as
+            // existence: overwriting an earlier capture that is still on disk would otherwise
+            // look like success even if the save did nothing.
+            // Fully qualified: this file has no `using System;`, and adding one risks ambiguous
+            // Random/Object references against UnityEngine.
+            var before = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : System.DateTime.MinValue;
+            ProfilerDriver.SaveProfile(path);
+            if (!File.Exists(path) || File.GetLastWriteTimeUtc(path) <= before)
+                return Response.Error($"SaveProfile failed: {path}");
+            var len = new FileInfo(path).Length;
             return Response.Success($"Saved {path} ({len / (1024.0 * 1024.0):F1}MB)");
         }
 

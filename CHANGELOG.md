@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.1.75 — 2026-09-03
+
+## v1.1.75
+
+### Fixed
+- **The Unity package failed to compile on Unity 6000.4+.** `CoreCommands.ProfileSave` tested the result of `ProfilerDriver.SaveProfile`, which changed from returning `bool` to returning `void` — producing `CS0023: Operator '!' cannot be applied to operand of type 'void'` and taking the whole `clibridge4unity.Commands.Core` asmdef with it. The line dated from v1.1.71 and only surfaced when a project moved to 6000.4; v1.1.73 and v1.1.74 both shipped it. **Anyone on Unity 6000.4+ should take this release.**
+
+  The call is now an expression-statement, which compiles under both signatures (the `bool` is simply discarded on older versions), and success is inferred from the saved file appearing *and* its write time advancing — so overwriting an earlier capture that is still on disk cannot be mistaken for a successful save.
+
+### Internal
+- The deploy pipeline builds and version-checks the **CLI** but never compiles the **Package** — that only happens inside Unity. This release is the direct consequence: two tags shipped Package code that had never been compiled on the target Unity version. Worth closing with a per-asmdef Roslyn check before release.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.74 — 2026-09-03
 
 ## v1.1.74
