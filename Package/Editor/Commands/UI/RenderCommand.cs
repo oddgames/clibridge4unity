@@ -21,7 +21,6 @@ namespace clibridge4unity
         // Profiler markers for the heavy render paths. Render* methods do GrabPixels,
         // RenderTexture creation, multi-pass repaint settle, prefab instantiation, asset
         // re-import — all expensive. Multi-pass UXML settle is the worst when fonts load.
-        static readonly ProfilerMarker _markerRender = new ProfilerMarker("Bridge.UI.Render");
         static readonly ProfilerMarker _markerRenderUxml = new ProfilerMarker("Bridge.UI.RenderUxml");
         static readonly ProfilerMarker _markerRenderUxmlSettle = new ProfilerMarker("Bridge.UI.RenderUxmlSettlePump");
         static readonly ProfilerMarker _markerRenderUxmlGrab = new ProfilerMarker("Bridge.UI.RenderUxmlGrab");
@@ -169,7 +168,9 @@ namespace clibridge4unity
         // Called inline by SCREENSHOT for asset paths (.prefab / .uxml). No separate command.
         public static async Task<string> Render(string data)
         {
-            using var _profile = _markerRender.Auto();
+            // No ProfilerMarker here: this method awaits, so Begin and End would land
+            // in different frames (and threads) and Unity reports a missing EndSample.
+            // The synchronous helpers below carry the markers that measure real cost.
             try
             {
                 Directory.CreateDirectory(OutputDir);

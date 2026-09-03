@@ -19,7 +19,6 @@ namespace clibridge4unity
     {
         // Profiler markers for the prefab ops. Create + Save touch the asset database;
         // List sweeps a folder for prefabs; FindType enumerates AppDomain assemblies.
-        static readonly ProfilerMarker _markerCreate = new ProfilerMarker("Bridge.Prefab.Create");
         static readonly ProfilerMarker _markerSave = new ProfilerMarker("Bridge.Prefab.Save");
         static readonly ProfilerMarker _markerInstantiate = new ProfilerMarker("Bridge.Prefab.Instantiate");
         static readonly ProfilerMarker _markerApply = new ProfilerMarker("Bridge.Prefab.Apply");
@@ -38,7 +37,9 @@ namespace clibridge4unity
             RelatedCommands = new[] { "SCREENSHOT", "PREFAB_INSTANTIATE", "PREFAB_HIERARCHY" })]
         public static async Task<string> Create(string jsonData)
         {
-            using var _profile = _markerCreate.Auto();
+            // No ProfilerMarker here: this method awaits, so Begin and End would land
+            // in different frames (and threads) and Unity reports a missing EndSample.
+            // The synchronous helpers below carry the markers that measure real cost.
             try
             {
                 string name;

@@ -37,8 +37,6 @@ namespace clibridge4unity
         // Profiler markers for the heavy compile + reference-collection paths. Roslyn compile
         // of even small snippets can take 200ms on first call (loading reference assemblies);
         // mcs is slower. CollectMcsReferences sweeps the entire AppDomain.
-        static readonly ProfilerMarker _markerExecute = new ProfilerMarker("Bridge.Code.Execute");
-        static readonly ProfilerMarker _markerExecuteReturn = new ProfilerMarker("Bridge.Code.ExecuteReturn");
         static readonly ProfilerMarker _markerCompile = new ProfilerMarker("Bridge.Code.Compile");
         static readonly ProfilerMarker _markerCompileRoslyn = new ProfilerMarker("Bridge.Code.CompileRoslyn");
         static readonly ProfilerMarker _markerCompileMcs = new ProfilerMarker("Bridge.Code.CompileMcs");
@@ -96,7 +94,9 @@ namespace clibridge4unity
             RelatedCommands = new[] { "CODE_EXEC_RETURN", "LOG" })]
         public static async Task<string> Execute(string code)
         {
-            using var _profile = _markerExecute.Auto();
+            // No ProfilerMarker here: this method awaits, so Begin and End would land
+            // in different frames (and threads) and Unity reports a missing EndSample.
+            // The synchronous helpers below carry the markers that measure real cost.
             try
             {
                 code = ExtractFlag(code, "--bg", out bool background);
@@ -194,7 +194,9 @@ namespace clibridge4unity
             RelatedCommands = new[] { "CODE_EXEC", "LOG" })]
         public static async Task<string> ExecuteReturn(string code)
         {
-            using var _profile = _markerExecuteReturn.Auto();
+            // No ProfilerMarker here: this method awaits, so Begin and End would land
+            // in different frames (and threads) and Unity reports a missing EndSample.
+            // The synchronous helpers below carry the markers that measure real cost.
             try
             {
                 if (string.IsNullOrEmpty(code))

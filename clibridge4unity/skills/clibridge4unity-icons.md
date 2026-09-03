@@ -17,6 +17,16 @@ Standard UI Toolkit / uGUI icon facts (white source + `-unity-background-image-t
 - Edit the SVG to white (`#FFFFFF`) in a workspace folder *outside* the Unity project; keep that as the source.
 - **Unity 6.3+ UI Toolkit supports native SVG** (crisp at any scale) and USS filters (tint/grayscale/blur) — consider it for UI-Toolkit-only icons before rasterising. The white-PNG pipeline below remains required for uGUI sprites and pre-6.3 projects.
 
+## Nine-slicing (frames, panels, buttons)
+
+An icon that is a *frame* rather than a glyph must be sliced, or the corners stretch. USS needs the whole set, not just the edges:
+
+- `-unity-slice-left | -top | -right | -bottom: <integer>` — in **source-texture pixels**, not layout px.
+- `-unity-slice-scale: <length>` — the one people leave out. Without it the border renders at 1:1 texture pixels, so the same frame looks chunky on a high-DPI panel and thin on a low one.
+- `-unity-slice-type: sliced | tiled` — `tiled` repeats the edge instead of stretching it; use for textured borders where stretching smears.
+
+Set slices on the **texture importer** for uGUI sprites; USS slice properties apply to `background-image` on a `VisualElement`. Setting one and expecting the other to follow is a common dead end.
+
 ## Render command (white PNG at 4× display size)
 
 ```bash

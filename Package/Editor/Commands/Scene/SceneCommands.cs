@@ -23,7 +23,6 @@ namespace clibridge4unity
         static readonly ProfilerMarker _markerFind = new ProfilerMarker("Bridge.Scene.Find");
         static readonly ProfilerMarker _markerDelete = new ProfilerMarker("Bridge.Scene.Delete");
         static readonly ProfilerMarker _markerSave = new ProfilerMarker("Bridge.Scene.Save");
-        static readonly ProfilerMarker _markerLoad = new ProfilerMarker("Bridge.Scene.Load");
         static readonly ProfilerMarker _markerSceneView = new ProfilerMarker("Bridge.Scene.SceneView");
 
         /// <summary>
@@ -321,7 +320,9 @@ namespace clibridge4unity
             RequiresMainThread = false)]
         public static async Task<string> Load(string data)
         {
-            using var _profile = _markerLoad.Auto();
+            // No ProfilerMarker here: this method awaits, so Begin and End would land
+            // in different frames (and threads) and Unity reports a missing EndSample.
+            // The synchronous helpers below carry the markers that measure real cost.
             try
             {
                 if (string.IsNullOrEmpty(data))
