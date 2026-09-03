@@ -720,7 +720,11 @@ class Program
         }
 
         var req = PlayGate.File_(projectPath, command, data, owner);
-        string who = owner == PlayGate.OwnerUser ? "you (entered manually)" : "agent " + owner;
+        // Not "you entered manually" — that is an inference, and it was wrong whenever an agent
+        // started play mode by a route that leaves no claim.
+        string who = owner == PlayGate.OwnerUser
+            ? "no agent claimed it — the Play button, or a tool outside the bridge"
+            : "agent " + owner;
         Console.Error.WriteLine($"[gate] Play mode belongs to {who}. Asking before running {cmdUpper}...");
 
         // Prompt on the desktop; if that cannot be shown, fall back to waiting on the request

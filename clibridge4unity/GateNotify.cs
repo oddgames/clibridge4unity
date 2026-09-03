@@ -130,7 +130,7 @@ internal static class GateNotify
                     pszWindowTitle = "Unity bridge",
                     pszMainInstruction = "An agent wants to use the editor",
                     pszContent =
-                        $"You are in play mode ({ownerLabel}).\n\n" +
+                        $"The editor is in play mode — {ownerLabel}.\n\n" +
                         $"Window {request.From} wants to run:\n{request.Summary()}",
                     pszExpandedControlText = "Details",
                     pszCollapsedControlText = "Details",

@@ -1,5 +1,8 @@
 using System;
+using System.Globalization;
+using System.IO;
 using UnityEditor;
+using UnityEngine;
 
 namespace clibridge4unity
 {
@@ -44,7 +47,12 @@ namespace clibridge4unity
         {
             if (change == PlayModeStateChange.ExitingEditMode)
             {
-                string owner = ConsumeClaim() ?? User;
+                // Three sources, most specific first:
+                //   1. an explicit claim — the PLAY command said who it was
+                //   2. a bridge command in flight — something like CODE_EXEC set isPlaying,
+                //      so the transition belongs to whoever issued that command
+                //   3. nothing — no agent was involved, so a person started it
+                string owner = ConsumeClaim() ?? ActiveCaller() ?? User;
                 SessionState.SetString(SessionKeys.PlayOwner, owner);
                 SessionState.SetString(SessionKeys.PlayOwnerSince, DateTime.UtcNow.Ticks.ToString());
             }
@@ -54,6 +62,77 @@ namespace clibridge4unity
                 SessionState.EraseString(SessionKeys.PlayOwnerSince);
                 SessionState.EraseString(SessionKeys.PlayClaim);
             }
+        }
+
+        /// <summary>
+        /// How long an in-flight command marker is trusted for attribution. Deliberately much
+        /// tighter than the ledger's own 300s ceiling: this is answering "was a command running
+        /// at this instant", not "has this window been busy recently".
+        /// </summary>
+        const int ActiveMarkerWindowSeconds = 120;
+
+        /// <summary>
+        /// The window whose bridge command is executing right now, or null.
+        ///
+        /// The CLI writes `{project}/.clibridge4unity/peers/{id}.active` before sending any
+        /// command and removes it after, so a play-mode transition that happens while one of
+        /// those exists was caused by that window — whatever route it took. This is what makes
+        /// `CODE_EXEC EditorApplication.isPlaying = true` attributable, when only the PLAY
+        /// command can leave an explicit claim.
+        ///
+        /// Reading a CLI-side file from the package is a layering compromise, taken because the
+        /// wire protocol has no field for caller identity and adding one would break older
+        /// clients. Best-effort throughout: any failure just falls through to "user".
+        /// </summary>
+        static string ActiveCaller()
+        {
+            try
+            {
+                string root = Path.GetDirectoryName(Application.dataPath);
+                if (string.IsNullOrEmpty(root)) return null;
+                string peers = Path.Combine(root, ".clibridge4unity", "peers");
+                if (!Directory.Exists(peers)) return null;
+
+                string best = null;
+                DateTime bestStarted = DateTime.MinValue;
+
+                foreach (string file in Directory.GetFiles(peers, "*.active"))
+                {
+                    DateTime started = DateTime.MinValue;
+                    int pid = 0;
+                    foreach (string line in File.ReadAllLines(file))
+                    {
+                        if (line.StartsWith("startedAt=", StringComparison.Ordinal))
+                            DateTime.TryParse(line.Substring(10), CultureInfo.InvariantCulture,
+                                              DateTimeStyles.RoundtripKind, out started);
+                        else if (line.StartsWith("pid=", StringComparison.Ordinal))
+                            int.TryParse(line.Substring(4), out pid);
+                    }
+
+                    if (started == DateTime.MinValue) continue;
+                    double age = (DateTime.UtcNow - started.ToUniversalTime()).TotalSeconds;
+                    if (age < 0 || age > ActiveMarkerWindowSeconds) continue;
+                    // A marker left behind by a crashed client must not claim the session.
+                    if (pid > 0 && !ProcessAlive(pid)) continue;
+
+                    if (started > bestStarted)
+                    {
+                        bestStarted = started;
+                        best = Path.GetFileNameWithoutExtension(file);
+                    }
+                }
+                return best;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        static bool ProcessAlive(int pid)
+        {
+            try { System.Diagnostics.Process.GetProcessById(pid); return true; }
+            catch { return false; }
         }
 
         static string ConsumeClaim()
@@ -120,8 +199,11 @@ namespace clibridge4unity
                     ? string.Format(" ({0:0}m ago)", elapsed.TotalMinutes)
                     : string.Format(" ({0:0}s ago)", elapsed.TotalSeconds);
             }
+            // Say what is actually known. "user" is an inference from the absence of any claim
+            // and any in-flight command — not something the editor reports — so it must not be
+            // stated as fact that a person pressed Play.
             return owner == User
-                ? "owner: user (entered manually)" + age
+                ? "owner: no agent claimed this session (Play button, or something outside the bridge)" + age
                 : "owner: agent " + owner + age;
         }
     }

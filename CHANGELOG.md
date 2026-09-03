@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.76 — 2026-09-03
+
+## v1.1.76
+
+### Fixed
+- **Play mode started by an agent was reported as started by you.** Ownership was inferred from the absence of a claim, and only the `PLAY` command ever left one — so an agent entering play mode any other way (`CODE_EXEC EditorApplication.isPlaying = true`, `MENU Edit/Play`, an editor script) was indistinguishable from a person pressing the Play button. The gate then prompted the wrong person about the wrong thing.
+
+  Attribution now has three tiers, most specific first: an explicit claim from `PLAY`; failing that, the window whose bridge command was **in flight** when the transition happened; failing that, nobody. The middle tier is what makes `CODE_EXEC` attributable — the CLI already writes `{project}/.clibridge4unity/peers/{id}.active` before every command and removes it after, so a transition during one belongs to that window whatever route it took.
+
+- **The prompt asserted something the code did not know.** It read "You are in play mode (you (entered manually))" — stating as fact an inference drawn from an absence. It now says the editor is in play mode and that no agent claimed it, naming the Play button or a tool outside the bridge as the likely cause. `PLAYMODE` reports the same way.
+
+### Internal
+- No wire-protocol change. `COMMAND|data` has no field for caller identity and adding one would have forced a `MinCompatibleExtensionVersion` bump and broken older clients — for information already on disk. The trade-off is that the package reads a CLI-written file, which is a layering compromise, kept best-effort so any failure falls through to "no agent".
+- In-flight markers are trusted for 120s, far tighter than the peer ledger's own 300s ceiling: this answers "was a command running at this instant", not "has this window been busy lately". A marker whose pid is dead is ignored, so a crashed client cannot claim a session.
+- Ownership remains in `SessionState` (`Bridge_PlayOwner`, `Bridge_PlayOwnerSince`) so it survives domain reloads, and is readable at any time through `PLAYMODE` or the heartbeat's `playOwner`/`playOwnerSince` fields.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.75 — 2026-09-03
 
 ## v1.1.75
