@@ -657,7 +657,7 @@ class Program
     /// That matters here: the editor is busy in a play session exactly when we need to ask,
     /// which is the worst moment to wait on a round trip. Empty means not in play mode.
     /// </summary>
-    static string ReadPlayOwner(string projectPath)
+    static (string owner, long since) ReadPlayOwner(string projectPath)
     {
         try
         {
@@ -673,13 +673,18 @@ class Program
                     if (!string.IsNullOrEmpty(fromStatus) &&
                         NormalizeProjectPath(fromStatus) != expected)
                         continue;
-                    return UnescapeJsonString(ExtractJsonString(json, "playOwner")) ?? "";
+                    string owner = UnescapeJsonString(ExtractJsonString(json, "playOwner")) ?? "";
+                    long since = 0;
+                    var m = System.Text.RegularExpressions.Regex.Match(
+                        json, "\"playOwnerSince\"\\s*:\\s*(\\d+)");
+                    if (m.Success) long.TryParse(m.Groups[1].Value, out since);
+                    return (owner, since);
                 }
                 catch { }
             }
         }
         catch { }
-        return "";
+        return ("", 0);
     }
 
     // Set while the gate issues its own STOP, so that STOP is not itself gated.
@@ -692,13 +697,27 @@ class Program
     static bool PassesPlayGate(string pipeName, string projectPath, string command, string data)
     {
         if (_gateBypass) return true;
+        // Explicit opt-out for a window that knows what it is doing.
+        if (Environment.GetEnvironmentVariable("CLIBRIDGE_NO_PLAYGATE") == "1") return true;
+
         string cmdUpper = command.ToUpperInvariant();
         if (!PlayGate.NeedsGate(cmdUpper)) return true;
 
-        string owner = ReadPlayOwner(projectPath);
+        var (owner, since) = ReadPlayOwner(projectPath);
         if (string.IsNullOrEmpty(owner)) return true;                       // nobody is playing
         if (owner.Equals(PeerLedger.SelfId, StringComparison.OrdinalIgnoreCase))
             return true;                                                    // my own session
+
+        // A standing answer from earlier. Without this the owner is asked once per command,
+        // and a single task can issue a dozen — which is unusable, not safe.
+        string standing = PlayGate.FindGrant(projectPath, owner, since);
+        if (standing == PlayGate.RunNow || standing == PlayGate.Always) return true;
+        if (standing == PlayGate.Deny)
+        {
+            Console.Error.WriteLine("[gate] Standing 'deny' for this window this play session. Nothing was run.");
+            Console.Error.WriteLine("       Clear it with: clibridge4unity REQUESTS --forget");
+            return false;
+        }
 
         var req = PlayGate.File_(projectPath, command, data, owner);
         string who = owner == PlayGate.OwnerUser ? "you (entered manually)" : "agent " + owner;
@@ -706,9 +725,19 @@ class Program
 
         // Prompt on the desktop; if that cannot be shown, fall back to waiting on the request
         // file so another surface (a terminal, the editor) can answer instead.
-        string decision = GateNotify.Ask(req, who);
+        string decision = GateNotify.Ask(req, who, out bool remember);
         if (decision != null) PlayGate.Decide(projectPath, req.Id, decision);
         else decision = PlayGate.Await(projectPath, req.Id, PlayGate.DefaultWait);
+
+        // "Always" is a run-now that also stops the asking, permanently.
+        if (decision == PlayGate.Always)
+        {
+            PlayGate.StoreGrant(projectPath, owner, PlayGate.AnySession, PlayGate.RunNow);
+            Console.Error.WriteLine("[gate] Always allowing this window. Revoke with: REQUESTS --forget");
+            return true;
+        }
+        if (remember && decision != null)
+            PlayGate.StoreGrant(projectPath, owner, since, decision);
 
         switch (decision)
         {
@@ -5224,6 +5253,19 @@ class Program
     {
         if (cmdUpper == "REQUESTS")
         {
+            if (!string.IsNullOrWhiteSpace(data) &&
+                data.IndexOf("--forget", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                Console.WriteLine(PlayGate.ClearGrant(projectPath)
+                    ? "Standing permission for this window revoked — you'll be asked again."
+                    : "This window had no standing permission.");
+                return EXIT_SUCCESS;
+            }
+
+            string grant = PlayGate.DescribeGrant(projectPath);
+            if (grant != null)
+                Console.WriteLine($"Standing permission for this window: {grant}\n  (REQUESTS --forget to revoke)\n");
+
             var pending = PlayGate.Pending(projectPath);
             if (pending.Count == 0)
             {
@@ -5238,7 +5280,10 @@ class Program
             }
             Console.WriteLine("\n  ALLOW <id>         run it in your play session (play mode untouched)");
             Console.WriteLine("  ALLOW <id> yield   exit play mode and hand over");
+            Console.WriteLine("  ALLOW <id> always  run it, and stop asking for this window entirely");
             Console.WriteLine("  DENY <id>");
+            Console.WriteLine("\n  REQUESTS --forget  revoke this window's standing permission");
+            Console.WriteLine("  CLIBRIDGE_NO_PLAYGATE=1 in the environment disables the gate for a window");
             return EXIT_SUCCESS;
         }
 
@@ -5251,9 +5296,18 @@ class Program
         }
 
         string id = parts[0];
+        string modifier = parts.Length > 1 ? parts[1] : "";
+        bool always = modifier.StartsWith("a", StringComparison.OrdinalIgnoreCase);
         string decision = cmdUpper == "DENY" ? PlayGate.Deny
-            : (parts.Length > 1 && parts[1].StartsWith("y", StringComparison.OrdinalIgnoreCase))
+            : modifier.StartsWith("y", StringComparison.OrdinalIgnoreCase)
                 ? PlayGate.Yield : PlayGate.RunNow;
+
+        // `ALLOW <id> always` is a run-now that also stops the asking for this window.
+        if (always && cmdUpper == "ALLOW")
+        {
+            var (grantOwner, _) = ReadPlayOwner(projectPath);
+            PlayGate.StoreGrant(projectPath, grantOwner, PlayGate.AnySession, PlayGate.RunNow);
+        }
 
         if (!PlayGate.Decide(projectPath, id, decision))
         {

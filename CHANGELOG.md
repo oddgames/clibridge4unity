@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.1.74 — 2026-09-03
+
+## v1.1.74
+
+### Fixed
+- **The play-mode gate asked far too often.** v1.1.73 asked once per command, and a single agent task can issue a dozen mutating commands — a dozen dialogs. It now asks once and remembers the answer.
+- **A play session you started yourself gated your own terminal.** When a person presses Play the owner is recorded as the literal string `user`, which matches no window's peer id — so *every* window counted as "not the owner", including the one you were typing in. With no memory behind it, that meant a prompt on all 31 mutating commands.
+
+### New
+- **Grants — three levels of "stop asking".**
+  - *"Don't ask again while this play session lasts"* — a checkbox on the dialog. Scoped to `(window, play session)`.
+  - *"Always allow this window"* — a fourth dialog button, or `ALLOW <id> always` from a terminal. Survives across play sessions until revoked.
+  - `CLIBRIDGE_NO_PLAYGATE=1` — disables the gate for a window entirely.
+- **`REQUESTS` reports the standing permission** for the current window, and **`REQUESTS --forget`** revokes it.
+- **`playOwnerSince` in the heartbeat status file** — identifies *which* play session is running, so a permission can be scoped to exactly that one.
+
+### Internal
+- Session grants are keyed to the play session's start tick, so leaving play mode and re-entering invalidates them. A permission given for one session can never silently carry into the next; "always" uses a sentinel session id that deliberately ignores the owner, which is why it survives.
+- A standing `deny` is honoured too, and says how to clear it rather than silently refusing.
+- Attribution itself was already correct and is unchanged: `--by <peer-id>` is injected on `PLAY`/`STOP`, peer ids are stable across CLI invocations, and an agent that starts a play session is recognised as its owner and never gates itself. The over-asking was entirely the `user`-owned case plus the missing memory.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.73 — 2026-09-03
 
 ## v1.1.73

@@ -148,10 +148,14 @@ namespace clibridge4unity
             // someone else's play session without opening a pipe — which matters precisely
             // when the editor is busy in that session and slow to answer.
             string owner = PlayOwnership.Owner ?? "";
+            // playOwnerSince identifies *which* play session this is, so a client can scope a
+            // one-time permission to it and have that permission die when the session does.
+            long ownerSince = PlayOwnership.Since?.Ticks ?? 0;
             return "{\n" +
                    $"  \"state\": \"{state}\",\n" +
                    _statusJsonStaticFields +
                    $"  \"playOwner\": \"{owner}\",\n" +
+                   $"  \"playOwnerSince\": {ownerSince},\n" +
                    $"  \"stateEnteredAt\": {_stateEnteredAtUnix},\n" +
                    $"  \"timestamp\": {nowUnix}\n" +
                    "}";

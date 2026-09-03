@@ -66,18 +66,23 @@ internal static class GateNotify
     const int ID_RUN_NOW = 101;
     const int ID_YIELD = 102;
     const int ID_DENY = 103;
+    const int ID_ALWAYS = 104;
 
     [DllImport("comctl32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern int TaskDialogIndirect(ref TASKDIALOGCONFIG pTaskConfig,
                                          out int pnButton, IntPtr pnRadioButton,
-                                         IntPtr pfVerificationFlagChecked);
+                                         out int pfVerificationFlagChecked);
 
     /// <summary>
     /// Ask the owner what to do. Returns a PlayGate decision, or null if the dialog could
     /// not be shown or was dismissed without choosing.
+    /// <paramref name="remember"/> is true when the owner ticked "don't ask again", meaning
+    /// the answer should stand for the rest of this play session instead of being asked
+    /// again on the very next command.
     /// </summary>
-    public static string Ask(PlayGate.Request request, string ownerLabel)
+    public static string Ask(PlayGate.Request request, string ownerLabel, out bool remember)
     {
+        remember = false;
         try
         {
             var buttons = new[]
@@ -94,6 +99,13 @@ internal static class GateNotify
                     nButtonID = ID_YIELD,
                     pszButtonText = "Exit play mode and let the agent take over\n" +
                                     "Ends your play session, then runs the command.",
+                },
+                new TASKDIALOG_BUTTON
+                {
+                    nButtonID = ID_ALWAYS,
+                    pszButtonText = "Always allow this window\n" +
+                                    "Stop asking for this window entirely, across play sessions. " +
+                                    "Revoke later with  clibridge4unity REQUESTS --forget.",
                 },
                 new TASKDIALOG_BUTTON
                 {
@@ -128,19 +140,23 @@ internal static class GateNotify
                         $"  clibridge4unity ALLOW {request.Id}\n" +
                         $"  clibridge4unity ALLOW {request.Id} yield\n" +
                         $"  clibridge4unity DENY {request.Id}",
+                    pszVerificationText = "Don't ask again while this play session lasts",
                     cButtons = (uint)buttons.Length,
                     pButtons = array,
                     nDefaultButton = ID_RUN_NOW,
                 };
 
                 int pressed;
-                int hr = TaskDialogIndirect(ref config, out pressed, IntPtr.Zero, IntPtr.Zero);
+                int verified;
+                int hr = TaskDialogIndirect(ref config, out pressed, IntPtr.Zero, out verified);
                 if (hr != 0) return null;          // no interactive desktop, or comctl32 unavailable
+                remember = verified != 0;
 
                 return pressed switch
                 {
                     ID_RUN_NOW => PlayGate.RunNow,
                     ID_YIELD => PlayGate.Yield,
+                    ID_ALWAYS => PlayGate.Always,
                     ID_DENY => PlayGate.Deny,
                     IDCANCEL => null,              // dismissed — leave it pending for another surface
                     _ => null,

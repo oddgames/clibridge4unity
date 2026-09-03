@@ -111,7 +111,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.73)
+│   └── package.json           # UPM manifest (v1.1.74)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -314,7 +314,9 @@ One editor is shared by a person and several agent windows. A play session someo
 - **Scope is an allowlist of read-only commands** (`PING STATUS LOG FIND INSPECTOR SCREENSHOT ANALYZE …`); everything else gates. A command added later defaults to asking rather than silently mutating someone's session.
 - **Prompt**: a `TaskDialogIndirect` desktop dialog with three actions — *run it now in my play session* (play mode untouched; right for `CODE_EXEC`, which carries its own compiler), *exit play mode and hand over* (issues `STOP --force` then runs), *not now*. Not a toast: toasts from an unpackaged single-file exe need an AUMID + Start Menu shortcut and a COM/URI activator, all of which can rot silently.
 - **Owner is read from the heartbeat file, not the pipe** — the editor is busy in a play session exactly when we need to ask.
-- **Answer from any terminal** (works with no pipe): `REQUESTS` lists what's waiting · `ALLOW <id>` runs it in the live session · `ALLOW <id> yield` exits play mode and hands over · `DENY <id>`. Requests carry the caller's PID and are swept when that process exits — nobody is waiting for the answer.
+- **Answer from any terminal** (works with no pipe): `REQUESTS` lists what's waiting · `ALLOW <id>` runs it in the live session · `ALLOW <id> yield` exits play mode and hands over · `ALLOW <id> always` runs it and stops asking for that window · `DENY <id>`. Requests carry the caller's PID and are swept when that process exits — nobody is waiting for the answer.
+- **Grants — the gate asks once, not once per command.** Asking per command is unusable, not safe: one task can issue a dozen mutating commands. The dialog's *"Don't ask again while this play session lasts"* checkbox stores a grant scoped to `(window, playOwnerSince)`, so leaving play mode and re-entering invalidates it — permission given for one session never silently carries into the next. *"Always allow this window"* (or `ALLOW <id> always`) uses a sentinel session id that survives across sessions until revoked. `REQUESTS` reports the standing permission; `REQUESTS --forget` revokes it; `CLIBRIDGE_NO_PLAYGATE=1` disables the gate for a window entirely.
+- **When *you* press Play the owner is the literal string `user`**, which matches no peer id — so every window, including your own terminal, is "not the owner". That is why grants matter: without them a manually-started play session prompts on all 31 mutating commands.
 - `STOP` refuses to end a session it doesn't own; `STOP --force` overrides.
 - `GAMEVIEW 1280x720` - Set Game view resolution
 

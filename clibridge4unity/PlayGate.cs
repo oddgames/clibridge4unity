@@ -38,6 +38,12 @@ internal static class PlayGate
     /// <summary>Owner value meaning a person pressed Play, rather than any agent.</summary>
     public const string OwnerUser = "user";
 
+    /// <summary>Sentinel session id for a grant that outlives any single play session.</summary>
+    public const long AnySession = -1;
+
+    /// <summary>Answer meaning "run it, and stop asking me for this window entirely".</summary>
+    public const string Always = "always";
+
     public const string Yield = "yield";
     public const string RunNow = "run-now";
     public const string Deny = "deny";
@@ -221,6 +227,84 @@ internal static class PlayGate
             Thread.Sleep(250);
         }
         return null;
+    }
+
+    // ---------------------------------------------------------------- grants
+    //
+    // Asking once per command is unusable: a single task can issue a dozen mutating commands,
+    // and the owner is not going to answer a dozen dialogs. A grant records "this window may
+    // proceed for THIS play session", so the question is asked once and then honoured.
+    //
+    // Scoped to (requesting window, play session). `since` is the play session's start tick
+    // from the heartbeat, so leaving play mode and re-entering invalidates every grant — a
+    // permission given for one session never silently carries into the next.
+
+    static string GrantPath(string projectPath, string peerId)
+    {
+        string dir = Path.Combine(projectPath, ".clibridge4unity", "grants");
+        Directory.CreateDirectory(dir);
+        return Path.Combine(dir, peerId + ".txt");
+    }
+
+    /// <summary>Remember an answer for the rest of this play session.</summary>
+    public static void StoreGrant(string projectPath, string owner, long since, string decision)
+    {
+        try
+        {
+            System.IO.File.WriteAllText(GrantPath(projectPath, PeerLedger.SelfId),
+                                        $"{owner}\t{since}\t{decision}");
+        }
+        catch { }
+    }
+
+    /// <summary>The standing answer for this window in this play session, or null.</summary>
+    public static string FindGrant(string projectPath, string owner, long since)
+    {
+        try
+        {
+            string path = GrantPath(projectPath, PeerLedger.SelfId);
+            if (!System.IO.File.Exists(path)) return null;
+            var parts = System.IO.File.ReadAllText(path).Split('\t');
+            if (parts.Length < 3) return null;
+            if (!long.TryParse(parts[1], out long grantedSince)) return null;
+            // AnySession is a standing "always allow" and ignores who owns play mode.
+            if (grantedSince == AnySession) return parts[2];
+            // Otherwise the grant is valid only for the exact session it was given in.
+            if (!string.Equals(parts[0], owner, StringComparison.OrdinalIgnoreCase)) return null;
+            if (grantedSince != since) return null;
+            return parts[2];
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Revoke this window's standing permission. Returns false if there was none.</summary>
+    public static bool ClearGrant(string projectPath)
+    {
+        try
+        {
+            string path = GrantPath(projectPath, PeerLedger.SelfId);
+            if (!System.IO.File.Exists(path)) return false;
+            System.IO.File.Delete(path);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Describe the standing permission for this window, or null.</summary>
+    public static string DescribeGrant(string projectPath)
+    {
+        try
+        {
+            string path = GrantPath(projectPath, PeerLedger.SelfId);
+            if (!System.IO.File.Exists(path)) return null;
+            var parts = System.IO.File.ReadAllText(path).Split('\t');
+            if (parts.Length < 3) return null;
+            bool always = long.TryParse(parts[1], out long s) && s == AnySession;
+            return always
+                ? $"always allow ({parts[2]}) — until revoked"
+                : $"{parts[2]} — for the current play session only";
+        }
+        catch { return null; }
     }
 
     /// <summary>Same liveness convention as PeerLedger: if the pid cannot be opened, it is gone.</summary>
