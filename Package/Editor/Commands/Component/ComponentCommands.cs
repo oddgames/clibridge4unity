@@ -658,7 +658,17 @@ namespace clibridge4unity
         {
             var obj = prop.objectReferenceValue;
             if (obj == null)
-                return prop.objectReferenceInstanceIDValue != 0 ? "Missing (broken reference)" : "None";
+            {
+                // A reference whose target no longer resolves still carries an id, which is what
+                // separates "Missing" from a deliberately empty field. The int-based id API is a
+                // hard compile error from Unity 6000.4 (EntityId replaces InstanceID).
+#if UNITY_6000_4_OR_NEWER
+                bool broken = prop.objectReferenceEntityIdValue != EntityId.None;
+#else
+                bool broken = prop.objectReferenceInstanceIDValue != 0;
+#endif
+                return broken ? "Missing (broken reference)" : "None";
+            }
             string label = $"{obj.GetType().Name}:'{obj.name}'";
             string assetPath = AssetDatabase.GetAssetPath(obj);
             return string.IsNullOrEmpty(assetPath) ? label : $"{label} ({assetPath})";

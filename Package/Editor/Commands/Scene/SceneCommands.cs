@@ -142,16 +142,16 @@ namespace clibridge4unity
                         .OfType<Component>().Select(c => c.gameObject).Distinct().Take(20).ToList()
                     : new List<GameObject>();
 
-                // Merge: exact > name > component, deduplicated by instance ID.
-                var seen = new HashSet<int>();
+                // Merge: exact > name > component, deduplicated by object reference (GetInstanceID is a compile error from 6000.4).
+                var seen = new HashSet<GameObject>();
                 var matches = new List<(GameObject go, string matchedBy)>();
-                if (exactFound != null && seen.Add(exactFound.GetInstanceID()))
+                if (exactFound != null && seen.Add(exactFound))
                     matches.Add((exactFound, "name"));
                 foreach (var go in nameMatches)
-                    if (seen.Add(go.GetInstanceID()))
+                    if (seen.Add(go))
                         matches.Add((go, "name"));
                 foreach (var go in compMatches)
-                    if (seen.Add(go.GetInstanceID()))
+                    if (seen.Add(go))
                         matches.Add((go, compType.Name));
 
                 // Asset search — always run alongside scene search.

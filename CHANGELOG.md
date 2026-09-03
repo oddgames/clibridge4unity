@@ -13,7 +13,7 @@
 - `playOwner` now rides in the heartbeat status file, so the CLI can decide whether a command would disturb a session without opening a pipe.
 
 ### Fixed
-- Nothing user-facing; the release is additive.
+- **Unity 6000.4+ compile errors.** `Object.GetInstanceID()` and `SerializedProperty.objectReferenceInstanceIDValue` are obsolete-as-error from Unity 6000.4 (`EntityId` replaces `InstanceID`), which broke the `FIND` dedupe in `SceneCommands` and `FormatObjectRef` in `ComponentCommands` - and put a 6000.6 project into Safe Mode with the bridge unloaded. The dedupe now keys on the `GameObject` itself; the broken-reference check uses `objectReferenceEntityIdValue` behind `UNITY_6000_4_OR_NEWER`, so 6000.3 still compiles.
 
 ### Internal
 - Gate scope is an **allowlist of read-only commands** rather than a list of dangerous ones, so a command added later defaults to asking instead of silently mutating a running session.
