@@ -291,11 +291,11 @@ def main():
 
     # Step 6: Upload assets
     print(f"\n=== Uploading assets ===")
-    run(["gh", "release", "upload", tag, zip_path, "--clobber"], timeout=180)
-    run(["gh", "release", "upload", tag, exe_path, "--clobber"], timeout=180)
+    run(["gh", "release", "upload", tag, zip_path, "--clobber"], timeout=600)
+    run(["gh", "release", "upload", tag, exe_path, "--clobber"], timeout=600)
     # The VSCode extension vsix — offline/manual install path; also matches this release's CLI.
     if vsix_path and os.path.isfile(vsix_path):
-        run(["gh", "release", "upload", tag, vsix_path, "--clobber"], timeout=180, check=False)
+        run(["gh", "release", "upload", tag, vsix_path, "--clobber"], timeout=600, check=False)
 
     # Step 7: Verify
     print(f"\n=== Verifying release ===")

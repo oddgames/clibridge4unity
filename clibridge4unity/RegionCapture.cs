@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace clibridge4unity;
 
@@ -173,6 +174,7 @@ static class RegionCapture
             else if (p == "--full") full = true;
             else if (p == "--stop" || p == "stop") return StopDaemon();
             else if (p == "--status" || p == "status") return DaemonStatus();
+            else if (p == "--settings" || p == "settings") return ShowSettings();
             else if (p == "--autostart" || p == "autostart")
             {
                 string mode = i + 1 < parts.Length ? parts[i + 1].ToLowerInvariant() : "on";
@@ -574,6 +576,144 @@ static class RegionCapture
         Console.WriteLine($"Capture daemon will start at logon: {link}");
         Console.WriteLine("Start it now with: clibridge4unity CAPTURE --daemon");
         return 0;
+    }
+
+    /// <summary>
+    /// Launch the daemon as a detached background process.
+    ///
+    /// UseShellExecute=true is load-bearing, not a style choice: with it false the child inherits
+    /// this process's stdio handles, and on Windows a PowerShell pipeline stays open until every
+    /// writer to it closes — including the copy inherited by a daemon that runs for days. The
+    /// symptom is `clibridge4unity SETUP` appearing to hang forever after it has already finished.
+    /// Same reasoning as the Roslyn daemon's spawn.
+    /// </summary>
+    public static bool StartDetached()
+    {
+        try
+        {
+            string exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe)) return false;
+            var proc = Process.Start(new ProcessStartInfo
+            {
+                FileName = exe,
+                Arguments = "CAPTURE --daemon",
+                UseShellExecute = true,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            });
+            if (proc == null) return false;
+
+            // The daemon publishes its pid file once the hotkeys are registered; wait briefly so
+            // we report what actually happened rather than what we hoped would.
+            var deadline = DateTime.UtcNow.AddSeconds(6);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (LivePid() != 0) return true;
+                Thread.Sleep(150);
+            }
+            return false;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Report everything that decides the daemon's behaviour, and how to change each piece.
+    /// `CAPTURE --settings` exists because the tray menu is unreachable when the daemon isn't
+    /// running — which is exactly when you need to know why.
+    /// </summary>
+    static int ShowSettings()
+    {
+        int pid = LivePid();
+        bool auto = AutostartInstalled;
+
+        Console.WriteLine("clibridge capture — settings");
+        Console.WriteLine();
+        Console.WriteLine($"  Daemon          {(pid != 0 ? $"running (pid {pid})" : "not running")}");
+        Console.WriteLine($"  Start with PC   {(auto ? "yes" : "no")}");
+        Console.WriteLine($"  Captures        {CapturesDir}");
+        Console.WriteLine($"  ffmpeg          {(ScreenRecorder.FindFfmpeg() != null ? "found (RECORD available)" : "not found — RECORD unavailable")}");
+        Console.WriteLine();
+        Console.WriteLine("  Hotkeys (only while the daemon runs)");
+        Console.WriteLine("    Print Screen         grab a screen region");
+        Console.WriteLine("    Ctrl+Print Screen    start / stop a recording");
+        Console.WriteLine();
+        Console.WriteLine("  Change it");
+        Console.WriteLine(pid != 0
+            ? "    clibridge4unity CAPTURE --stop           stop the daemon now (frees Print Screen)"
+            : "    clibridge4unity CAPTURE --daemon         start the daemon now");
+        Console.WriteLine(auto
+            ? "    clibridge4unity CAPTURE --autostart off  stop it starting with Windows"
+            : "    clibridge4unity CAPTURE --autostart on   start it with Windows");
+        if (pid != 0)
+            Console.WriteLine("    Right-click the tray icon for the same settings, plus recording.");
+        return 0;
+    }
+
+    /// <summary>
+    /// Offer the daemon during SETUP / UPDATE. Prompts only on a real terminal — SETUP is run by
+    /// scripts and coding agents far more often than by hand, and a blocked stdin read there would
+    /// hang the whole install rather than ask anybody anything.
+    /// </summary>
+    public static void OfferInstall()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        bool auto = AutostartInstalled;
+        int pid = LivePid();
+
+        if (auto && pid != 0)
+        {
+            Console.WriteLine($"Screenshot daemon: running (pid {pid}), starts with Windows. `CAPTURE --settings` to change.");
+            return;
+        }
+
+        // Already opted in, just not running (a self-update kills it — see KillStaleClibridgeProcesses).
+        if (auto && pid == 0)
+        {
+            Console.WriteLine("Screenshot daemon: enabled but not running — restarting it...");
+            Console.WriteLine(StartDetached()
+                ? "  Started. Print Screen grabs a region, Ctrl+Print Screen records."
+                : "  Could not start it. Run: clibridge4unity CAPTURE --daemon");
+            return;
+        }
+
+        Console.WriteLine("Screenshot daemon (optional)");
+        Console.WriteLine("  A small background app that puts an icon in your notification area and");
+        Console.WriteLine("  takes over two keys:");
+        Console.WriteLine("    Print Screen         drag a box around anything — a broken bit of UI, a");
+        Console.WriteLine("                         console error, a wrong material — and it is saved.");
+        Console.WriteLine("    Ctrl+Print Screen    record that region with audio; narrate the problem");
+        Console.WriteLine("                         as it happens, then press it again to stop.");
+        Console.WriteLine("  In Unity, Tools > CLI Bridge for Unity > Capture Context turns whatever you");
+        Console.WriteLine("  captured — plus the GameObjects you tick — into a prompt on your clipboard.");
+        Console.WriteLine("  It starts with Windows, uses no CPU while idle, and the tray icon's menu");
+        Console.WriteLine("  turns it off again.");
+        Console.WriteLine();
+
+        if (Console.IsInputRedirected)
+        {
+            Console.WriteLine("  To install:  clibridge4unity CAPTURE --autostart on");
+            Console.WriteLine("               clibridge4unity CAPTURE --daemon");
+            return;
+        }
+
+        Console.Write("  Install it? [Y/n] ");
+        string answer;
+        try { answer = Console.ReadLine(); }
+        catch { return; }   // no console (service, redirected late) — treat as declined
+
+        answer = (answer ?? "").Trim().ToLowerInvariant();
+        if (answer == "n" || answer == "no")
+        {
+            Console.WriteLine("  Skipped. Enable later with: clibridge4unity CAPTURE --autostart on");
+            return;
+        }
+
+        SetAutostart(true);
+        Console.WriteLine(StartDetached()
+            ? "  Started. Print Screen grabs a region, Ctrl+Print Screen records."
+            : "  Installed for next logon, but could not start it now. Run: clibridge4unity CAPTURE --daemon");
+        Console.WriteLine("  Settings / turn off: clibridge4unity CAPTURE --settings");
     }
 
     static int RunDaemon()

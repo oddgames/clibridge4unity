@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.1.78 — 2026-09-07
+
+## v1.1.78
+
+### New
+
+**`SETUP` / `UPDATE` now offer the screenshot daemon** instead of leaving a hint you had to
+notice. It describes what the thing actually does — Print Screen grabs a region, Ctrl+Print
+Screen records one with audio, and the Unity panel turns either into a clipboard prompt — then
+asks. Answering yes installs the logon entry and starts it immediately.
+
+The prompt only appears on a real terminal. `SETUP` is run by scripts and coding agents far more
+often than by hand, and a blocking stdin read there would hang the install rather than ask
+anyone anything; in that case it prints the two commands and moves on.
+
+**`CAPTURE --settings`** — one view of everything that decides the daemon's behaviour: whether
+it is running, whether it starts with Windows, where captures land, whether ffmpeg was found,
+what the hotkeys are, and the exact command to change each. It exists because the tray menu is
+unreachable when the daemon is not running, which is precisely when you need to know why.
+
+### Fixed
+
+- **`UPDATE` silently killed the capture daemon.** `KillStaleClibridgeProcesses()` kills every
+  other clibridge4unity process to free the locked binary — including the daemon holding your
+  hotkeys — and never brought it back. Print Screen would just stop working after a self-update.
+  Both `UPDATE` exit paths now restart it when it was previously enabled.
+- **`deploy.py` stranded published releases.** The 180s `gh release upload` budget is too short
+  for the ~84 MB bare exe, and the step runs *after* the tag, release and zip upload have already
+  succeeded — so a timeout left a live release missing an asset, with a traceback that looked
+  like a total failure and invited a re-run against an immutable tag. Raised to 600s.
+
+### Internal
+
+- `RegionCapture.StartDetached()` spawns the daemon with `UseShellExecute=true`. Load-bearing:
+  with it false the child inherits this process's stdio handles, and a PowerShell pipeline stays
+  open until every writer closes — including the copy held by a daemon running for days. The
+  symptom is `SETUP` appearing to hang long after it finished. Same reasoning as the Roslyn
+  daemon's spawn.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.77 — 2026-09-07
 
 ## v1.1.77

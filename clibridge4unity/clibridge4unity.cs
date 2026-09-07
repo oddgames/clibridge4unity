@@ -1066,6 +1066,7 @@ class Program
                 // CLI installs even when the version number stayed the same.
                 RefreshProjectAgentDocs();
                 RefreshProjectSkills();
+                RegionCapture.OfferInstall();
                 return EXIT_SUCCESS;
             }
 
@@ -1135,6 +1136,9 @@ class Program
             UpdateManifestTag(latestVersion);
             RefreshProjectAgentDocs();
             RefreshProjectSkills();
+            // KillStaleClibridgeProcesses above takes the capture daemon down with everything
+            // else holding the old binary, so this restarts it rather than leaving it dead.
+            RegionCapture.OfferInstall();
             return EXIT_SUCCESS;
         }
         catch (UnauthorizedAccessException ex)
@@ -2490,6 +2494,7 @@ class Program
         Console.Error.WriteLine("  LINT unity [warnings]      Per-asmdef Unity-faithful compile (~5-30s, asmdef-aware, type-binding; aborts on 10s no-progress)");
         Console.Error.WriteLine("  CAPTURE [--out <png>]      Drag-select a screen region (Esc/right-click cancels)");
         Console.Error.WriteLine("  CAPTURE --daemon           Tray icon + PrtScn / Ctrl+PrtScn hotkeys (--stop, --status)");
+        Console.Error.WriteLine("  CAPTURE --settings         Show daemon/autostart/hotkey state and how to change it");
         Console.Error.WriteLine("  RECORD [--audio both|mic|system|none] [--seconds N] [--transcribe]");
         Console.Error.WriteLine("                             Record a screen region with audio; emits mp4 + frame contact sheet");
         Console.Error.WriteLine("  RECORD --stop / --status / --devices  Finish the recording, check state, list audio devices");
@@ -7520,8 +7525,11 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         // a silent SETUP step.
         Console.WriteLine();
         Console.WriteLine("VSCode/Cursor user? Run `clibridge4unity VSCODE` to add Unity status-bar buttons.");
-        Console.WriteLine("Want capture hotkeys? Run `clibridge4unity CAPTURE --autostart on` for PrtScn / Ctrl+PrtScn,");
-        Console.WriteLine("then build prompts in Unity via Tools > CLI Bridge for Unity > Capture Context (Ctrl+Shift+K).");
+
+        // Step 8: offer the capture daemon. Interactive, because it takes over Print Screen
+        // machine-wide and starts with Windows — not something to switch on behind someone's back.
+        Console.WriteLine();
+        RegionCapture.OfferInstall();
 
         return docsResult;
     }
