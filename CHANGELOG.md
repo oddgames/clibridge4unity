@@ -1,5 +1,61 @@
 # Changelog
 
+## v1.1.77 — 2026-09-07
+
+## v1.1.77
+
+### New
+
+**Capture Context panel** — `Tools > CLI Bridge for Unity > Capture Context` (Ctrl+Shift+K).
+Builds a paste-ready prompt from a screen region plus whatever scene context you tick: your
+question, the capture, `INSPECTOR` dumps for GameObjects selected in a hierarchy tree (seeded
+from the live `Selection`, inactive objects included), and console errors — copied to the
+clipboard in one click. Detail switch for brief / fields / fields+refs.
+
+**`CAPTURE`** — drag-select region screenshots, no Unity pipe needed.
+- Freezes the desktop before you select, so the crop is the frame you aimed at rather than
+  whatever Unity repainted mid-drag. Works while Unity is busy, importing, or showing the
+  modal dialog you are trying to screenshot.
+- `CAPTURE --daemon` adds a notification-area icon and two global hotkeys: **PrtScn** grabs a
+  region, **Ctrl+PrtScn** starts/stops a recording. Tray menu covers capture, record, the
+  captures folder, and logon autostart.
+- `--autostart on|off` installs/removes a Startup entry. `--status` / `--stop` manage the daemon.
+
+**`RECORD`** — region screen recording with audio, via ffmpeg.
+- An assistant cannot watch an mp4 or hear audio, so a finished recording is post-processed
+  into the two forms that *do* carry into a prompt: a 4x3 **contact sheet** of evenly-sampled
+  frames, and (with `--transcribe`) a **transcript** of the narration. The video is kept for
+  the human. Frames are evenly spaced rather than scene-cut detected — a one-frame UI pop is
+  exactly what scene detection discards.
+- `--audio both|mic|system|none`, `--seconds N`, `--fps N`, `--full`. `--devices` reports what
+  was auto-detected; `--stop` / `--status` manage an in-flight recording.
+- Transcription uses ffmpeg's built-in `whisper` filter (needs an `--enable-whisper` build) and
+  fetches `ggml-base.en.bin` on first use.
+
+### Fixed
+
+- `SCREENSHOT`'s per-view keywords (`hierarchy`, `inspector`, `console`, …) were accepted and
+  then ignored — every one captured the whole editor window. Still the case; `CAPTURE` is the
+  workaround until pane cropping lands.
+
+### Internal
+
+- New `clibridge4unity.Capture` asmdef (9th in the Package), referencing Core alone. The panel
+  reaches `INSPECTOR`/`LOG` through `CommandRegistry`'s `MethodInfo` rather than referencing the
+  command assemblies, so it does not drag them into its recompiles.
+- Nothing in the panel runs at rest: no `[InitializeOnLoad]`, and the `EditorApplication.update`
+  hook exists only while a capture child-process is in flight.
+- Tray icon is built on `Shell_NotifyIcon` directly with the icon bitmaps drawn into a DIB at
+  run time — no WinForms, which would cost more than the rest of the CLI under trimming.
+- Recording stop is signalled by a flag file the recorder polls, never by killing ffmpeg:
+  ffmpeg must write the moov atom on the way out, and a killed one leaves an unplayable mp4
+  with the whole recording trapped inside.
+- `RegionCapture.TrySelectRegion` returns screen coordinates (not virtual-desktop-relative), so
+  a multi-monitor setup with a display above or left of the primary records the right rectangle.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.76 — 2026-09-03
 
 ## v1.1.76

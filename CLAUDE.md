@@ -96,6 +96,7 @@ tool_claude_unity_bridge/
 ├── tests/                     # pytest integration tests (require Unity running with UnityTestProject)
 ├── Package/                   # Unity Editor package (UPM)
 │   ├── Editor/
+│   │   ├── Capture/           # Capture Context panel (EditorWindow, no bridge commands)
 │   │   ├── Core/              # Stable core (rarely changes)
 │   │   │   ├── BridgeServer.cs    # Named pipe server
 │   │   │   ├── BridgeCommand.cs   # Command attribute
@@ -111,7 +112,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.76)
+│   └── package.json           # UPM manifest (v1.1.77)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -219,7 +220,7 @@ Command methods can have these signatures:
 **Prefer extending existing types over creating new ones for small additions.** When a change needs only a method or two, add them to the static/partial class that already owns that area — do **not** create a new class or file just to hold one or two methods. The CLI (`clibridge4unity.cs`) is intentionally single-file/partial; keep it cohesive. Split into a new class/file only when (a) it's a genuine reusable **utility** with its own identity, or (b) the code is **large enough** that inlining would bloat the host class. When in doubt, extend what exists. (The Package's asmdef split below is the sanctioned "separate when it's a real module" case.)
 
 ### Assembly Definitions
-The Package is split into 8 asmdefs to minimize recompilation:
+The Package is split into 9 asmdefs to minimize recompilation:
 - **clibridge4unity.Core** - BridgeServer, CommandRegistry, SessionKeys (stable, rarely changes)
 - **clibridge4unity.Commands.Core** - PING, STATUS, HELP, COMPILE, REFRESH, LOG
 - **clibridge4unity.Commands.Scene** - Scene manipulation, play mode, windows
@@ -228,6 +229,7 @@ The Package is split into 8 asmdefs to minimize recompilation:
 - **clibridge4unity.Commands.Asset** - Asset search
 - **clibridge4unity.Commands.Code** - Runtime code execution and tests (CODE_EXEC, CODE_EXEC_RETURN, TEST)
 - **clibridge4unity.Commands.UI** - UI discovery, rendering
+- **clibridge4unity.Capture** - Capture Context panel (EditorWindow only, no commands; references Core alone)
 
 `ANALYZE` (aliases: `CODE_ANALYZE`, `CODE_SEARCH`) is CLI-side only; it must not be registered as a Unity `[BridgeCommand]`.
 
@@ -380,6 +382,18 @@ Multiple Claude/CLI windows share **one** Unity editor, so commands collide (COM
 - `WAKEUP refresh` - Bring to foreground + send Ctrl+R to force recompile
 - `DISMISS` - Close modal dialogs
 - `SCREENSHOT` - CLI-side window capture (see Screenshot section)
+- `CAPTURE [--out <png>] [--full]` - Drag-select a screen region (Esc/right-click cancels). Freezes the desktop first, then lets you select on the still — so the crop is the frame you aimed at, not whatever Unity repainted mid-drag. Works while Unity is busy, importing, or showing the modal dialog you're trying to screenshot. See [RegionCapture.cs](clibridge4unity/RegionCapture.cs).
+  - `CAPTURE --daemon` - tray icon + global hotkeys: **PrtScn** grabs a region, **Ctrl+PrtScn** starts/stops a recording (one chord toggles — reaching for a different key to stop is when you fumble it). `--status` / `--stop` manage it; `--autostart on|off` writes/removes a Startup-folder `.cmd`. Refuses to double-arm — two daemons means `RegisterHotKey` fails in the loser and the chord silently dies.
+    - Each chord registers independently and reports which one lost. PrtScn is the most contested key on Windows: *Settings > Ease of Access > Keyboard > "Use the PrtScn button to open screen snipping"* claims it at the OS level, as do OneDrive/Dropbox/ShareX.
+    - **Windows parks every newly-registered tray icon in the hidden overflow** and there is no supported API to promote one (deliberate — it stops apps fighting over tray space). Click the `^` and drag it out. The daemon says this on startup so a hidden icon doesn't read as a broken one.
+- `RECORD [--audio both|mic|system|none] [--seconds N] [--fps N] [--transcribe] [--full]` - Region screen recording with audio via ffmpeg. `--stop` finalises, `--status` reports, `--devices` lists what was auto-detected. See [ScreenRecorder.cs](clibridge4unity/ScreenRecorder.cs).
+  - **An assistant cannot watch an mp4 or hear audio**, so a finished recording is post-processed into the two things that *do* carry into a prompt: a 4x3 **contact sheet** of evenly-sampled frames, and (with `--transcribe`) a **transcript** of the narration. The video is kept for the human. Skipping that step yields a feature that looks like it works and communicates nothing.
+  - Frames are evenly spaced, not scene-cut detected — a one-frame UI pop is exactly what scene detection discards as insignificant.
+  - Stop is signalled by a flag file the recorder polls, never by killing ffmpeg: ffmpeg must write the moov atom on the way out, and a killed one leaves an unplayable mp4 with the whole recording trapped inside.
+  - ffmpeg is required and **not** bundled (~80 MB against a ~40 MB exe); absence prints the `scoop`/`winget` line. Audio device names are machine-specific so they are discovered, not configured: a loopback device for system audio (`virtual-audio-capturer`, Stereo Mix, VB-Cable) is not shipped by Windows, and its absence falls back to mic-only rather than failing.
+  - `--transcribe` uses ffmpeg's built-in `whisper` filter (needs an `--enable-whisper` build), downloading `ggml-base.en.bin` (~148 MB) to `~/.clibridge4unity/whisper/` on first use.
+  - Every capture also refreshes `latest.png` + `latest.txt` under `%TEMP%/clibridge4unity/captures/`, which is how the Unity panel below picks up a hotkey grab it never asked for by path.
+- **Capture Context panel** (Unity-side, `Tools > CLI Bridge for Unity > Capture Context`, Ctrl+Shift+K) - builds a paste-ready prompt: your question + the captured region (or a recording's frames + transcript) + INSPECTOR dumps for GameObjects ticked in a hierarchy tree (seeded from the live `Selection`) + console errors, copied to the clipboard. Records via the CLI and tracks state from the recorder's pid file, so a recording started from the tray or another terminal shows up in the panel too. Deliberately **Ctrl+Shift+K, not a PrtScn chord** — a `RegisterHotKey` claim wins system-wide, so sharing the daemon's chord would make the menu shortcut silently dead. Its own asmdef (`clibridge4unity.Capture`) referencing only Core; it reaches INSPECTOR/LOG through `CommandRegistry`'s `MethodInfo` rather than referencing the command assemblies. Nothing runs at rest — no `[InitializeOnLoad]`, and the `EditorApplication.update` hook exists only while a capture child-process is in flight. See [CaptureContextWindow.cs](Package/Editor/Capture/CaptureContextWindow.cs).
 - `EDITORLOG [N|errors|grep PAT|path]` - Tail Unity's on-disk `Editor.log` (aliases: `EDITORLOGS`, `ELOG`). No pipe needed — works when the bridge isn't running in that instance (clones, crashed/busy Unity) and surfaces import/compile/crash/load lines `LOG` can't reach. Resolves the per-instance log (`-logFile` arg → header-matched `Editor*.log` → default `%LOCALAPPDATA%\Unity\Editor\Editor.log`) and prints which file it read. `errors` filters to error/exception/fail lines; `grep PAT` is a case-insensitive regex; `path` prints the resolved path only.
 - `VSCODE` - Install the bundled VSCode/Cursor status-bar extension into detected editors (`code`/`code-insiders`/`cursor`/`codium`/`windsurf`). The `.vsix` is embedded in the CLI exe (built from `vscode-extension/`, version-locked to the CLI) and installed via `<editor> --install-extension <vsix> --force`; idempotent (skips if the editor already has an equal-or-newer version). `SETUP` prints a hint pointing here but does not auto-install.
 - `PACKAGES <sub>` - Asset Store library sync + `.unitypackage` extraction. No pipe, no Editor, no project — downloading an asset is otherwise a Package Manager window operation (i.e. boot Unity to pull a file). See [PackagesCommand.cs](clibridge4unity/PackagesCommand.cs).

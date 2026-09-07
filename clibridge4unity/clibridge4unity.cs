@@ -213,6 +213,7 @@ class Program
         => cmdUpper is "PING" or "PROBE" or "DIAG" or "VERSION" or "HELP" or "LAST"
                     or "ANALYZE" or "CODE_ANALYZE" or "CODE_SEARCH" or "MAP" or "LINT"
                     or "EDITORLOG" or "ELOG" or "EDITORLOGS" or "SETUP" or "UPDATE" or "HOOK"
+                    or "CAPTURE" or "RECORD"
                     ;
 
     private static int SafeCurrentPid()
@@ -984,6 +985,8 @@ class Program
             case "VERSION":
             case "LAST":
             case "VSCODE":
+            case "CAPTURE":
+            case "RECORD":
                 return true;
             default:
                 return false;
@@ -1697,6 +1700,21 @@ class Program
         if (cmdUpper == "VSCODE")
         {
             return HandleVscode(data);
+        }
+
+        // CAPTURE: drag-select region grab, or the resident hotkey daemon. Deliberately
+        // pipe-free — the whole point is that it works while Unity is busy, importing, or
+        // showing the modal dialog you are trying to screenshot.
+        if (cmdUpper == "CAPTURE")
+        {
+            return RegionCapture.Run(data);
+        }
+
+        // RECORD: region screen+audio recording via ffmpeg, post-processed into a contact sheet
+        // and (optionally) a transcript — the forms a model can actually read.
+        if (cmdUpper == "RECORD")
+        {
+            return ScreenRecorder.Run(data);
         }
 
         // RELEASENOTES: fetch Unity Editor release notes for a version range from
@@ -2470,6 +2488,11 @@ class Program
         Console.Error.WriteLine("  MAP <task keywords>        Task-oriented project map: scripts + scenes/prefabs/config wiring for a task");
         Console.Error.WriteLine("  LINT [warnings]            Syntax-only fast check (default, ~1s, catches braces/strings/typos/new files)");
         Console.Error.WriteLine("  LINT unity [warnings]      Per-asmdef Unity-faithful compile (~5-30s, asmdef-aware, type-binding; aborts on 10s no-progress)");
+        Console.Error.WriteLine("  CAPTURE [--out <png>]      Drag-select a screen region (Esc/right-click cancels)");
+        Console.Error.WriteLine("  CAPTURE --daemon           Tray icon + PrtScn / Ctrl+PrtScn hotkeys (--stop, --status)");
+        Console.Error.WriteLine("  RECORD [--audio both|mic|system|none] [--seconds N] [--transcribe]");
+        Console.Error.WriteLine("                             Record a screen region with audio; emits mp4 + frame contact sheet");
+        Console.Error.WriteLine("  RECORD --stop / --status / --devices  Finish the recording, check state, list audio devices");
         Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");
         Console.Error.WriteLine("  WAKEUP refresh             Bring to foreground + force recompile (Ctrl+R)");
         Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");
@@ -7324,7 +7347,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
     /// <summary>
     /// Writes BGRA pixel data as PNG using .NET's built-in DeflateStream.
     /// </summary>
-    static void WritePng(string path, int width, int height, byte[] bgraPixels)
+    internal static void WritePng(string path, int width, int height, byte[] bgraPixels)
     {
         using var fs = new FileStream(path, FileMode.Create);
 
@@ -7497,6 +7520,8 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         // a silent SETUP step.
         Console.WriteLine();
         Console.WriteLine("VSCode/Cursor user? Run `clibridge4unity VSCODE` to add Unity status-bar buttons.");
+        Console.WriteLine("Want capture hotkeys? Run `clibridge4unity CAPTURE --autostart on` for PrtScn / Ctrl+PrtScn,");
+        Console.WriteLine("then build prompts in Unity via Tools > CLI Bridge for Unity > Capture Context (Ctrl+Shift+K).");
 
         return docsResult;
     }

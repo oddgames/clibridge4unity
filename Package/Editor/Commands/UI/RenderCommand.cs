@@ -897,23 +897,69 @@ namespace clibridge4unity
 
         // ───────────────────── Prefab Rendering (sync on main thread) ─────────────────────
 
-        /// <summary>
-        /// Measures a UI prefab's natural size by instantiating under a temp Canvas, forcing layout,
-        /// then computing the enclosing bounds of all Graphic components. Adds padding.
-        /// Returns (width, height) in pixels. Falls back to 1920x1080 if measurement fails.
-        /// </summary>
-        // Cap any render dimension to keep PNG output manageable (4K UIs → 1280-max).
+        // Output pixel budget. The long edge is capped so a 4K UI still yields a
+        // manageable PNG; the short edge is lifted so a thin strip isn't a few pixels tall.
         const int MAX_RENDER_DIM = 1280;
-        static void ClampRenderSize(ref int width, ref int height)
+        const int MIN_RENDER_DIM = 240;
+
+        /// <summary>
+        /// Pixel size for a design size, preserving the aspect ratio exactly. The render
+        /// target must match the layout's aspect or CanvasScaler re-flows the UI and we
+        /// end up photographing a layout the game never shows.
+        /// </summary>
+        static (int w, int h) FitRenderSize(float designW, float designH, bool liftSmall = true)
         {
-            if (width <= 0 || height <= 0) return;
-            if (width <= MAX_RENDER_DIM && height <= MAX_RENDER_DIM) return;
-            float scale = Mathf.Min((float)MAX_RENDER_DIM / width, (float)MAX_RENDER_DIM / height);
-            width = Mathf.Max(1, Mathf.RoundToInt(width * scale));
-            height = Mathf.Max(1, Mathf.RoundToInt(height * scale));
+            if (designW <= 0.01f || designH <= 0.01f) return (1280, 720);
+            float longEdge = Mathf.Max(designW, designH);
+            float shortEdge = Mathf.Min(designW, designH);
+            float scale = 1f;
+            if (liftSmall && shortEdge < MIN_RENDER_DIM) scale = MIN_RENDER_DIM / shortEdge;
+            if (longEdge * scale > MAX_RENDER_DIM) scale = MAX_RENDER_DIM / longEdge;
+            return (Mathf.Max(1, Mathf.RoundToInt(designW * scale)),
+                    Mathf.Max(1, Mathf.RoundToInt(designH * scale)));
         }
 
-        static (int w, int h) MeasureUIPrefabSize(GameObject prefab)
+        /// <summary>
+        /// The logical size a UI prefab was authored against, plus the signal it came
+        /// from (reported in the response so a surprising render can be traced).
+        /// </summary>
+        static (Vector2 size, string source) ResolveCanvasDesignSize(GameObject prefab, Canvas canvas)
+        {
+            var canvasRect = canvas.GetComponent<RectTransform>();
+            var scaler = canvas.GetComponent<CanvasScaler>() ?? prefab.GetComponent<CanvasScaler>();
+
+            // A world-space canvas carries a genuinely authored rect - nothing drives it.
+            if (canvas.renderMode == RenderMode.WorldSpace && canvasRect != null
+                && canvasRect.rect.width > 1 && canvasRect.rect.height > 1)
+                return (canvasRect.rect.size, "world-space canvas rect");
+
+            // Screen-space: referenceResolution is the author's declared design size. The
+            // canvas RectTransform is NOT - it is driven by whatever screen the prefab
+            // happened to be saved at (commonly serialized as 0x0), so it is never used here.
+            if (scaler != null && scaler.uiScaleMode == CanvasScaler.ScaleMode.ScaleWithScreenSize
+                && scaler.referenceResolution.x > 1 && scaler.referenceResolution.y > 1)
+                return (scaler.referenceResolution, "CanvasScaler referenceResolution");
+
+            // Constant-pixel / constant-physical canvases declare no resolution, so the
+            // content itself is the only statement of intended size.
+            var measured = MeasureUIContentSize(prefab);
+            if (measured.HasValue)
+                return (measured.Value, "measured content bounds");
+
+            if (canvasRect != null && canvasRect.rect.width > 1 && canvasRect.rect.height > 1)
+                return (canvasRect.rect.size, "canvas rect");
+
+            return (new Vector2(1280, 720), "default");
+        }
+
+        /// <summary>
+        /// Natural size of a UI prefab: instantiate under a throwaway 1:1 canvas, force
+        /// layout, then take the union of the ACTIVE graphics' rects plus padding.
+        /// Inactive objects are excluded deliberately - parked popups and slide-in panels
+        /// sit far outside the layout and would otherwise dictate the framing.
+        /// Returns null when there is nothing measurable.
+        /// </summary>
+        static Vector2? MeasureUIContentSize(GameObject prefab)
         {
             var canvasGo = new GameObject("__MEASURE_CANVAS__");
             canvasGo.hideFlags = HideFlags.HideAndDontSave;
@@ -925,10 +971,11 @@ namespace clibridge4unity
             var instance = UnityEngine.Object.Instantiate(prefab, canvasGo.transform);
             instance.hideFlags = HideFlags.HideAndDontSave;
 
-            // Center the instance, keep its natural size
             var instanceRect = instance.GetComponent<RectTransform>();
             if (instanceRect != null)
             {
+                // Centre it at its natural size - a stretch-anchored root would otherwise
+                // inherit the measuring canvas's size and we'd measure the canvas, not the UI.
                 instanceRect.anchorMin = new Vector2(0.5f, 0.5f);
                 instanceRect.anchorMax = new Vector2(0.5f, 0.5f);
                 instanceRect.anchoredPosition = Vector2.zero;
@@ -936,68 +983,89 @@ namespace clibridge4unity
 
             Canvas.ForceUpdateCanvases();
 
-            // Measure bounds from all RectTransforms with Graphic components
-            int w = 1920, h = 1080;
-            var graphics = instance.GetComponentsInChildren<Graphic>(true);
-            if (graphics.Length > 0)
+            float minX = float.MaxValue, minY = float.MaxValue;
+            float maxX = float.MinValue, maxY = float.MinValue;
+            var corners = new Vector3[4];
+            void Encapsulate(RectTransform rt)
             {
-                // Also include the root RectTransform
-                var allRects = instance.GetComponentsInChildren<RectTransform>(true);
-                if (allRects.Length > 0)
+                if (rt.rect.width <= 0.01f || rt.rect.height <= 0.01f) return;
+                rt.GetWorldCorners(corners);
+                foreach (var c in corners)
                 {
-                    float minX = float.MaxValue, minY = float.MaxValue;
-                    float maxX = float.MinValue, maxY = float.MinValue;
-                    foreach (var rt in allRects)
-                    {
-                        Vector3[] corners = new Vector3[4];
-                        rt.GetWorldCorners(corners);
-                        foreach (var c in corners)
-                        {
-                            if (c.x < minX) minX = c.x;
-                            if (c.y < minY) minY = c.y;
-                            if (c.x > maxX) maxX = c.x;
-                            if (c.y > maxY) maxY = c.y;
-                        }
-                    }
-                    int measuredW = Mathf.CeilToInt(maxX - minX);
-                    int measuredH = Mathf.CeilToInt(maxY - minY);
-                    if (measuredW > 4 && measuredH > 4)
-                    {
-                        // Add 10% padding, minimum 20px each side
-                        int padX = Mathf.Max(20, Mathf.CeilToInt(measuredW * 0.05f));
-                        int padY = Mathf.Max(20, Mathf.CeilToInt(measuredH * 0.05f));
-                        w = measuredW + padX * 2;
-                        h = measuredH + padY * 2;
-                    }
+                    if (c.x < minX) minX = c.x;
+                    if (c.y < minY) minY = c.y;
+                    if (c.x > maxX) maxX = c.x;
+                    if (c.y > maxY) maxY = c.y;
                 }
             }
-            else if (instanceRect != null)
-            {
-                // No graphics but has RectTransform — use sizeDelta
-                var size = instanceRect.rect.size;
-                if (size.x > 4 && size.y > 4)
-                {
-                    w = Mathf.CeilToInt(size.x) + 40;
-                    h = Mathf.CeilToInt(size.y) + 40;
-                }
-            }
+
+            foreach (var g in instance.GetComponentsInChildren<Graphic>(false))
+                if (g.enabled) Encapsulate(g.rectTransform);
+            if (instanceRect != null) Encapsulate(instanceRect);
 
             UnityEngine.Object.DestroyImmediate(canvasGo);
 
-            // If the measured size is very small, the prefab likely auto-sizes (e.g. TMP text)
-            // or uses layout groups. Use a sensible default that shows content clearly.
-            if (w < 200 || h < 200)
+            if (maxX <= minX || maxY <= minY) return null;
+            float w = maxX - minX, h = maxY - minY;
+            if (w < 4f || h < 4f) return null;
+
+            // 5% breathing room so edges aren't flush against the frame.
+            return new Vector2(w + Mathf.Max(16f, w * 0.05f) * 2f,
+                               h + Mathf.Max(16f, h * 0.05f) * 2f);
+        }
+
+        /// <summary>
+        /// Active graphics spilling outside the canvas rect - content the game clips off
+        /// screen. Masked subtrees (ScrollRect content) are skipped: overflowing a mask is
+        /// the point of a mask, not a fault. Returns null when everything fits.
+        /// </summary>
+        static string DescribeCanvasOverflow(RectTransform canvasRect, GameObject instance)
+        {
+            if (canvasRect == null) return null;
+            var rect = canvasRect.rect;
+            if (rect.width <= 1f || rect.height <= 1f) return null;
+            float tolerance = Mathf.Max(2f, rect.width * 0.01f);
+
+            var offenders = new List<(string name, float amount)>();
+            var corners = new Vector3[4];
+            foreach (var g in instance.GetComponentsInChildren<Graphic>(false))
             {
-                // Scale up proportionally, minimum 400px on the short side
-                float scale = 400f / Mathf.Min(w, h);
-                w = Mathf.CeilToInt(w * scale);
-                h = Mathf.CeilToInt(h * scale);
+                if (!g.enabled) continue;
+                var rt = g.rectTransform;
+                if (rt == canvasRect || IsMasked(rt, canvasRect)) continue;
+
+                rt.GetWorldCorners(corners);
+                float minX = float.MaxValue, minY = float.MaxValue;
+                float maxX = float.MinValue, maxY = float.MinValue;
+                foreach (var c in corners)
+                {
+                    var p = canvasRect.InverseTransformPoint(c);
+                    if (p.x < minX) minX = p.x;
+                    if (p.y < minY) minY = p.y;
+                    if (p.x > maxX) maxX = p.x;
+                    if (p.y > maxY) maxY = p.y;
+                }
+                float over = Mathf.Max(Mathf.Max(rect.xMin - minX, maxX - rect.xMax),
+                                       Mathf.Max(rect.yMin - minY, maxY - rect.yMax));
+                if (over > tolerance) offenders.Add((rt.name, over));
             }
 
-            // Clamp to reasonable bounds (kept small to limit PNG size)
-            w = Mathf.Clamp(w, 200, 1280);
-            h = Mathf.Clamp(h, 200, 1280);
-            return (w, h);
+            if (offenders.Count == 0) return null;
+            offenders.Sort((a, b) => b.amount.CompareTo(a.amount));
+            string worst = string.Join(", ", offenders.Take(3).Select(o => $"{o.name} +{Mathf.RoundToInt(o.amount)}"));
+            return $"overflow: {offenders.Count} active element(s) extend past the canvas rect ({worst})";
+        }
+
+        static bool IsMasked(Transform t, Transform stopAt)
+        {
+            for (var p = t.parent; p != null && p != stopAt; p = p.parent)
+            {
+                var rectMask = p.GetComponent<RectMask2D>();
+                if (rectMask != null && rectMask.enabled) return true;
+                var mask = p.GetComponent<Mask>();
+                if (mask != null && mask.enabled) return true;
+            }
+            return false;
         }
 
         static string RenderPrefab(string prefabPath, int width, int height)
@@ -1020,34 +1088,12 @@ namespace clibridge4unity
             var canvas = prefab.GetComponentInChildren<Canvas>(true);
             if (canvas != null)
             {
-                if (width <= 0 || height <= 0)
-                {
-                    var canvasRect = prefab.GetComponent<RectTransform>();
-                    // Check for explicit size (not stretch-anchored)
-                    if (canvasRect != null && canvasRect.rect.width > 1 && canvasRect.rect.height > 1
-                        && (canvasRect.anchorMin != Vector2.zero || canvasRect.anchorMax != Vector2.one))
-                    {
-                        width = Mathf.CeilToInt(canvasRect.rect.width);
-                        height = Mathf.CeilToInt(canvasRect.rect.height);
-                    }
-                    else
-                    {
-                        // Check CanvasScaler reference resolution
-                        var scaler = prefab.GetComponent<CanvasScaler>();
-                        if (scaler != null && scaler.uiScaleMode == CanvasScaler.ScaleMode.ScaleWithScreenSize
-                            && scaler.referenceResolution.x > 1 && scaler.referenceResolution.y > 1)
-                        {
-                            width = Mathf.CeilToInt(scaler.referenceResolution.x);
-                            height = Mathf.CeilToInt(scaler.referenceResolution.y);
-                        }
-                        else
-                        {
-                            width = 1280; height = 720;
-                        }
-                    }
-                }
-                ClampRenderSize(ref width, ref height);
-                return RenderUIPrefab(prefab, prefabPath, width, height);
+                bool explicitSize = width > 0 && height > 0;
+                var (design, source) = explicitSize
+                    ? (new Vector2(width, height), "caller")
+                    : ResolveCanvasDesignSize(prefab, canvas);
+                var (pw, ph) = FitRenderSize(design.x, design.y, liftSmall: !explicitSize);
+                return RenderUIPrefab(prefab, prefabPath, design, pw, ph, source);
             }
 
             // UI prefab without a Canvas (e.g. a button, panel, or widget meant to be a child of a Canvas).
@@ -1055,21 +1101,34 @@ namespace clibridge4unity
             var hasUI = prefab.GetComponentInChildren<Graphic>(true) != null;
             if (hasRect || hasUI)
             {
-                // Auto-size: measure the prefab's natural dimensions
-                if (width <= 0 || height <= 0)
+                Vector2 design;
+                string source;
+                bool explicitSize = width > 0 && height > 0;
+                if (explicitSize)
                 {
-                    (width, height) = MeasureUIPrefabSize(prefab);
+                    design = new Vector2(width, height);
+                    source = "caller";
                 }
-                ClampRenderSize(ref width, ref height);
-                return RenderUIPrefabWithTempCanvas(prefab, prefabPath, width, height);
+                else
+                {
+                    var measured = MeasureUIContentSize(prefab);
+                    design = measured ?? new Vector2(1280, 720);
+                    source = measured.HasValue ? "measured content bounds" : "default";
+                }
+                var (pw, ph) = FitRenderSize(design.x, design.y, liftSmall: !explicitSize);
+                return RenderUIPrefabWithTempCanvas(prefab, prefabPath, design, pw, ph, source);
             }
 
-            if (width <= 0 || height <= 0) { width = 640; height = 640; }
-            ClampRenderSize(ref width, ref height);
+            // 3D: framing comes from the renderer bounds inside Render3DPrefab, which is
+            // the first point the bounds are known. Pass the request through unchanged.
             return Render3DPrefab(prefab, prefabPath, width, height);
         }
 
-        static string RenderUIPrefab(GameObject prefab, string prefabPath, int width, int height)
+        /// <param name="design">Logical canvas size in UI units - the resolution the prefab
+        /// was laid out for. Deliberately separate from the pixel size: feeding the
+        /// downscaled pixel size to the CanvasScaler shrinks the logical canvas, so
+        /// fixed-size children overflow and the render shows overlaps the game never has.</param>
+        static string RenderUIPrefab(GameObject prefab, string prefabPath, Vector2 design, int width, int height, string sizeSource)
         {
             using var _profile = _markerRenderUIPrefab.Auto();
             var instance = UnityEngine.Object.Instantiate(prefab);
@@ -1078,12 +1137,13 @@ namespace clibridge4unity
             var canvas = instance.GetComponentInChildren<Canvas>(true);
             canvas.renderMode = RenderMode.ScreenSpaceCamera;
 
-            // Ensure CanvasScaler matches our render resolution
-            var scaler = instance.GetComponent<CanvasScaler>();
-            if (scaler == null) scaler = instance.AddComponent<CanvasScaler>();
+            // Lay out at the design resolution; the render target only downsamples it.
+            var scaler = canvas.GetComponent<CanvasScaler>();
+            if (scaler == null) scaler = canvas.gameObject.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(width, height);
-            scaler.matchWidthOrHeight = 0.5f;
+            scaler.referenceResolution = design;
+            scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
+            scaler.matchWidthOrHeight = 0.5f; // render aspect == design aspect, so match cannot bite
 
             var camGo = new GameObject("__RENDER_CAM__");
             camGo.hideFlags = HideFlags.HideAndDontSave;
@@ -1105,8 +1165,11 @@ namespace clibridge4unity
             {
                 Canvas.ForceUpdateCanvases();
                 cam.Render();
-                return ReadRtAndSave(rt, width, height, "render_ui",
-                    $"Rendered UI prefab: {prefabPath}");
+                var header = $"Rendered UI prefab: {prefabPath}\n" +
+                             $"design: {Mathf.RoundToInt(design.x)}x{Mathf.RoundToInt(design.y)} ({sizeSource})";
+                var overflow = DescribeCanvasOverflow(canvas.GetComponent<RectTransform>(), instance);
+                if (overflow != null) header += "\n" + overflow;
+                return ReadRtAndSave(rt, width, height, "render_ui", header);
             }
             finally
             {
@@ -1118,7 +1181,10 @@ namespace clibridge4unity
             }
         }
 
-        static string RenderUIPrefabWithTempCanvas(GameObject prefab, string prefabPath, int width, int height)
+        /// <param name="design">Logical canvas size in UI units (see RenderUIPrefab) - the
+        /// measured natural size of the widget, which the instance keeps while the render
+        /// target downsamples it.</param>
+        static string RenderUIPrefabWithTempCanvas(GameObject prefab, string prefabPath, Vector2 design, int width, int height, string sizeSource)
         {
             // Create a temporary Canvas, instantiate the prefab as a child, render, then clean up
             var canvasGo = new GameObject("__RENDER_CANVAS__");
@@ -1127,7 +1193,8 @@ namespace clibridge4unity
             canvas.renderMode = RenderMode.ScreenSpaceCamera;
             var scaler = canvasGo.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(width, height);
+            scaler.referenceResolution = design;
+            scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
             scaler.matchWidthOrHeight = 0.5f;
             canvasGo.AddComponent<GraphicRaycaster>();
 
@@ -1165,7 +1232,8 @@ namespace clibridge4unity
                 Canvas.ForceUpdateCanvases();
                 cam.Render();
                 return ReadRtAndSave(rt, width, height, "render_ui",
-                    $"Rendered UI prefab (auto-Canvas): {prefabPath}");
+                    $"Rendered UI prefab (auto-Canvas): {prefabPath}\n" +
+                    $"design: {Mathf.RoundToInt(design.x)}x{Mathf.RoundToInt(design.y)} ({sizeSource})");
             }
             finally
             {
@@ -1204,6 +1272,18 @@ namespace clibridge4unity
             var bounds = validRenderers[0].bounds;
             foreach (var r in validRenderers.Skip(1))
                 bounds.Encapsulate(r.bounds);
+
+            // Auto-frame from the shape itself: orbiting 8 angles, the silhouette is at
+            // most the larger of the X/Z footprint wide and always bounds.y tall. A fixed
+            // square wastes half the frame on a lamp post and crops the sides off a bus.
+            if (width <= 0 || height <= 0)
+            {
+                float footprint = Mathf.Max(bounds.size.x, bounds.size.z);
+                float ratio = (footprint > 0.0001f && bounds.size.y > 0.0001f)
+                    ? Mathf.Clamp(footprint / bounds.size.y, 0.5f, 2f)
+                    : 1f;
+                (width, height) = FitRenderSize(ratio * 720f, 720f);
+            }
 
             var camGo = new GameObject("__RENDER_CAM__");
             camGo.hideFlags = HideFlags.HideAndDontSave;
@@ -1305,8 +1385,7 @@ namespace clibridge4unity
                     }
                     return (1024, 1024);
                 });
-                width = size.w;
-                height = size.h;
+                (width, height) = FitRenderSize(size.w, size.h);
             }
 
             int w = width, h = height;
