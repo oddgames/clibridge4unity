@@ -1,5 +1,55 @@
 # Changelog
 
+## v1.1.83 — 2026-09-08
+
+## v1.1.83
+
+### Fixed
+
+**Screenshots of other apps came back annotated with Unity's scene.** The check asked "does this
+region overlap a Unity window" — but a maximized editor sits under almost the whole screen, so a
+capture of VS Code or a browser *on top of* Unity still resolved to Unity's Game view and wrote a
+`.context.md` describing a project the user was not looking at. Unity cannot detect this on its own:
+from inside the editor there is no way to know another application is covering it.
+
+It now decides by **z-order**, not rectangles — nine points spread across the region go through
+`WindowFromPoint` to find what is genuinely *visible* at those pixels. The bridge's own verdict
+overrides a match too: if it reports no editor view under the region, the capture is treated as a
+plain screenshot regardless of what the window rects suggested.
+
+**The daemon stayed dead after every update.** `UPDATE` and the deploy script both kill every
+clibridge4unity process to free the locked binary, and nothing restarted the daemon before the next
+logon — so Print Screen quietly stopped working for the rest of the session. (Checked before
+fixing: no Application Error events and no WER reports, so it was never crashing — only being
+killed.) Any CLI command now revives it, cheaply: two file checks and a pid probe, spawning nothing
+unless the daemon is genuinely gone, with a 60-second backoff so a daemon that *cannot* start does
+not spawn a process on every invocation. An explicit `CAPTURE --stop` records intent and suppresses
+revival until an explicit `--daemon`, so stopping it to free Print Screen actually stops it.
+
+### New
+
+**Plain screenshots behave like a screenshot tool.** Capturing anything that is not Unity puts the
+**image and the file path** on the clipboard at once — CF_DIB alongside CF_UNICODETEXT, so a
+terminal or assistant takes the path and reads the file while a chat or document pastes the picture.
+No Unity context is written. Unity captures stay text-only, since there the prompt is the payload
+and offering a bitmap invites apps to paste the image instead of it.
+
+It also reports **which window was on top**, so a plain screenshot explains itself rather than
+looking like a failure:
+`clipboard: image + path copied (topmost window here is 'chrome — I spent 4 years making my…')`
+
+**`CAPTURE --rect x,y,w,h`** — non-interactive capture of an exact screen rectangle. Makes captures
+scriptable, and is how the region logic is now tested without a human dragging a box.
+
+### Internal
+
+- Clipboard retry widened from ~300 ms to ~1.5 s. Contention is routine — a password manager, a
+  clipboard-history tool, another paste in flight — and the old window lost races that would have
+  resolved on their own.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.82 — 2026-09-08
 
 ## v1.1.82

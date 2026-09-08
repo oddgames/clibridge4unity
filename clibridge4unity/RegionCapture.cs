@@ -148,7 +148,20 @@ static class RegionCapture
     [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr hMem);
     [DllImport("kernel32.dll")] static extern IntPtr GlobalFree(IntPtr hMem);
     const uint CF_UNICODETEXT = 13;
+    const uint CF_DIB = 8;
     const uint GMEM_MOVEABLE = 0x0002;
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int max);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetWindowTextW")] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int max);
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
+    const int DWMWA_CLOAKED = 14;
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+    const uint GA_ROOT = 2;
+
+    delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
     [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
@@ -180,7 +193,7 @@ static class RegionCapture
             return 1;
         }
 
-        string outPath = null;
+        string outPath = null, fixedRect = null;
         bool daemon = false, full = false;
         var parts = (args ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
         for (int i = 0; i < parts.Length; i++)
@@ -189,6 +202,7 @@ static class RegionCapture
             if ((p == "--out" || p == "-o") && i + 1 < parts.Length) outPath = parts[++i].Trim('"');
             else if (p == "--daemon" || p == "daemon") daemon = true;
             else if (p == "--full") full = true;
+            else if (p == "--rect" && i + 1 < parts.Length) fixedRect = parts[++i];
             else if (p == "--no-context") _collectContext = false;
             else if (p == "--no-clipboard") _copyToClipboard = false;
             else if (p == "--stop" || p == "stop") return StopDaemon();
@@ -204,7 +218,7 @@ static class RegionCapture
         Directory.CreateDirectory(CapturesDir);
         if (daemon) return RunDaemon();
 
-        string saved = CaptureOnce(outPath, full);
+        string saved = CaptureOnce(outPath, full, fixedRect);
         if (saved == null)
         {
             Console.Error.WriteLine("Capture cancelled.");
@@ -251,7 +265,7 @@ static class RegionCapture
     }
 
     /// <summary>Show the overlay and return the saved PNG path, or null if the user cancelled.</summary>
-    public static string CaptureOnce(string outPath, bool full = false)
+    public static string CaptureOnce(string outPath, bool full = false, string fixedRect = null)
     {
         // Sample the foreground owner FIRST — the overlay is about to become the foreground
         // window, and after that we can no longer tell which editor you were looking at.
@@ -264,6 +278,24 @@ static class RegionCapture
             if (full)
             {
                 rx = 0; ry = 0; rw = _vw; rh = _vh;
+            }
+            else if (fixedRect != null)
+            {
+                // Screen coordinates in, virtual-desktop-relative out — the crop indexes the
+                // grabbed buffer, whose origin is the virtual screen's top-left, not (0,0).
+                var f = fixedRect.Split(',');
+                if (f.Length != 4
+                    || !int.TryParse(f[0], out int fx) || !int.TryParse(f[1], out int fy)
+                    || !int.TryParse(f[2], out rw) || !int.TryParse(f[3], out rh))
+                {
+                    Console.Error.WriteLine("Error: --rect expects x,y,w,h in screen pixels.");
+                    return null;
+                }
+                rx = fx - _vx; ry = fy - _vy;
+                rx = Math.Clamp(rx, 0, Math.Max(0, _vw - 1));
+                ry = Math.Clamp(ry, 0, Math.Max(0, _vh - 1));
+                rw = Math.Min(rw, _vw - rx);
+                rh = Math.Min(rh, _vh - ry);
             }
             else if (!SelectInternal(out rx, out ry, out rw, out rh))
             {
@@ -279,10 +311,22 @@ static class RegionCapture
             Program.WritePng(dest, rw, rh, crop);
 
             PublishLatest(dest);
+
             // Screen coords, not virtual-desktop-relative: the bridge compares against
             // EditorWindow.position, which is desktop-space.
-            if (_collectContext)
-                TryWriteContext(dest, fgPid, $"{_vx + rx},{_vy + ry},{rw},{rh}");
+            int sx = _vx + rx, sy = _vy + ry;
+
+            string topmost = null;
+            bool describedUnity = _collectContext
+                                  && TryMatchUnityWindow(sx, sy, rw, rh, fgPid, out var ws, out topmost)
+                                  && TryWriteContext(dest, ws, $"{sx},{sy},{rw},{rh}");
+
+            if (!describedUnity && _copyToClipboard)
+            {
+                // Not Unity — a browser, an editor, a reference image. Behave like any other
+                // screenshot tool rather than annotating it with an unrelated project's state.
+                NormalScreenshot(dest, crop, rw, rh, topmost);
+            }
             return dest;
         }
         finally { ReleaseDesktop(); }
@@ -304,21 +348,197 @@ static class RegionCapture
     /// <summary>Public entry for callers with no foreground hint (a finished recording).</summary>
     public static void WriteContextFor(string capturePath)
     {
-        if (_collectContext) TryWriteContext(capturePath, 0);
+        if (!_collectContext) return;
+        var all = Program.EnumerateUnityWorkspaces();
+        if (all != null && all.Count > 0) TryWriteContext(capturePath, all[0]);
     }
 
-    static void TryWriteContext(string capturePath, uint preferredPid, string screenRect = null)
+    /// <summary>
+    /// Is the captured rectangle actually sitting on a Unity editor window?
+    ///
+    /// Without this, having Unity open anywhere meant a screenshot of a browser still queried the
+    /// bridge and wrote a .context.md describing a project the user was not looking at — and put
+    /// that on the clipboard instead of anything useful. Overlap against the real window rects,
+    /// not merely "is Unity running", and not merely foreground either: Unity can hold focus while
+    /// you drag a box over a second monitor.
+    /// </summary>
+    static bool TryMatchUnityWindow(int sx, int sy, int sw, int sh, uint fgPid,
+                                    out Program.UnityWorkspaceInfo match, out string topmost)
     {
+        match = null; topmost = null;
         try
         {
             var workspaces = Program.EnumerateUnityWorkspaces();
-            if (workspaces == null || workspaces.Count == 0) return;
+            if (workspaces == null || workspaces.Count == 0) return false;
 
-            var pick = workspaces.Find(w => w.Pid == preferredPid) ?? workspaces[0];
-            if (string.IsNullOrEmpty(pick.ProjectPath)) return;
+            var byPid = new Dictionary<uint, Program.UnityWorkspaceInfo>();
+            foreach (var w in workspaces) byPid[w.Pid] = w;
+
+            // Z-ORDER, not rectangles. Rect overlap asks "is Unity somewhere under here", which is
+            // true of a maximized editor almost everywhere on screen — so a shot of VS Code sitting
+            // on top of Unity still came back annotated with Unity's scene. WindowFromPoint asks
+            // the only question that matters: what is actually VISIBLE at these pixels. Unity
+            // cannot answer this itself; from inside the editor there is no way to know another
+            // application is covering it.
+            var votes = new Dictionary<Program.UnityWorkspaceInfo, int>();
+            int sampled = 0;
+            foreach (var p in HitTestPoints(sx, sy, sw, sh))
+            {
+                IntPtr h = WindowFromPoint(p);
+                if (h == IntPtr.Zero) continue;
+                IntPtr root = GetAncestor(h, GA_ROOT);
+                if (root == IntPtr.Zero) root = h;
+                GetWindowThreadProcessId(root, out uint pid);
+                sampled++;
+                if (!byPid.TryGetValue(pid, out var ws))
+                {
+                    // Remember what IS on top, so a plain screenshot can say why it was plain.
+                    if (topmost == null)
+                    {
+                        string pn; try { pn = Process.GetProcessById((int)pid).ProcessName; } catch { pn = "pid " + pid; }
+                        var ttl = new StringBuilder(200); GetWindowTextW(root, ttl, ttl.Capacity);
+                        string t = ttl.ToString();
+                        if (t.Length > 60) t = t.Substring(0, 60) + "…";
+                        topmost = string.IsNullOrWhiteSpace(t) ? pn : $"{pn} — {t}";
+                    }
+                    continue;
+                }
+                votes.TryGetValue(ws, out int c);
+                votes[ws] = c + 1;
+            }
+
+            if (votes.Count > 0)
+            {
+                // Whichever editor owns most of the visible pixels wins.
+                Program.UnityWorkspaceInfo top = null;
+                int topVotes = 0;
+                foreach (var kv in votes) if (kv.Value > topVotes) { topVotes = kv.Value; top = kv.Key; }
+                match = top;
+                return true;
+            }
+
+            // Points were sampled and none landed on Unity — something else is genuinely on top.
+            if (sampled > 0) return false;
+
+            // No window overlap — but a full-screen or borderless editor can defeat rect matching,
+            // so fall back to "the window that had focus when the hotkey fired".
+            if (fgPid != 0 && byPid.TryGetValue(fgPid, out var fg)) { match = fg; return true; }
+            return false;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Nine points spread across the region — centre, inner corners and edge midpoints — inset so a
+    /// selection drawn exactly on a window border does not hit the neighbour. One centre sample
+    /// would misjudge a region straddling two windows.
+    /// </summary>
+    static IEnumerable<POINT> HitTestPoints(int sx, int sy, int sw, int sh)
+    {
+        int[] fx = { 15, 50, 85 };
+        foreach (int px in fx)
+            foreach (int py in fx)
+                yield return new POINT { X = sx + sw * px / 100, Y = sy + sh * py / 100 };
+    }
+
+    /// <summary>
+    /// A plain screenshot: the image on the clipboard as a bitmap AND its path as text.
+    ///
+    /// Both formats at once because the two consumers want different things — a terminal or an
+    /// assistant pastes the path and reads the file, a chat or document pastes the picture. The
+    /// clipboard holds several formats simultaneously and each app takes the one it understands,
+    /// so there is no need to choose. Unity captures stay text-only: there the prompt IS the
+    /// payload, and offering a bitmap invites apps to paste the image instead of it.
+    /// </summary>
+    static void NormalScreenshot(string path, byte[] topDownBgra, int w, int h, string topmost)
+    {
+        string why = string.IsNullOrEmpty(topmost) ? "not a Unity window" : $"topmost window here is '{topmost}'";
+        bool ok = TrySetClipboardImageAndPath(path, topDownBgra, w, h);
+        Console.WriteLine(ok
+            ? $"clipboard: image + path copied ({why} — plain screenshot)"
+            : "clipboard: could not copy (another app is holding it)");
+    }
+
+    static bool TrySetClipboardImageAndPath(string path, byte[] topDownBgra, int w, int h)
+    {
+        for (int attempt = 0; attempt < 15; attempt++)
+        {
+            // ~1.5s of patience: clipboard contention is routine (a password manager, a clipboard
+            // history tool, another paste in flight), and 300ms was short enough to lose races
+            // that would have resolved on their own.
+            if (!OpenClipboard(IntPtr.Zero)) { Thread.Sleep(100); continue; }
+            try
+            {
+                EmptyClipboard();
+
+                // CF_DIB wants bottom-up rows and a header in front of the pixels.
+                int stride = w * 4;
+                var header = new BITMAPINFOHEADER
+                {
+                    biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
+                    biWidth = w,
+                    biHeight = h,          // positive = bottom-up, which is CF_DIB's convention
+                    biPlanes = 1,
+                    biBitCount = 32,
+                    biCompression = 0,
+                    biSizeImage = (uint)(stride * h),
+                };
+
+                int headerSize = (int)header.biSize;
+                IntPtr hDib = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)(uint)(headerSize + stride * h));
+                if (hDib != IntPtr.Zero)
+                {
+                    IntPtr p = GlobalLock(hDib);
+                    if (p != IntPtr.Zero)
+                    {
+                        Marshal.StructureToPtr(header, p, false);
+                        for (int y = 0; y < h; y++)
+                            Marshal.Copy(topDownBgra, (h - 1 - y) * stride,
+                                         p + headerSize + y * stride, stride);
+                        GlobalUnlock(hDib);
+                        if (SetClipboardData(CF_DIB, hDib) == IntPtr.Zero) GlobalFree(hDib);
+                    }
+                    else GlobalFree(hDib);
+                }
+
+                byte[] text = Encoding.Unicode.GetBytes(path + "\0");
+                IntPtr hTxt = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)(uint)text.Length);
+                if (hTxt != IntPtr.Zero)
+                {
+                    IntPtr p = GlobalLock(hTxt);
+                    if (p != IntPtr.Zero)
+                    {
+                        Marshal.Copy(text, 0, p, text.Length);
+                        GlobalUnlock(hTxt);
+                        if (SetClipboardData(CF_UNICODETEXT, hTxt) == IntPtr.Zero) GlobalFree(hTxt);
+                    }
+                    else GlobalFree(hTxt);
+                }
+                return true;
+            }
+            catch { return false; }
+            finally { CloseClipboard(); }
+        }
+        return false;
+    }
+
+    static bool TryWriteContext(string capturePath, Program.UnityWorkspaceInfo pick, string screenRect = null)
+    {
+        try
+        {
+            if (pick == null || string.IsNullOrEmpty(pick.ProjectPath)) return false;
+            int workspaceCount = Program.EnumerateUnityWorkspaces()?.Count ?? 1;
 
             string markdown = QueryContext(pick.ProjectPath, screenRect);
-            if (string.IsNullOrWhiteSpace(markdown)) return;
+            if (string.IsNullOrWhiteSpace(markdown)) return false;
+
+            // The CLI can only test Unity's TOP-LEVEL window, and a maximized editor covers nearly
+            // the whole screen — so a shot of the taskbar or a floating app still matched. The
+            // bridge knows the actual editor view rects, so its verdict wins: if no view is under
+            // the region, this was not a Unity capture after all.
+            if (markdown.IndexOf("No Unity editor window overlaps this region",
+                                 StringComparison.OrdinalIgnoreCase) >= 0)
+                return false;
 
             // The CLI self-updates independently of the UPM package, so a new CLI regularly meets
             // an older bridge that has never heard of CONTEXT. Writing that reply out would put
@@ -327,7 +547,7 @@ static class RegionCapture
                 || markdown.TrimStart().StartsWith("ERROR", StringComparison.OrdinalIgnoreCase))
             {
                 Console.Error.WriteLine("context: bridge has no CONTEXT command — update the Unity package to match this CLI.");
-                return;
+                return false;
             }
 
             string dest = Path.ChangeExtension(capturePath, ".context.md");
@@ -335,8 +555,8 @@ static class RegionCapture
             sb.AppendLine($"# Editor state when `{Path.GetFileName(capturePath)}` was captured");
             sb.AppendLine();
             sb.AppendLine($"Image: `{capturePath}`");
-            if (workspaces.Count > 1)
-                sb.AppendLine($"Project: `{pick.ProjectPath}` (of {workspaces.Count} open editors)");
+            if (workspaceCount > 1)
+                sb.AppendLine($"Project: `{pick.ProjectPath}` (of {workspaceCount} open editors)");
             else
                 sb.AppendLine($"Project: `{pick.ProjectPath}`");
             sb.AppendLine();
@@ -369,8 +589,10 @@ static class RegionCapture
                         : "clipboard: prompt copied — paste it straight in")
                     : "clipboard: could not copy (another app is holding it)");
             }
+            return true;
         }
         catch { /* the screenshot is the deliverable; context is a bonus */ }
+        return false;
     }
 
     /// <summary>
@@ -439,9 +661,12 @@ static class RegionCapture
     {
         if (string.IsNullOrEmpty(text)) return false;
 
-        for (int attempt = 0; attempt < 8; attempt++)
+        for (int attempt = 0; attempt < 15; attempt++)
         {
-            if (!OpenClipboard(IntPtr.Zero)) { Thread.Sleep(40); continue; }
+            // ~1.5s of patience: clipboard contention is routine (a password manager, a clipboard
+            // history tool, another paste in flight), and 300ms was short enough to lose races
+            // that would have resolved on their own.
+            if (!OpenClipboard(IntPtr.Zero)) { Thread.Sleep(100); continue; }
 
             IntPtr hMem = IntPtr.Zero;
             try
@@ -702,6 +927,47 @@ static class RegionCapture
 
     static string PidFile => Path.Combine(CapturesDir, "capture-daemon.pid");
 
+    // Written by an explicit --stop, cleared by an explicit --daemon. Without it the auto-revive
+    // below would resurrect the daemon seconds after someone deliberately stopped it to free
+    // Print Screen, which is worse than not reviving at all.
+    static string StoppedMarker => Path.Combine(CapturesDir, "capture-daemon.stopped");
+
+    // Throttles revive attempts so a daemon that cannot start (hotkey permanently taken, exe
+    // missing) does not spawn a process on every single CLI invocation.
+    static string ReviveStamp => Path.Combine(CapturesDir, "capture-daemon.revive");
+
+    /// <summary>
+    /// Restart the daemon if it should be running and isn't.
+    ///
+    /// The daemon is killed far more often than it crashes: UPDATE and the deploy script both kill
+    /// every clibridge4unity process to free the locked binary, and a build collision does the same.
+    /// Nothing brought it back except the next logon, so the hotkeys would quietly stop working for
+    /// the rest of the day. Any CLI invocation now revives it.
+    ///
+    /// Deliberately cheap — two file checks and a pid probe on the common path, no process spawn
+    /// unless the daemon is genuinely gone.
+    /// </summary>
+    public static void EnsureDaemonAlive()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            if (!AutostartInstalled) return;        // never opted in — not ours to start
+            if (File.Exists(StoppedMarker)) return; // stopped on purpose
+            if (LivePid() != 0) return;             // already running
+
+            // Back off if we tried recently and it evidently did not take.
+            if (File.Exists(ReviveStamp)
+                && (DateTime.UtcNow - File.GetLastWriteTimeUtc(ReviveStamp)).TotalSeconds < 60)
+                return;
+
+            Directory.CreateDirectory(CapturesDir);
+            File.WriteAllText(ReviveStamp, DateTime.UtcNow.ToString("o"));
+            StartDetached();
+        }
+        catch { /* reviving is a convenience; never let it break the command being run */ }
+    }
+
     static int LivePid()
     {
         try
@@ -728,6 +994,8 @@ static class RegionCapture
 
     static int StopDaemon()
     {
+        try { Directory.CreateDirectory(CapturesDir); File.WriteAllText(StoppedMarker, DateTime.UtcNow.ToString("o")); } catch { }
+
         int pid = LivePid();
         if (pid == 0)
         {
@@ -855,6 +1123,10 @@ static class RegionCapture
         Console.WriteLine($"  Captures        {CapturesDir}");
         Console.WriteLine($"  Editor state    {(_collectContext ? "collected with each capture (.context.md)" : "off")}");
         Console.WriteLine($"  Clipboard       {(_copyToClipboard ? "prompt copied on each capture" : "off")}");
+        if (File.Exists(StoppedMarker))
+            Console.WriteLine("  Auto-restart    suppressed (stopped on purpose) — CAPTURE --daemon re-enables it");
+        else if (AutostartInstalled)
+            Console.WriteLine("  Auto-restart    on — any clibridge4unity command revives a dead daemon");
         Console.WriteLine($"  ffmpeg          {(ScreenRecorder.FindFfmpeg() != null ? "found (RECORD available)" : "not found — RECORD unavailable")}");
         Console.WriteLine();
         Console.WriteLine("  Hotkeys (only while the daemon runs)");
@@ -1040,6 +1312,7 @@ static class RegionCapture
         SetTimer(hwnd, (UIntPtr)1, 1000, IntPtr.Zero);
 
         File.WriteAllText(PidFile, Process.GetCurrentProcess().Id.ToString());
+        try { if (File.Exists(StoppedMarker)) File.Delete(StoppedMarker); } catch { }
         Console.WriteLine("Capture daemon armed.");
         if (gotCapture) Console.WriteLine("  Print Screen         grab a region");
         if (gotRecord) Console.WriteLine("  Ctrl+Print Screen    start / stop a recording");

@@ -112,7 +112,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.82)
+│   └── package.json           # UPM manifest (v1.1.83)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -397,6 +397,9 @@ Multiple Claude/CLI windows share **one** Unity editor, so commands collide (COM
 - `DISMISS` - Close modal dialogs
 - `SCREENSHOT` - CLI-side window capture (see Screenshot section)
 - `CAPTURE [--out <png>] [--full]` - Drag-select a screen region (Esc/right-click cancels). Freezes the desktop first, then lets you select on the still — so the crop is the frame you aimed at, not whatever Unity repainted mid-drag. Works while Unity is busy, importing, or showing the modal dialog you're trying to screenshot. See [RegionCapture.cs](clibridge4unity/RegionCapture.cs).
+  - `CAPTURE --rect x,y,w,h` - non-interactive capture of an exact screen rectangle (scriptable; also how the region logic is tested).
+  - **Not over Unity? Plain screenshot.** Decided by Z-ORDER, not rectangles: nine points across the region go through `WindowFromPoint` to find what is actually *visible* there. Rect overlap is not enough — a maximized editor is "under" almost the whole screen, so a shot of VS Code or Chrome sitting on top of Unity came back annotated with Unity's scene. Unity cannot detect this itself; from inside the editor there is no way to know another app is covering it. The bridge's own verdict ("no editor window overlaps") also overrides a match. A plain screenshot puts the **image and the path** on the clipboard (CF_DIB + CF_UNICODETEXT together, so a terminal takes the path and a chat takes the picture) and reports which window was on top.
+  - **Auto-restart.** `UPDATE` and `deploy.py` both kill every clibridge4unity process to free the locked binary, and nothing used to restart the daemon before the next logon — so Print Screen silently stopped working for the rest of the day. Any CLI command now revives it. An explicit `CAPTURE --stop` records intent and suppresses that until an explicit `--daemon` (also the escape hatch when the daemon locks your build output).
   - `CAPTURE --daemon` - tray icon + global hotkeys: **PrtScn** grabs a region, **Ctrl+PrtScn** starts/stops a recording (one chord toggles — reaching for a different key to stop is when you fumble it). `--status` / `--stop` manage it; `--autostart on|off` writes/removes a Startup-folder `.cmd`. Refuses to double-arm — two daemons means `RegisterHotKey` fails in the loser and the chord silently dies.
     - Each chord registers independently and reports which one lost. PrtScn is the most contested key on Windows: *Settings > Ease of Access > Keyboard > "Use the PrtScn button to open screen snipping"* claims it at the OS level, as do OneDrive/Dropbox/ShareX.
     - **Windows parks every newly-registered tray icon in the hidden overflow** and there is no supported API to promote one (deliberate — it stops apps fighting over tray space). Click the `^` and drag it out. The daemon says this on startup so a hidden icon doesn't read as a broken one.

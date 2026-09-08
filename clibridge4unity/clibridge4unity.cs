@@ -1670,6 +1670,14 @@ class Program
         // Background update fetch is kicked off from Main() before we get here; the
         // banner is printed from Main()'s finally block at the bottom of output.
 
+        // Revive the capture daemon if it should be running and isn't. UPDATE and the deploy
+        // script both kill every clibridge4unity process to free the locked binary, and nothing
+        // used to bring the daemon back before the next logon — so Print Screen quietly stopped
+        // working for the rest of the day. Skipped for commands that manage the daemon themselves,
+        // or this would immediately undo a deliberate CAPTURE --stop.
+        if (cmdUpper is not ("CAPTURE" or "RECORD" or "DAEMON" or "HOOK" or "UPDATE"))
+            RegionCapture.EnsureDaemonAlive();
+
         // UPDATE: self-update CLI (no Unity needed)
         if (cmdUpper == "UPDATE")
         {
