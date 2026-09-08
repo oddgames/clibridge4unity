@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.1.81 — 2026-09-08
+
+## v1.1.81
+
+### New
+
+**Every editor view a screenshot lands on now answers.** Previously a region over the Hierarchy,
+Inspector, Console or Project reported the view's name and deferred. Now each yields real content,
+or says precisely why it cannot.
+
+**Hierarchy rows.** The Hierarchy has *no* UI Toolkit tree — measured, its `rootVisualElement` holds
+a single child and zero `IMGUIContainer`s, because it draws straight through `OnGUI`. Its rows are
+therefore read from the internal `TreeViewController`'s data source and mapped onto the region using
+`scrollPos`, the tree's rect and row height. These are the **displayed** rows, which is the point of
+reading them rather than re-listing the scene: collapsed subtrees are absent, any search filter is
+already applied, and the selected row is flagged. Verified — a band over the top of the panel
+returns the first four rows and a band lower down returns the last four.
+
+**Inspector text.** The Inspector turned out hybrid rather than opaque: 68 UI Toolkit elements
+alongside 21 IMGUI containers. Its UI Toolkit half is scanned for text overlapping the region, and
+the IMGUI half is reported as unreadable rather than silently omitted. The Selection's field dump
+remains the authoritative content; this says what was actually on screen.
+
+**Console and Project** stay unscraped by design — their content already arrives through `LOG` and
+the Selection, so those regions point there instead of pretending to parse pixels.
+
+### Fixed
+
+- Documentation in `CLAUDE.md` and the `RegionVisibility` header claimed Inspector and Hierarchy
+  regions were "not parsed because IMGUI leaves no queryable model". That was only half true and is
+  now wrong; both were corrected to describe what each view actually supports.
+
+### Internal
+
+- New `EditorViewScanner` isolates every piece of editor-internal reflection in one place. Each step
+  degrades to a note rather than throwing — these are internal APIs, and a Unity upgrade renaming a
+  field must not take a screenshot down with it. Row height is tried under three names before
+  falling back to Unity's long-standing 16pt default.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.80 — 2026-09-08
 
 ## v1.1.80

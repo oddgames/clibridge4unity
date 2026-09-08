@@ -112,7 +112,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.80)
+│   └── package.json           # UPM manifest (v1.1.81)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -268,7 +268,7 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
   - **Docked tabs overlap** — Scene and Game share a rect, so only the frontmost tab counts (same `m_Panes`/`selected` reflection `WINDOWS` uses). Without it a Game-view region resolves to the Scene view behind it at a convincing 100%.
   - Scene view uses renderer-bounds projection. `HandleUtility.PickRectObjects` would be ideal and is **unusable**: measured, it throws `NullReferenceException` from a bridge command and still throws after `Handles.SetCamera` — it needs state that exists only inside the Scene view's own OnGUI.
   - Game view maps through `GameView.targetInView`/`gameMouseScale` (internal, so reflection; degrades to an explicit "could not map" rather than guessing), then resolves: uGUI and UI Toolkit by **rect overlap, not raycast** (a raycast only sees `raycastTarget=true`, missing every decorative image a UI screenshot is usually about), and world objects by physics rays with renderer-bounds projection as a second tier for collider-less geometry.
-  - Inspector/Hierarchy/Console regions are **not** parsed — IMGUI leaves no queryable model, and the useful answer is the Selection or console output already in the response.
+  - **Every view answers** — no region is a dead end. Hierarchy rows come from the internal `TreeViewController` data source mapped by `scrollPos`/row height (it has NO UI Toolkit tree — measured: one child, zero IMGUIContainers — because it draws through `OnGUI`); those are the *displayed* rows, so collapsed subtrees and filtered-out objects are correctly absent, and the selected row is flagged. The Inspector is hybrid (68 UITK elements alongside 21 IMGUI containers), so its UITK half is scanned for text in the region and the IMGUI half is reported as unreadable, with the Selection dump as the authoritative content. Console and Project need no scraping — their content already arrives via `LOG` and the Selection. See [EditorViewScanner.cs](Package/Editor/Commands/Core/EditorViewScanner.cs).
   - Field detail for what it found is capped (~8 KB in-Package, 16 KB on the clipboard); the full text is always in the `.context.md` beside the capture.
 - `MENU path` - Execute a Unity menu item (e.g. `MENU Window/General/Console`)
 - `PROFILE` - Control the profiler and analyse captured performance data. Reads the frame buffer, so **every analysis subcommand works identically on a loaded `.data` capture, a live play-mode session, and a paused game** — `ProfilerDriver` serves all three through the same frame views.

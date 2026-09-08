@@ -30,8 +30,14 @@ namespace clibridge4unity
     ///                raycast only sees raycastTarget=true, missing every decorative image the
     ///                screenshot is usually about), and world objects by physics rays, with
     ///                renderer-bounds projection as a second tier for collider-less geometry.
-    ///   Inspector / Hierarchy — not parsed. IMGUI leaves no queryable model, and the useful
-    ///                answer is the current Selection, which CONTEXT already reports.
+    ///   Hierarchy  — read from the internal TreeViewController's rows, mapped onto the region by
+    ///                scrollPos and row height. It has NO UI Toolkit tree (measured: one child, no
+    ///                IMGUIContainer) because it draws through OnGUI. See EditorViewScanner.
+    ///   Inspector  — hybrid, so its UI Toolkit half is scanned for text in the region and the
+    ///                IMGUI half is reported as unreadable. The Selection dump remains the
+    ///                authoritative content.
+    ///   Console / Project — opaque, and need no scraping: their content already arrives via LOG
+    ///                and the Selection.
     /// </summary>
     public static class RegionVisibility
     {
@@ -74,7 +80,7 @@ namespace clibridge4unity
             else if (typeName.Contains("GameView"))
                 DescribeGameView(sb, top.window, pts);
             else
-                DescribeEditorChrome(sb, typeName);
+                DescribeEditorChrome(sb, top.window, typeName, pts);
 
             AppendDetail(sb);
             return sb.ToString();
@@ -513,14 +519,57 @@ namespace clibridge4unity
 
         // ─── Editor chrome ────────────────────────────────────────────
 
-        static void DescribeEditorChrome(StringBuilder sb, string typeName)
+        static void DescribeEditorChrome(StringBuilder sb, EditorWindow window, string typeName, Rect pts)
         {
             sb.AppendLine($"### {Pretty2(typeName)}").AppendLine();
-            if (typeName.Contains("Inspector") || typeName.Contains("SceneHierarchy"))
-                sb.AppendLine("This region covers an editor panel whose contents are IMGUI-drawn and not queryable. "
-                              + "What it was showing is the current Selection, reported above.");
-            else if (typeName.Contains("Console"))
-                sb.AppendLine("This region covers the Console. Its entries are in the console-errors section above.");
+
+            if (typeName.Contains("SceneHierarchy"))
+            {
+                var rows = EditorViewScanner.ScanHierarchy(window, pts, out string note);
+                if (rows == null || rows.Count == 0)
+                {
+                    sb.AppendLine($"Could not read the hierarchy rows{(note == null ? "" : $" ({note})")}. "
+                                  + "The scene contents are in the Selection section above.");
+                }
+                else
+                {
+                    var inRegion = rows.Where(r => r.InRegion).ToList();
+                    sb.AppendLine(inRegion.Count > 0
+                        ? $"Rows under the region ({inRegion.Count} of {rows.Count} displayed):"
+                        : $"The region did not land on a row. All {rows.Count} displayed rows:");
+                    sb.AppendLine();
+                    foreach (var r in (inRegion.Count > 0 ? inRegion : rows).Take(40))
+                        sb.AppendLine($"- {new string(' ', Mathf.Min(r.Depth, 8) * 2)}`{r.Name}`"
+                                      + (r.Selected ? "  **(selected)**" : ""));
+                    sb.AppendLine();
+                    // Rows are what the window DISPLAYS: collapsed children are absent and any
+                    // search filter is already applied, which is the point of reading them here
+                    // rather than re-listing the scene.
+                    sb.AppendLine("*These are the displayed rows — collapsed subtrees and filtered-out objects are not listed.*");
+                }
+                sb.AppendLine();
+                return;
+            }
+
+            if (typeName.Contains("Inspector"))
+            {
+                var text = EditorViewScanner.ScanTextInRegion(window, pts, out int imgui);
+                if (text.Count > 0)
+                {
+                    sb.AppendLine("Text drawn in that part of the Inspector:").AppendLine();
+                    foreach (var line in text.Take(30)) sb.AppendLine($"- {line}");
+                    sb.AppendLine();
+                }
+                sb.AppendLine(imgui > 0
+                    ? $"*Partial: {imgui} IMGUI-drawn section(s) in this window cannot be read. "
+                      + "The full contents are the Selection's fields, reported above.*"
+                    : "*The full contents are the Selection's fields, reported above.*");
+                sb.AppendLine();
+                return;
+            }
+
+            if (typeName.Contains("Console"))
+                sb.AppendLine("This region covers the Console — its entries are in the console-errors section above.");
             else if (typeName.Contains("ProjectBrowser"))
                 sb.AppendLine("This region covers the Project browser — the selected asset is reported above.");
             else
