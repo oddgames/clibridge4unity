@@ -49,7 +49,7 @@ namespace clibridge4unity
             {
                 if (TryParseRect(rectArg, out Rect r))
                 {
-                    try { sb.AppendLine(RegionVisibility.Describe(r)); }
+                    try { sb.AppendLine(RegionVisibility.Describe(r, selectionReportedElsewhere: true)); }
                     catch (Exception ex) { sb.AppendLine($"*(Region analysis failed: {ex.GetType().Name}: {ex.Message})*").AppendLine(); }
                 }
                 else

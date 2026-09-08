@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.1.82 — 2026-09-08
+
+## v1.1.82
+
+### Fixed
+
+**Hierarchy rows never resolved to their objects, and the selected-row flag was always false.**
+Unity 6.3 changed `TreeViewItem.id` from `int` to `UnityEngine.EntityId`, which is not
+`IConvertible`. The code read it with `as int?` — which does not throw, it silently yields null —
+so every row resolved to instance id 0. Row *names* still rendered perfectly, which is exactly why
+this passed testing in 1.1.81: the output looked correct while object lookup was impossible and
+`(selected)` could never be true. Ids are now unwrapped through EntityId's `op_Implicit -> Int32`,
+falling back to its backing int field, with the plain-int path kept for older Unity versions.
+
+### New
+
+**A region's objects carry their data, not just their names.**
+
+- **Hierarchy** rows now show their components inline — `Main Camera [Camera, AudioListener]`,
+  `RedCube [MeshFilter, BoxCollider, MeshRenderer]` — so a row says what the thing *is*, and the
+  objects under the region get full serialized fields through the existing budgeted dump. A row
+  labelled `Panel` told you nothing on its own.
+- **Inspector** regions supply the selected object's fields when `VISIBLE` is called on its own.
+  `CONTEXT --rect` suppresses them instead, because its own Selection section already prints them —
+  a flag rather than duplicating an entire dump into the same prompt.
+
+### Internal
+
+- `RegionVisibility.Describe` takes `selectionReportedElsewhere` so the Inspector branch neither
+  duplicates the Selection (from CONTEXT) nor omits it (from VISIBLE standalone).
+- `EditorViewScanner.ToInstanceId` centralises the EntityId unwrapping: direct int, then an implicit
+  or explicit conversion operator to `Int32`, then any int field, then 0.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.81 — 2026-09-08
 
 ## v1.1.81

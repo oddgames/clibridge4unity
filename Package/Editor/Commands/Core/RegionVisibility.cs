@@ -49,8 +49,16 @@ namespace clibridge4unity
         const int RaySamples = 12;      // 12x12 grid across the region — 144 rays, cheap and enough
                                         // to separate "fills the region" from "clipped a corner"
 
-        public static string Describe(Rect physicalRect)
+        static bool _selectionReportedElsewhere;
+
+        /// <param name="selectionReportedElsewhere">
+        /// True when the caller already prints the Selection's fields (CONTEXT does). Without it an
+        /// Inspector region would either duplicate that whole dump or, from VISIBLE on its own,
+        /// return scraped labels and no data at all.
+        /// </param>
+        public static string Describe(Rect physicalRect, bool selectionReportedElsewhere = false)
         {
+            _selectionReportedElsewhere = selectionReportedElsewhere;
             var sb = new StringBuilder();
             float ppp = Mathf.Max(0.01f, EditorGUIUtility.pixelsPerPoint);
             var pts = new Rect(physicalRect.x / ppp, physicalRect.y / ppp,
@@ -539,9 +547,22 @@ namespace clibridge4unity
                         : $"The region did not land on a row. All {rows.Count} displayed rows:");
                     sb.AppendLine();
                     foreach (var r in (inRegion.Count > 0 ? inRegion : rows).Take(40))
-                        sb.AppendLine($"- {new string(' ', Mathf.Min(r.Depth, 8) * 2)}`{r.Name}`"
+                    {
+                        // Resolve the row back to its object so the listing carries what the thing
+                        // IS, not just what it is called — a row reading "Panel" tells you nothing.
+                        var go = EditorUtility.InstanceIDToObject(r.Id) as GameObject;
+                        string comps = go != null ? $"  [{Components(go)}]" : "";
+                        sb.AppendLine($"- {new string(' ', Mathf.Min(r.Depth, 8) * 2)}`{r.Name}`{comps}"
                                       + (r.Selected ? "  **(selected)**" : ""));
+                    }
                     sb.AppendLine();
+
+                    // Feed the field-dump section: rows under the region are exactly the objects
+                    // the screenshot was pointing at.
+                    foreach (var r in inRegion)
+                    {
+                        if (EditorUtility.InstanceIDToObject(r.Id) is GameObject go) _detail.Add(go);
+                    }
                     // Rows are what the window DISPLAYS: collapsed children are absent and any
                     // search filter is already applied, which is the point of reading them here
                     // rather than re-listing the scene.
@@ -560,10 +581,17 @@ namespace clibridge4unity
                     foreach (var line in text.Take(30)) sb.AppendLine($"- {line}");
                     sb.AppendLine();
                 }
+                // The Inspector is a view onto the Selection, so the data behind that region IS the
+                // selected object's fields. CONTEXT already prints them in its own section; VISIBLE
+                // called on its own has no such section, so it must supply them here or the region
+                // resolves to scraped labels and nothing else.
+                if (!_selectionReportedElsewhere)
+                    _detail.AddRange(Selection.gameObjects.Where(g => g != null));
+
                 sb.AppendLine(imgui > 0
-                    ? $"*Partial: {imgui} IMGUI-drawn section(s) in this window cannot be read. "
-                      + "The full contents are the Selection's fields, reported above.*"
-                    : "*The full contents are the Selection's fields, reported above.*");
+                    ? $"*Partial: {imgui} IMGUI-drawn section(s) in this window cannot be read"
+                      + (_selectionReportedElsewhere ? "; the full contents are the Selection's fields, reported above.*" : ".*")
+                    : (_selectionReportedElsewhere ? "*The full contents are the Selection's fields, reported above.*" : ""));
                 sb.AppendLine();
                 return;
             }

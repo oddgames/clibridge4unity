@@ -89,7 +89,7 @@ namespace clibridge4unity
                 foreach (var row in rows)
                 {
                     var t = row.GetType();
-                    int id = t.GetProperty("id", BF)?.GetValue(row) as int? ?? 0;
+                    int id = ToInstanceId(t.GetProperty("id", BF)?.GetValue(row));
                     result.Add(new HierarchyRow
                     {
                         Id = id,
@@ -103,6 +103,40 @@ namespace clibridge4unity
                 return result;
             }
             catch (Exception ex) { note = ex.GetType().Name + ": " + ex.Message; return null; }
+        }
+
+        /// <summary>
+        /// A tree row's id as an instance id.
+        ///
+        /// In Unity 6.3 `TreeViewItem.id` is no longer an int but `UnityEngine.EntityId`, and it is
+        /// not IConvertible — `Convert.ToInt32` throws and `as int?` silently yields null, which is
+        /// worse: every row resolves to id 0, so objects never resolve and the selected-row flag is
+        /// quietly always false. EntityId does carry `op_Implicit -> Int32` (and an m_Data int), so
+        /// unwrap through that, keeping the plain-int path for older versions.
+        /// </summary>
+        static int ToInstanceId(object idValue)
+        {
+            if (idValue == null) return 0;
+            if (idValue is int direct) return direct;
+
+            var t = idValue.GetType();
+            try
+            {
+                foreach (var m in t.GetMethods(BindingFlags.Static | BindingFlags.Public))
+                {
+                    if (m.Name != "op_Implicit" && m.Name != "op_Explicit") continue;
+                    if (m.ReturnType != typeof(int)) continue;
+                    var ps = m.GetParameters();
+                    if (ps.Length == 1 && ps[0].ParameterType == t)
+                        return (int)m.Invoke(null, new[] { idValue });
+                }
+
+                foreach (var f in t.GetFields(BF))
+                    if (f.FieldType == typeof(int))
+                        return (int)f.GetValue(idValue);
+            }
+            catch { }
+            return 0;
         }
 
         /// <summary>Row height, tried by several names across versions; 16pt is Unity's long-standing default.</summary>
