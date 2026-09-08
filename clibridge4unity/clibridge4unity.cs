@@ -2959,7 +2959,7 @@ class Program
         catch { return false; }
     }
 
-    static string GeneratePipeName(string projectPath)
+    internal static string GeneratePipeName(string projectPath)
     {
         // Must match Unity server's pipe name generation exactly
         // Normalize path: lowercase, backslashes, no trailing slash
@@ -4425,7 +4425,7 @@ class Program
     /// Summary of one running Unity instance. The workspace path (from `-projectPath`)
     /// is the stable identifier we show to the user when they're connected to the wrong Unity.
     /// </summary>
-    class UnityWorkspaceInfo
+    internal class UnityWorkspaceInfo
     {
         public uint Pid;
         public string ProjectPath;  // from command-line -projectPath (authoritative)
@@ -4437,7 +4437,7 @@ class Program
     /// (read via WMI from the `-projectPath` command-line arg) and main-window title.
     /// Used to tell the user exactly which Unity instances are open when auto-detect misses.
     /// </summary>
-    static List<UnityWorkspaceInfo> EnumerateUnityWorkspaces()
+    internal static List<UnityWorkspaceInfo> EnumerateUnityWorkspaces()
     {
         var results = new List<UnityWorkspaceInfo>();
         var byPid = new Dictionary<uint, UnityWorkspaceInfo>();
@@ -6097,10 +6097,17 @@ class Program
         md.AppendLine();
         md.AppendLine("## LINT / COMPILE — troubleshooting tools, NOT routine steps");
         md.AppendLine();
-        md.AppendLine("**Don't lint or compile after every edit.** Unity auto-compiles when it regains focus, and 99% of the");
-        md.AppendLine("time the user has already compiled by the time they ask you to test. Reach for these ONLY when");
-        md.AppendLine("something isn't working as expected — `STATUS` shows compile errors, a command returns stale/odd");
-        md.AppendLine("results, or `CODE_EXEC` can't see a type you just added:");
+        md.AppendLine("**Don't lint or compile after every edit.** When Unity's auto-refresh is on it compiles as soon as it");
+        md.AppendLine("regains focus, so most of the time the user has already compiled by the time they ask you to test.");
+        md.AppendLine("Reach for these ONLY when something isn't working as expected — `STATUS` shows compile errors, a");
+        md.AppendLine("command returns stale/odd results, or `CODE_EXEC` can't see a type you just added.");
+        md.AppendLine();
+        md.AppendLine("**First check whether auto-refresh is actually on: Edit > Preferences > Asset Pipeline > Auto Refresh.**");
+        md.AppendLine("Plenty of people switch it off, because constant reimports on a large project make the editor unusable.");
+        md.AppendLine("With it **Disabled** nothing compiles until someone presses Ctrl+R or a `COMPILE` runs — so stale results");
+        md.AppendLine("are the normal case rather than the exception, and the advice above inverts: after editing C# you must");
+        md.AppendLine("compile before trusting anything that reads types (`CODE_EXEC`, `TEST`, `INSPECTOR` on a new component).");
+        md.AppendLine("`STATUS` reports uncompiled script changes either way — believe it over this heuristic.");
         md.AppendLine();
         md.AppendLine("- `LINT` (default) — offline syntax-only. Sub-second. Catches missing braces, unclosed strings, bad keywords, malformed declarations, errors in NEW .cs Unity hasn't seen. No type binding. Works when Unity is busy/closed.");
         md.AppendLine("- `LINT unity` — Unity-faithful **per-asmdef** compile. ~5-60s depending on project size. Parses every asmdef, builds the dependency DAG, compiles each user asmdef separately with correct refs + defines + `UNITY_EDITOR` scoping. Catches missing methods, wrong arg counts, type errors, missing usings. Asmdef-aware so no cross-asmdef type collision false-positives. Caps at 60s — falls back to `COMPILE` if exceeded.");

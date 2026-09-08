@@ -355,6 +355,9 @@ static class ScreenRecorder
         }
 
         RegionCapture.PublishLatest(dest);
+        // Same reasoning as a still: capture the editor state now, while it still matches what
+        // was recorded, rather than whenever someone gets round to opening the panel.
+        RegionCapture.WriteContextFor(dest);
         return 0;
     }
 

@@ -1,5 +1,76 @@
 # Changelog
 
+## v1.1.79 — 2026-09-08
+
+## v1.1.79
+
+### New
+
+**`CONTEXT` — snapshot the editor's current state as paste-ready markdown.** Active scene (with
+its dirty flag), additively-loaded scenes, the Prefab Mode target, play/pause, compiling and
+importing flags, Unity and product version, the live `Selection` with its serialized fields, and
+console errors — in one command.
+
+**Captures now collect that state automatically.** Every `CAPTURE` and `RECORD` writes a
+`<name>.context.md` beside the image or video. The timing is the whole point: gather it when the
+panel is eventually opened and the selection has moved, play mode has exited and the console has
+scrolled — the notes would describe a different editor than the picture shows.
+
+The daemon has no project context at logon, so it finds Unity itself via the existing
+`-projectPath` WMI lookup. With several editors open it picks whichever owned the foreground
+window, sampled *before* the selection overlay steals focus. Turn it off with `--no-context`, the
+tray menu, or check it in `CAPTURE --settings`.
+
+**`SETUP` / `UPDATE` offer the screenshot daemon** rather than leaving a hint to notice, describing
+what it does before asking. The prompt appears only on a real terminal; under a script or coding
+agent a blocking stdin read would hang the install, so it prints the two commands instead.
+
+**`CAPTURE --settings`** — one view of daemon state, logon autostart, capture folder, ffmpeg
+availability and the hotkeys, with the command to change each. It exists because the tray menu is
+unreachable when the daemon isn't running, which is exactly when you need to know why.
+
+### Fixed
+
+- **The daemon showed a console window.** The exe is a console app because every other command
+  needs stdout, so a daemon launched from the Startup entry left a dead black box in the taskbar
+  for the session. It now hides that window — but only when `GetConsoleProcessList` reports it owns
+  the console alone. Sharing a terminal means hiding it would take the user's own window away and
+  swallow Ctrl+C.
+- **`UPDATE` silently killed the capture daemon.** `KillStaleClibridgeProcesses()` kills every other
+  clibridge4unity process to free the locked binary — including the one holding your hotkeys — and
+  never restarted it. Print Screen simply stopped working after a self-update.
+- **Prefab Mode reported the wrong hierarchy.** `SceneManager.GetActiveScene()` still returns the
+  scene you left while a prefab is open in isolation, so state capture described something the user
+  was not looking at. Prefab Mode is now detected first, and additive scenes are listed rather than
+  silently dropped.
+- **Version skew wrote garbage into the paste file.** The CLI self-updates independently of the UPM
+  package, so a newer CLI regularly meets a bridge with no `CONTEXT`. The reply — a `__timeout:`
+  protocol line plus `Unknown command` — was being written verbatim into a file whose entire purpose
+  is being pasted. Now detected and suppressed with an explanation, and the protocol hint line is
+  stripped from valid replies too.
+- **Generated project docs assumed auto-refresh was on.** They asserted Unity compiles on focus, so
+  an agent reading them would trust stale results on any project where *Edit > Preferences > Asset
+  Pipeline > Auto Refresh* is disabled — common on large projects, where constant reimports make the
+  editor unusable. The block now leads with checking that setting and states that the advice inverts
+  when it is off.
+- **`deploy.py` stranded published releases.** Its 180s `gh release upload` budget is too short for
+  the ~84 MB bare exe, and that step runs *after* the tag, release and zip upload succeed — so a
+  timeout left a live release missing an asset behind a traceback that looked like total failure.
+  Raised to 600s.
+
+### Internal
+
+- `CONTEXT` is one round trip rather than three (`SELECTION`+`INSPECTOR`+`LOG`) because each trip
+  queues on the main thread, which is precisely what a busy editor has none of. It reaches INSPECTOR
+  through `CommandRegistry`'s `MethodInfo`, so Commands.Core gains no dependency on
+  Commands.Component.
+- `RegionCapture.StartDetached()` spawns with `UseShellExecute=true`. Load-bearing: otherwise the
+  child inherits stdio handles and a PowerShell pipeline stays open until every writer closes —
+  including a daemon running for days, making `SETUP` appear to hang long after it finished.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.78 — 2026-09-07
 
 ## v1.1.78

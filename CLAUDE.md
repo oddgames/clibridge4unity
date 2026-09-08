@@ -112,7 +112,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.78)
+│   └── package.json           # UPM manifest (v1.1.79)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -244,7 +244,9 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `DIAG` - Diagnostic info (no main thread needed)
 - `BRIDGEINFO` - Stable handshake (no main thread): `bridgeVersion`, `minCompatibleExtensionVersion`, `bridgeProtocol`. **Frozen contract** — consumed by the VSCode extension to decide compatibility; never rename it or repurpose a field (append only). Raise `BridgeServer.MinCompatibleExtensionVersion` only in a release that breaks the extension's interface.
 - `STATUS` - Get Unity Editor status, including C# compile and UI Toolkit import errors
-- **LINT/COMPILE discipline:** both are reactive troubleshooting tools, never routine steps — Unity auto-compiles on focus and 99% of the time the user has already compiled before asking for a test. Run them only when something isn't working as expected (STATUS errors, stale results, CODE_EXEC can't see a new type). Exception: editing this repo's Package code with Unity backgrounded needs `COMPILE force` (change watcher can't see the external `file:` package).
+- **LINT/COMPILE discipline:** both are reactive troubleshooting tools, never routine steps — when auto-refresh is on Unity compiles on focus, so the user has usually already compiled before asking for a test. Run them only when something isn't working as expected (STATUS errors, stale results, CODE_EXEC can't see a new type). Two things invert that default:
+  - **Auto-refresh may be off** (`Edit > Preferences > Asset Pipeline > Auto Refresh` — commonly disabled on large projects, where constant reimports make the editor unusable). With it Disabled nothing compiles until Ctrl+R or a `COMPILE`, so stale results are the norm and you must compile before trusting anything type-dependent. `STATUS` reports uncompiled script changes either way — trust it over the heuristic.
+  - Editing this repo's Package code with Unity backgrounded needs `COMPILE force` (the change watcher can't see the external `file:` package).
 - `LINT [warnings]` - **Default: offline syntax + UXML/USS well-formedness check (~1s).** Catches missing braces, unclosed strings, bad keywords, malformed C#/UXML/USS. Daemon FileSystemWatcher → catches errors in NEW files Unity hasn't seen. Fails fast at 20s on huge projects.
 - `LINT unity [warnings]` - Unity-faithful **per-asmdef** compile (~5-60s). Asmdef-aware (avoids cross-asmdef type collision false positives). Catches missing methods, type errors, missing usings. 60s budget — falls back to COMPILE if exceeded.
 - `COMPILE` - Force script recompilation (Unity-side, triggers domain reload, breaks pipe). The ground truth — use when LINT modes give false positives or you need source generators / post-compile callbacks. Bridge auto-blocks all commands during Unity Player Build (returns clear error instead of timing out).
@@ -257,6 +259,10 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
 - `LOG [filter]` - Get bridge-captured Unity **console** logs (over the pipe); use `LOG ui errors` for current USS/UXML/TSS import errors
   - Commands that reference `.uss`, `.uxml`, or `.tss` assets append matching UI Toolkit import errors automatically
   - `LOG` needs the bridge running and reads Unity's in-memory console — when it's empty or the pipe is down, use `EDITORLOG` (CLI-side) to read the on-disk `Editor.log` instead
+- `CONTEXT [--hierarchy] [--refs] [--brief] [--no-console]` - Snapshot current editor/game state as paste-ready markdown: active scene (+ dirty flag), additively-loaded scenes, Prefab Mode target, play/pause, compiling/importing, Unity + product version, the current `Selection` with serialized fields, console errors. See [ContextCommand.cs](Package/Editor/Commands/Core/ContextCommand.cs).
+  - **Prefab Mode is checked first** — `SceneManager.GetActiveScene()` still reports the scene you left, which would describe something the user isn't looking at.
+  - One command rather than three (`SELECTION`+`INSPECTOR`+`LOG`) because each pipe round trip queues on the main thread, and a busy editor has none spare. Calls INSPECTOR through `CommandRegistry`'s `MethodInfo` so Commands.Core doesn't depend on Commands.Component.
+  - Written automatically beside every `CAPTURE`/`RECORD` artefact as `<name>.context.md` — collected **at capture time**, since by the time the panel is opened the selection has moved, play mode has exited and the console has scrolled.
 - `MENU path` - Execute a Unity menu item (e.g. `MENU Window/General/Console`)
 - `PROFILE` - Control the profiler and analyse captured performance data. Reads the frame buffer, so **every analysis subcommand works identically on a loaded `.data` capture, a live play-mode session, and a paused game** — `ProfilerDriver` serves all three through the same frame views.
   - `PROFILE` / `enable` / `disable` / `clear` - status (leads with capture flags) and recording control

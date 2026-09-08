@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 namespace clibridge4unity;
@@ -138,6 +139,12 @@ static class RegionCapture
     [DllImport("gdi32.dll")] static extern IntPtr CreateSolidBrush(uint colorref);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
+    [DllImport("kernel32.dll")] static extern uint GetConsoleProcessList(uint[] processList, uint count);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    const int SW_HIDE = 0;
 
     // ─── Overlay state (one overlay at a time, message-loop thread only) ───
 
@@ -172,6 +179,7 @@ static class RegionCapture
             if ((p == "--out" || p == "-o") && i + 1 < parts.Length) outPath = parts[++i].Trim('"');
             else if (p == "--daemon" || p == "daemon") daemon = true;
             else if (p == "--full") full = true;
+            else if (p == "--no-context") _collectContext = false;
             else if (p == "--stop" || p == "stop") return StopDaemon();
             else if (p == "--status" || p == "status") return DaemonStatus();
             else if (p == "--settings" || p == "settings") return ShowSettings();
@@ -234,6 +242,10 @@ static class RegionCapture
     /// <summary>Show the overlay and return the saved PNG path, or null if the user cancelled.</summary>
     public static string CaptureOnce(string outPath, bool full = false)
     {
+        // Sample the foreground owner FIRST — the overlay is about to become the foreground
+        // window, and after that we can no longer tell which editor you were looking at.
+        uint fgPid = ForegroundPid();
+
         if (!GrabDesktop()) return null;
         try
         {
@@ -256,9 +268,129 @@ static class RegionCapture
             Program.WritePng(dest, rw, rh, crop);
 
             PublishLatest(dest);
+            if (_collectContext) TryWriteContext(dest, fgPid);
             return dest;
         }
         finally { ReleaseDesktop(); }
+    }
+
+    /// <summary>
+    /// Ask Unity what it is showing right now and write it beside the capture as markdown.
+    ///
+    /// This has to happen AT capture time, not when someone later opens the panel: the selection
+    /// moves, play mode exits, the console scrolls. A screenshot whose explanation was gathered
+    /// thirty seconds later describes a different editor.
+    ///
+    /// Everything here is best-effort and silent on failure. Unity may be closed, compiling, or
+    /// mid-import, and none of that should turn a successful screenshot into an error — you still
+    /// have the PNG. <paramref name="preferredPid"/> is whichever process owned the foreground
+    /// window before the overlay appeared, so that with several editors open we describe the one
+    /// you were actually looking at.
+    /// </summary>
+    /// <summary>Public entry for callers with no foreground hint (a finished recording).</summary>
+    public static void WriteContextFor(string capturePath)
+    {
+        if (_collectContext) TryWriteContext(capturePath, 0);
+    }
+
+    static void TryWriteContext(string capturePath, uint preferredPid)
+    {
+        try
+        {
+            var workspaces = Program.EnumerateUnityWorkspaces();
+            if (workspaces == null || workspaces.Count == 0) return;
+
+            var pick = workspaces.Find(w => w.Pid == preferredPid) ?? workspaces[0];
+            if (string.IsNullOrEmpty(pick.ProjectPath)) return;
+
+            string markdown = QueryContext(pick.ProjectPath);
+            if (string.IsNullOrWhiteSpace(markdown)) return;
+
+            // The CLI self-updates independently of the UPM package, so a new CLI regularly meets
+            // an older bridge that has never heard of CONTEXT. Writing that reply out would put
+            // "Unknown command" into a file whose whole purpose is being pasted verbatim.
+            if (markdown.IndexOf("Unknown command", StringComparison.OrdinalIgnoreCase) >= 0
+                || markdown.TrimStart().StartsWith("ERROR", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine("context: bridge has no CONTEXT command — update the Unity package to match this CLI.");
+                return;
+            }
+
+            string dest = Path.ChangeExtension(capturePath, ".context.md");
+            var sb = new StringBuilder();
+            sb.AppendLine($"# Editor state when `{Path.GetFileName(capturePath)}` was captured");
+            sb.AppendLine();
+            sb.AppendLine($"Image: `{capturePath}`");
+            if (workspaces.Count > 1)
+                sb.AppendLine($"Project: `{pick.ProjectPath}` (of {workspaces.Count} open editors)");
+            else
+                sb.AppendLine($"Project: `{pick.ProjectPath}`");
+            sb.AppendLine();
+            sb.AppendLine(markdown.TrimEnd());
+            File.WriteAllText(dest, sb.ToString());
+            Console.WriteLine($"context: {dest}");
+        }
+        catch { /* the screenshot is the deliverable; context is a bonus */ }
+    }
+
+    /// <summary>
+    /// One CONTEXT round trip on the bridge pipe. Deliberately not Program.SendCommand: that path
+    /// prints to the console, retries, and consults the play-mode gate — none of which belongs in
+    /// a keystroke handler. Short budgets throughout, because a busy editor must not stall a
+    /// screenshot that has already been written to disk.
+    /// </summary>
+    static string QueryContext(string projectPath)
+    {
+        try
+        {
+            string pipeName = Program.GeneratePipeName(projectPath);
+            using var pipe = new System.IO.Pipes.NamedPipeClientStream(
+                ".", pipeName, System.IO.Pipes.PipeDirection.InOut);
+
+            pipe.Connect(1500);   // Unity not running / bridge not loaded → give up quietly
+
+            byte[] msg = Encoding.UTF8.GetBytes("CONTEXT\n");
+            pipe.Write(msg, 0, msg.Length);
+            pipe.Flush();
+
+            var sb = new StringBuilder();
+            var buf = new byte[8192];
+            // CONTEXT needs the main thread, so it queues behind whatever the editor is doing.
+            // 8s is generous for an idle editor and short enough not to be noticed when it is not.
+            var deadline = DateTime.UtcNow.AddSeconds(8);
+            while (DateTime.UtcNow < deadline)
+            {
+                var read = pipe.ReadAsync(buf, 0, buf.Length);
+                if (!read.Wait(TimeSpan.FromSeconds(8))) break;
+                int n = read.Result;
+                if (n <= 0) break;
+                sb.Append(Encoding.UTF8.GetString(buf, 0, n));
+            }
+            // The server leads with a "__timeout:N" budget-hint line before the payload. Every
+            // other caller consumes it as protocol; here it would land verbatim at the top of a
+            // file whose entire purpose is being pasted.
+            string text = sb.ToString();
+            if (text.StartsWith("__timeout:", StringComparison.Ordinal))
+            {
+                int nl = text.IndexOf('\n');
+                text = nl >= 0 ? text.Substring(nl + 1) : "";
+            }
+            return text;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Process that owned the foreground window, sampled before the overlay steals it.</summary>
+    static uint ForegroundPid()
+    {
+        try
+        {
+            IntPtr fg = GetForegroundWindow();
+            if (fg == IntPtr.Zero) return 0;
+            GetWindowThreadProcessId(fg, out uint pid);
+            return pid;
+        }
+        catch { return 0; }
     }
 
     /// <summary>
@@ -631,6 +763,7 @@ static class RegionCapture
         Console.WriteLine($"  Daemon          {(pid != 0 ? $"running (pid {pid})" : "not running")}");
         Console.WriteLine($"  Start with PC   {(auto ? "yes" : "no")}");
         Console.WriteLine($"  Captures        {CapturesDir}");
+        Console.WriteLine($"  Editor state    {(_collectContext ? "collected with each capture (.context.md)" : "off")}");
         Console.WriteLine($"  ffmpeg          {(ScreenRecorder.FindFfmpeg() != null ? "found (RECORD available)" : "not found — RECORD unavailable")}");
         Console.WriteLine();
         Console.WriteLine("  Hotkeys (only while the daemon runs)");
@@ -716,6 +849,35 @@ static class RegionCapture
         Console.WriteLine("  Settings / turn off: clibridge4unity CAPTURE --settings");
     }
 
+    /// <summary>
+    /// Hide the console window, but only when this process is the sole owner of it.
+    ///
+    /// The exe is a console app — every other command needs stdout — so a daemon launched from the
+    /// Startup entry gets a console window it never uses, and the user gets a dead black box in
+    /// their taskbar for the rest of the session.
+    ///
+    /// GetConsoleProcessList is what makes this safe. A count of 1 means the console was created
+    /// for us alone (Startup entry, Start-Process), so hiding it costs nothing. Anything higher
+    /// means we are sharing a terminal with the shell that launched us — hiding *that* would take
+    /// the user's own window away and swallow Ctrl+C. Distinct from the "never ShowWindow" rule for
+    /// Unity's hidden console: this is our own window, found via GetConsoleWindow, not Unity's.
+    /// </summary>
+    static void HideOwnConsole()
+    {
+        try
+        {
+            IntPtr console = GetConsoleWindow();
+            if (console == IntPtr.Zero) return;          // output redirected — no window to hide
+
+            var pids = new uint[4];
+            uint count = GetConsoleProcessList(pids, (uint)pids.Length);
+            if (count != 1) return;                      // shared with a parent shell — leave it alone
+
+            ShowWindow(console, SW_HIDE);
+        }
+        catch { /* cosmetic — never let it stop the daemon starting */ }
+    }
+
     static int RunDaemon()
     {
         // Refuse to double-arm: two daemons fighting over one hotkey means RegisterHotKey fails
@@ -726,6 +888,8 @@ static class RegionCapture
             Console.Error.WriteLine($"Capture daemon already running (pid {existing}). Use CAPTURE --stop first.");
             return 1;
         }
+
+        HideOwnConsole();
 
         const string cls = "CliBridgeCaptureDaemon";
         _daemonProcRef = DaemonProc;
@@ -819,12 +983,13 @@ static class RegionCapture
     // ─── Tray menu ────────────────────────────────────────────────────
 
     const int MENU_CAPTURE = 1, MENU_REC = 2, MENU_REC_TRANSCRIBE = 3, MENU_REC_STOP = 4;
-    const int MENU_FOLDER = 5, MENU_AUTOSTART = 6, MENU_EXIT = 7;
+    const int MENU_FOLDER = 5, MENU_AUTOSTART = 6, MENU_EXIT = 7, MENU_CONTEXT = 8;
 
     static WndProcDelegate _daemonProcRef;  // separate GC root — ShowOverlay reassigns _wndProcRef
     static uint _taskbarCreated;
     static bool _wasRecording;
     static bool _transcribeByDefault = true;   // what Ctrl+PrtScn does; toggled from the menu
+    static bool _collectContext = true;        // snapshot editor state alongside each capture
 
     static bool AutostartInstalled
     {
@@ -856,6 +1021,12 @@ static class RegionCapture
                 Checked = _transcribeByDefault,
                 Disabled = rec,
             },
+            new TrayIcon.Item
+            {
+                Id = MENU_CONTEXT,
+                Text = "Collect editor state with captures",
+                Checked = _collectContext,
+            },
             TrayIcon.Item.Sep(),
             new TrayIcon.Item { Id = MENU_FOLDER, Text = "Open captures folder" },
             new TrayIcon.Item { Id = MENU_AUTOSTART, Text = "Start at logon", Checked = AutostartInstalled },
@@ -875,6 +1046,10 @@ static class RegionCapture
 
             case MENU_REC_TRANSCRIBE:
                 _transcribeByDefault = !_transcribeByDefault;
+                break;
+
+            case MENU_CONTEXT:
+                _collectContext = !_collectContext;
                 break;
 
             case MENU_REC_STOP:
