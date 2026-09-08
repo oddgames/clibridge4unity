@@ -112,7 +112,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.79)
+│   └── package.json           # UPM manifest (v1.1.80)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -263,6 +263,13 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
   - **Prefab Mode is checked first** — `SceneManager.GetActiveScene()` still reports the scene you left, which would describe something the user isn't looking at.
   - One command rather than three (`SELECTION`+`INSPECTOR`+`LOG`) because each pipe round trip queues on the main thread, and a busy editor has none spare. Calls INSPECTOR through `CommandRegistry`'s `MethodInfo` so Commands.Core doesn't depend on Commands.Component.
   - Written automatically beside every `CAPTURE`/`RECORD` artefact as `<name>.context.md` — collected **at capture time**, since by the time the panel is opened the selection has moved, play mode has exited and the console has scrolled.
+- `VISIBLE x,y,w,h` - What is inside a screen rectangle (physical desktop pixels). Also reachable as `CONTEXT --rect x,y,w,h`, which is how every `CAPTURE` annotates its screenshot. See [RegionVisibility.cs](Package/Editor/Commands/Core/RegionVisibility.cs).
+  - **The rect arrives in physical pixels; every Unity coordinate is in scaled points.** At 175% those differ by 1.75x, so a naive comparison resolves to the wrong view rather than failing. Everything converts through `EditorGUIUtility.pixelsPerPoint`.
+  - **Docked tabs overlap** — Scene and Game share a rect, so only the frontmost tab counts (same `m_Panes`/`selected` reflection `WINDOWS` uses). Without it a Game-view region resolves to the Scene view behind it at a convincing 100%.
+  - Scene view uses renderer-bounds projection. `HandleUtility.PickRectObjects` would be ideal and is **unusable**: measured, it throws `NullReferenceException` from a bridge command and still throws after `Handles.SetCamera` — it needs state that exists only inside the Scene view's own OnGUI.
+  - Game view maps through `GameView.targetInView`/`gameMouseScale` (internal, so reflection; degrades to an explicit "could not map" rather than guessing), then resolves: uGUI and UI Toolkit by **rect overlap, not raycast** (a raycast only sees `raycastTarget=true`, missing every decorative image a UI screenshot is usually about), and world objects by physics rays with renderer-bounds projection as a second tier for collider-less geometry.
+  - Inspector/Hierarchy/Console regions are **not** parsed — IMGUI leaves no queryable model, and the useful answer is the Selection or console output already in the response.
+  - Field detail for what it found is capped (~8 KB in-Package, 16 KB on the clipboard); the full text is always in the `.context.md` beside the capture.
 - `MENU path` - Execute a Unity menu item (e.g. `MENU Window/General/Console`)
 - `PROFILE` - Control the profiler and analyse captured performance data. Reads the frame buffer, so **every analysis subcommand works identically on a loaded `.data` capture, a live play-mode session, and a paused game** — `ProfilerDriver` serves all three through the same frame views.
   - `PROFILE` / `enable` / `disable` / `clear` - status (leads with capture flags) and recording control

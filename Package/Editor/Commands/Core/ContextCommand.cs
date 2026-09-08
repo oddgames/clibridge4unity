@@ -28,17 +28,36 @@ namespace clibridge4unity
                     "  CONTEXT --hierarchy       (also include the full scene hierarchy, brief)\n" +
                     "  CONTEXT --refs            (selection dumped as a reference-wiring audit instead of fields)\n" +
                     "  CONTEXT --brief           (selection components only, no serialized fields)\n" +
-                    "  CONTEXT --no-console      (skip console errors)",
+                    "  CONTEXT --no-console      (skip console errors)\n" +
+                    "  CONTEXT --rect x,y,w,h    (also resolve what is inside that screen rectangle)",
             RequiresMainThread = true,
             RelatedCommands = new[] { "INSPECTOR", "LOG", "PLAYMODE", "SCREENSHOT" })]
         public static string Context(string data)
         {
             var args = CommandArgs.Parse(data,
-                new[] { "hierarchy", "refs", "brief", "no-console", "children" }, new string[0]);
+                new[] { "hierarchy", "refs", "brief", "no-console", "children" },
+                new[] { "rect" });
 
             var sb = new StringBuilder();
 
             AppendEditorState(sb);
+
+            // --rect x,y,w,h (physical desktop pixels) — what the screenshot actually shows.
+            // Placed before Selection because when it resolves, it is the more specific answer.
+            string rectArg = args.Get("rect");
+            if (!string.IsNullOrEmpty(rectArg))
+            {
+                if (TryParseRect(rectArg, out Rect r))
+                {
+                    try { sb.AppendLine(RegionVisibility.Describe(r)); }
+                    catch (Exception ex) { sb.AppendLine($"*(Region analysis failed: {ex.GetType().Name}: {ex.Message})*").AppendLine(); }
+                }
+                else
+                {
+                    sb.AppendLine($"*(Could not parse --rect '{rectArg}'; expected x,y,w,h)*").AppendLine();
+                }
+            }
+
             AppendSelection(sb, args);
 
             if (args.Has("hierarchy"))
@@ -147,14 +166,62 @@ namespace clibridge4unity
             foreach (var go in gos)
             {
                 if (go == null) continue;
-                string path = PathOf(go.transform);
-                sb.AppendLine($"### `{path}`" + (go.activeInHierarchy ? "" : "  *(inactive)*")).AppendLine();
 
-                string dump = Invoke("INSPECTOR", path + flags);
+                // Selection.gameObjects also returns PREFAB ASSETS picked in the Project window.
+                // Those have no scene, so a hierarchy path is meaningless to INSPECTOR ("GameObject
+                // not found") — and activeInHierarchy is false for them, which would mislabel an
+                // asset as an inactive scene object. Address them by asset path instead.
+                bool inScene = go.scene.IsValid() && !string.IsNullOrEmpty(go.scene.name);
+                string target, label;
+                if (inScene)
+                {
+                    target = PathOf(go.transform);
+                    label = $"`{target}`" + (go.activeInHierarchy ? "" : "  *(inactive)*");
+                }
+                else
+                {
+                    string assetPath = AssetDatabase.GetAssetPath(go);
+                    if (string.IsNullOrEmpty(assetPath))
+                    {
+                        // Neither a scene object nor an asset — a preview-scene instance or similar.
+                        sb.AppendLine($"### `{go.name}`  *(not addressable: no scene and no asset path)*").AppendLine();
+                        continue;
+                    }
+                    target = assetPath;
+                    label = $"`{assetPath}`  *(prefab asset, selected in Project)*";
+                }
+
+                sb.AppendLine("### " + label).AppendLine();
+
+                string dump = Invoke("INSPECTOR", target + flags);
                 sb.AppendLine("```");
                 sb.AppendLine(string.IsNullOrWhiteSpace(dump) ? "(INSPECTOR returned nothing)" : dump.TrimEnd());
                 sb.AppendLine("```").AppendLine();
             }
+        }
+
+        static bool TryParseRect(string s, out Rect r)
+        {
+            r = default;
+            var parts = s.Split(new[] { ',', 'x', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length != 4) return false;
+            if (!float.TryParse(parts[0], out float x) || !float.TryParse(parts[1], out float y)
+             || !float.TryParse(parts[2], out float w) || !float.TryParse(parts[3], out float h)) return false;
+            if (w <= 0 || h <= 0) return false;
+            r = new Rect(x, y, w, h);
+            return true;
+        }
+
+        [BridgeCommand("VISIBLE", "What is inside a screen rectangle: editor views, and the Scene/Game objects under it",
+            Category = "Core",
+            Usage = "VISIBLE 1200,400,640,360      (x,y,w,h in physical desktop pixels)",
+            RequiresMainThread = true,
+            RelatedCommands = new[] { "CONTEXT", "SCREENSHOT", "INSPECTOR" })]
+        public static string Visible(string data)
+        {
+            if (!TryParseRect((data ?? "").Trim(), out Rect r))
+                return Response.Error("VISIBLE needs a rectangle: VISIBLE x,y,w,h (physical desktop pixels)");
+            return Response.Success(RegionVisibility.Describe(r));
         }
 
         static string PathOf(Transform t)
@@ -172,7 +239,7 @@ namespace clibridge4unity
         /// dependency and drag it into every Core recompile, for one call. Already on the main
         /// thread here (RequiresMainThread), so this is a direct synchronous invoke.
         /// </summary>
-        static string Invoke(string name, string data)
+        internal static string Invoke(string name, string data)
         {
             try
             {

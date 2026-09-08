@@ -139,6 +139,16 @@ static class RegionCapture
     [DllImport("gdi32.dll")] static extern IntPtr CreateSolidBrush(uint colorref);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr hWndNewOwner);
+    [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll")] static extern bool EmptyClipboard();
+    [DllImport("user32.dll")] static extern IntPtr SetClipboardData(uint format, IntPtr hMem);
+    [DllImport("kernel32.dll")] static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
+    [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr hMem);
+    [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr hMem);
+    [DllImport("kernel32.dll")] static extern IntPtr GlobalFree(IntPtr hMem);
+    const uint CF_UNICODETEXT = 13;
+    const uint GMEM_MOVEABLE = 0x0002;
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
     [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
@@ -180,6 +190,7 @@ static class RegionCapture
             else if (p == "--daemon" || p == "daemon") daemon = true;
             else if (p == "--full") full = true;
             else if (p == "--no-context") _collectContext = false;
+            else if (p == "--no-clipboard") _copyToClipboard = false;
             else if (p == "--stop" || p == "stop") return StopDaemon();
             else if (p == "--status" || p == "status") return DaemonStatus();
             else if (p == "--settings" || p == "settings") return ShowSettings();
@@ -268,7 +279,10 @@ static class RegionCapture
             Program.WritePng(dest, rw, rh, crop);
 
             PublishLatest(dest);
-            if (_collectContext) TryWriteContext(dest, fgPid);
+            // Screen coords, not virtual-desktop-relative: the bridge compares against
+            // EditorWindow.position, which is desktop-space.
+            if (_collectContext)
+                TryWriteContext(dest, fgPid, $"{_vx + rx},{_vy + ry},{rw},{rh}");
             return dest;
         }
         finally { ReleaseDesktop(); }
@@ -293,7 +307,7 @@ static class RegionCapture
         if (_collectContext) TryWriteContext(capturePath, 0);
     }
 
-    static void TryWriteContext(string capturePath, uint preferredPid)
+    static void TryWriteContext(string capturePath, uint preferredPid, string screenRect = null)
     {
         try
         {
@@ -303,7 +317,7 @@ static class RegionCapture
             var pick = workspaces.Find(w => w.Pid == preferredPid) ?? workspaces[0];
             if (string.IsNullOrEmpty(pick.ProjectPath)) return;
 
-            string markdown = QueryContext(pick.ProjectPath);
+            string markdown = QueryContext(pick.ProjectPath, screenRect);
             if (string.IsNullOrWhiteSpace(markdown)) return;
 
             // The CLI self-updates independently of the UPM package, so a new CLI regularly meets
@@ -327,8 +341,34 @@ static class RegionCapture
                 sb.AppendLine($"Project: `{pick.ProjectPath}`");
             sb.AppendLine();
             sb.AppendLine(markdown.TrimEnd());
-            File.WriteAllText(dest, sb.ToString());
+            string prompt = sb.ToString();
+            File.WriteAllText(dest, prompt);
             Console.WriteLine($"context: {dest}");
+
+            // The point of the whole feature is pasting it somewhere. Making the user go and open
+            // a temp file first would waste most of the value.
+            if (_copyToClipboard)
+            {
+                // Past a certain size a pasted prompt stops helping: it buries the question and,
+                // in a chat, costs more than it explains. The file already holds everything, so
+                // over the limit the clipboard carries a summary plus the path to read.
+                const int ClipboardLimit = 16000;
+                string clip = prompt;
+                bool trimmed = prompt.Length > ClipboardLimit;
+                if (trimmed)
+                {
+                    clip = prompt.Substring(0, ClipboardLimit).TrimEnd()
+                         + "\n\n…truncated at " + ClipboardLimit + " of " + prompt.Length + " characters."
+                         + "\nFull detail: `" + dest + "`  (read this file for the rest)";
+                }
+
+                bool copied = TrySetClipboardText(clip);
+                Console.WriteLine(copied
+                    ? (trimmed
+                        ? $"clipboard: copied first {ClipboardLimit} of {prompt.Length} chars — rest is in the .context.md"
+                        : "clipboard: prompt copied — paste it straight in")
+                    : "clipboard: could not copy (another app is holding it)");
+            }
         }
         catch { /* the screenshot is the deliverable; context is a bonus */ }
     }
@@ -339,7 +379,7 @@ static class RegionCapture
     /// a keystroke handler. Short budgets throughout, because a busy editor must not stall a
     /// screenshot that has already been written to disk.
     /// </summary>
-    static string QueryContext(string projectPath)
+    static string QueryContext(string projectPath, string screenRect)
     {
         try
         {
@@ -349,7 +389,10 @@ static class RegionCapture
 
             pipe.Connect(1500);   // Unity not running / bridge not loaded → give up quietly
 
-            byte[] msg = Encoding.UTF8.GetBytes("CONTEXT\n");
+            // Hand the region over so the bridge resolves what is actually inside it, rather than
+            // only describing the editor as a whole.
+            string cmd = string.IsNullOrEmpty(screenRect) ? "CONTEXT" : "CONTEXT --rect " + screenRect;
+            byte[] msg = Encoding.UTF8.GetBytes(cmd + "\n");
             pipe.Write(msg, 0, msg.Length);
             pipe.Flush();
 
@@ -378,6 +421,53 @@ static class RegionCapture
             return text;
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// Put text on the Windows clipboard via the raw API.
+    ///
+    /// No WinForms (it would dwarf the rest of this trimmed exe) and no `clip.exe` (it mangles
+    /// anything outside the active code page, and this text carries box-drawing and em dashes).
+    ///
+    /// Two things here are easy to get wrong: the HGLOBAL becomes the clipboard's property the
+    /// instant SetClipboardData succeeds, so freeing it afterwards corrupts the clipboard — it is
+    /// only freed on the failure path. And OpenClipboard fails outright while another process holds
+    /// it, which happens constantly on a busy desktop, so it is retried rather than treated as an
+    /// error.
+    /// </summary>
+    static bool TrySetClipboardText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+
+        for (int attempt = 0; attempt < 8; attempt++)
+        {
+            if (!OpenClipboard(IntPtr.Zero)) { Thread.Sleep(40); continue; }
+
+            IntPtr hMem = IntPtr.Zero;
+            try
+            {
+                EmptyClipboard();
+
+                byte[] bytes = Encoding.Unicode.GetBytes(text + "\0");
+                hMem = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)(uint)bytes.Length);
+                if (hMem == IntPtr.Zero) return false;
+
+                IntPtr target = GlobalLock(hMem);
+                if (target == IntPtr.Zero) { GlobalFree(hMem); return false; }
+                Marshal.Copy(bytes, 0, target, bytes.Length);
+                GlobalUnlock(hMem);
+
+                if (SetClipboardData(CF_UNICODETEXT, hMem) == IntPtr.Zero)
+                {
+                    GlobalFree(hMem);   // still ours only because the hand-off failed
+                    return false;
+                }
+                return true;            // clipboard owns hMem now — do NOT free it
+            }
+            catch { if (hMem != IntPtr.Zero) GlobalFree(hMem); return false; }
+            finally { CloseClipboard(); }
+        }
+        return false;
     }
 
     /// <summary>Process that owned the foreground window, sampled before the overlay steals it.</summary>
@@ -764,6 +854,7 @@ static class RegionCapture
         Console.WriteLine($"  Start with PC   {(auto ? "yes" : "no")}");
         Console.WriteLine($"  Captures        {CapturesDir}");
         Console.WriteLine($"  Editor state    {(_collectContext ? "collected with each capture (.context.md)" : "off")}");
+        Console.WriteLine($"  Clipboard       {(_copyToClipboard ? "prompt copied on each capture" : "off")}");
         Console.WriteLine($"  ffmpeg          {(ScreenRecorder.FindFfmpeg() != null ? "found (RECORD available)" : "not found — RECORD unavailable")}");
         Console.WriteLine();
         Console.WriteLine("  Hotkeys (only while the daemon runs)");
@@ -983,13 +1074,14 @@ static class RegionCapture
     // ─── Tray menu ────────────────────────────────────────────────────
 
     const int MENU_CAPTURE = 1, MENU_REC = 2, MENU_REC_TRANSCRIBE = 3, MENU_REC_STOP = 4;
-    const int MENU_FOLDER = 5, MENU_AUTOSTART = 6, MENU_EXIT = 7, MENU_CONTEXT = 8;
+    const int MENU_FOLDER = 5, MENU_AUTOSTART = 6, MENU_EXIT = 7, MENU_CONTEXT = 8, MENU_CLIPBOARD = 9;
 
     static WndProcDelegate _daemonProcRef;  // separate GC root — ShowOverlay reassigns _wndProcRef
     static uint _taskbarCreated;
     static bool _wasRecording;
     static bool _transcribeByDefault = true;   // what Ctrl+PrtScn does; toggled from the menu
     static bool _collectContext = true;        // snapshot editor state alongside each capture
+    static bool _copyToClipboard = true;       // put the assembled prompt on the clipboard
 
     static bool AutostartInstalled
     {
@@ -1027,6 +1119,12 @@ static class RegionCapture
                 Text = "Collect editor state with captures",
                 Checked = _collectContext,
             },
+            new TrayIcon.Item
+            {
+                Id = MENU_CLIPBOARD,
+                Text = "Copy prompt to clipboard",
+                Checked = _copyToClipboard,
+            },
             TrayIcon.Item.Sep(),
             new TrayIcon.Item { Id = MENU_FOLDER, Text = "Open captures folder" },
             new TrayIcon.Item { Id = MENU_AUTOSTART, Text = "Start at logon", Checked = AutostartInstalled },
@@ -1050,6 +1148,10 @@ static class RegionCapture
 
             case MENU_CONTEXT:
                 _collectContext = !_collectContext;
+                break;
+
+            case MENU_CLIPBOARD:
+                _copyToClipboard = !_copyToClipboard;
                 break;
 
             case MENU_REC_STOP:

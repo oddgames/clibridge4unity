@@ -357,6 +357,9 @@ internal static class PlayGate
         // reading the project
         "LOG", "EDITORLOG", "EDITORLOGS", "ELOG", "FIND", "INSPECTOR",
         "ASSET_SEARCH", "ASSET_DISCOVER", "UI_DISCOVER", "SCREENSHOT",
+        // CONTEXT only reads (scene name, play state, Selection, console) and is issued while
+        // someone screenshots their own play session — prompting there would be absurd.
+        "CONTEXT",
         // offline analysis — never touches the editor at all
         "ANALYZE", "CODE_ANALYZE", "CODE_SEARCH", "MAP", "LINT", "RELEASENOTES",
         "UNITYNOTES", "RELNOTES", "PROFILE",

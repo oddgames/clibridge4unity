@@ -1,5 +1,66 @@
 # Changelog
 
+## v1.1.80 — 2026-09-08
+
+## v1.1.80
+
+### New
+
+**A screenshot now says what was actually in it.** `VISIBLE x,y,w,h` — and `CONTEXT --rect`, which
+every `CAPTURE` sends automatically — resolves a screen rectangle into the editor views it covers
+and the objects inside them, with coverage percentages and serialized fields for the top few.
+
+- **Scene view**: renderer-bounds projection, frustum-culled.
+- **Game view**: the rect is mapped through GameView's letterbox into game pixels, then resolved
+  three ways — uGUI and UI Toolkit by rect overlap, world objects by physics rays, plus a second
+  tier of renderer-bounds projection for geometry with no collider.
+- **Inspector / Hierarchy / Console**: named, not parsed. IMGUI leaves no queryable model, and the
+  useful answer is the Selection or console output already in the response.
+
+**uGUI is collected by rect overlap rather than raycast.** A `GraphicRaycaster` only finds graphics
+with `raycastTarget = true`, which misses every decorative Image, background and label — usually the
+very thing a UI screenshot is about. Projecting each `RectTransform`'s corners also gives exact
+coverage instead of sampled approximation, and needs no EventSystem (measured as null outside play).
+Elements that *are* raycast targets get flagged, since a stray one over a button is the classic
+"why won't this click".
+
+**UI Toolkit elements** are collected the same way, by `worldBound` overlap on `UIDocument` roots,
+reported with `#name` and classes.
+
+**Captures land on the clipboard.** Print Screen now puts the assembled prompt straight on the
+clipboard, ready to paste — the `.png` and `.context.md` are still written alongside. Implemented on
+the raw Win32 clipboard API rather than WinForms (which would dwarf this trimmed exe) or `clip.exe`
+(which mangles anything outside the active code page). Toggle with `--no-clipboard`, the tray menu,
+or `CAPTURE --settings`.
+
+**Output is size-capped.** Field detail stops at ~8 KB inside the Package and 16 KB on the
+clipboard; past that you get a summary plus the path to the `.context.md`, which always holds
+everything. One INSPECTOR dump of a rich component can run to thousands of lines, and a prompt that
+long buries the question it was meant to ask.
+
+### Fixed
+
+- **Prefab assets in the selection produced an error.** `Selection.gameObjects` also returns prefab
+  assets picked in the Project window. Those have no scene, so `CONTEXT` built a hierarchy path for
+  them and INSPECTOR answered `GameObject not found` — and because `activeInHierarchy` is false for
+  an asset, they were additionally mislabelled as inactive scene objects. They are now addressed by
+  asset path.
+- **`CONTEXT` was gated behind the play-mode prompt.** It only reads, but it is not on the gate's
+  read-only allowlist, so running it during someone else's play session raised a dialog — and in
+  testing was outright denied by the owning window. Added to the allowlist.
+- **Docked tabs resolved to the wrong view.** Scene and Game share a rect; a region aimed at the
+  Game view reported the Scene view behind it at 100% coverage. Only the frontmost tab now counts.
+
+### Internal
+
+- `RegionVisibility` reaches INSPECTOR through `CommandRegistry`'s `MethodInfo`, so Commands.Core
+  gains no dependency on Commands.Component.
+- GameView's layout properties are `internal`; the mapping degrades to an explicit "could not map
+  the region" rather than producing wrong answers if a Unity upgrade moves them.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.79 — 2026-09-08
 
 ## v1.1.79
