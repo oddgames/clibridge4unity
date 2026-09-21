@@ -204,7 +204,14 @@ static class RegionCapture
             else if (p == "--full") full = true;
             else if (p == "--rect" && i + 1 < parts.Length) fixedRect = parts[++i];
             else if (p == "--no-context") _collectContext = false;
-            else if (p == "--no-clipboard") _copyToClipboard = false;
+            else if (p == "--no-clipboard") _clipMode = ClipMode.Off;
+            else if (p == "--clipboard" && i + 1 < parts.Length)
+            {
+                string m = parts[++i].ToLowerInvariant();
+                _clipMode = m == "text" ? ClipMode.Text : m == "both" ? ClipMode.Both
+                          : m == "off" || m == "none" ? ClipMode.Off : ClipMode.Image;
+            }
+            else if (p == "--last-prompt" || p == "last-prompt") return CopyLastPrompt();
             else if (p == "--stop" || p == "stop") return StopDaemon();
             else if (p == "--status" || p == "status") return DaemonStatus();
             else if (p == "--settings" || p == "settings") return ShowSettings();
@@ -316,16 +323,26 @@ static class RegionCapture
             // EditorWindow.position, which is desktop-space.
             int sx = _vx + rx, sy = _vy + ry;
 
-            string topmost = null;
+            string topmost = null, clipText = null;
             bool describedUnity = _collectContext
                                   && TryMatchUnityWindow(sx, sy, rw, rh, fgPid, out var ws, out topmost)
-                                  && TryWriteContext(dest, ws, $"{sx},{sy},{rw},{rh}");
+                                  && TryWriteContext(dest, ws, $"{sx},{sy},{rw},{rh}", out clipText);
 
-            if (!describedUnity && _copyToClipboard)
+            if (_clipMode != ClipMode.Off)
             {
-                // Not Unity — a browser, an editor, a reference image. Behave like any other
-                // screenshot tool rather than annotating it with an unrelated project's state.
-                NormalScreenshot(dest, crop, rw, rh, topmost);
+                string text = describedUnity ? clipText : dest;
+                bool wantText = _clipMode == ClipMode.Text || _clipMode == ClipMode.Both;
+                bool wantImage = _clipMode == ClipMode.Image || _clipMode == ClipMode.Both;
+
+                string what = _clipMode == ClipMode.Image ? "image"
+                            : _clipMode == ClipMode.Text ? (describedUnity ? "prompt" : "path")
+                            : (describedUnity ? "prompt + image" : "image + path");
+                string why = describedUnity ? ""
+                    : " (" + (string.IsNullOrEmpty(topmost) ? "not a Unity window" : "topmost window here is '" + topmost + "'") + " — plain screenshot)";
+
+                Console.WriteLine(TrySetClipboard(wantText ? text : null, wantImage ? crop : null, rw, rh)
+                    ? "clipboard: " + what + " copied" + why
+                    : "clipboard: could not copy (another app is holding it)");
             }
             return dest;
         }
@@ -345,12 +362,20 @@ static class RegionCapture
     /// window before the overlay appeared, so that with several editors open we describe the one
     /// you were actually looking at.
     /// </summary>
-    /// <summary>Public entry for callers with no foreground hint (a finished recording).</summary>
+    /// <summary>
+    /// Entry for a finished recording: no region to hit-test and no pixel buffer in hand, so the
+    /// prompt goes on the clipboard as text alone. The contact sheet is a file on disk, referenced
+    /// from the prompt.
+    /// </summary>
     public static void WriteContextFor(string capturePath)
     {
         if (!_collectContext) return;
         var all = Program.EnumerateUnityWorkspaces();
-        if (all != null && all.Count > 0) TryWriteContext(capturePath, all[0]);
+        if (all == null || all.Count == 0) return;
+        if (TryWriteContext(capturePath, all[0], null, out string clipText) && _clipMode != ClipMode.Off)
+            Console.WriteLine(TrySetClipboard(clipText, null, 0, 0)
+                ? "clipboard: prompt copied"
+                : "clipboard: could not copy (another app is holding it)");
     }
 
     /// <summary>
@@ -442,24 +467,18 @@ static class RegionCapture
     }
 
     /// <summary>
-    /// A plain screenshot: the image on the clipboard as a bitmap AND its path as text.
+    /// Put text AND an image on the clipboard together. Both formats at once because the two
+    /// consumers want different things — a terminal or an assistant pastes the text (the prompt,
+    /// or the file path), a chat or document pastes the picture. The clipboard holds several
+    /// formats simultaneously and each app takes the one it understands.
     ///
-    /// Both formats at once because the two consumers want different things — a terminal or an
-    /// assistant pastes the path and reads the file, a chat or document pastes the picture. The
-    /// clipboard holds several formats simultaneously and each app takes the one it understands,
-    /// so there is no need to choose. Unity captures stay text-only: there the prompt IS the
-    /// payload, and offering a bitmap invites apps to paste the image instead of it.
+    /// Raw Win32 rather than WinForms (which would dwarf this trimmed exe) or clip.exe (which
+    /// mangles anything outside the active code page). Two things are easy to get wrong: each
+    /// HGLOBAL becomes the clipboard's property the instant SetClipboardData succeeds, so it is
+    /// freed only on the failure path; and OpenClipboard fails outright while another process
+    /// holds it, which is routine, so it is retried rather than reported.
     /// </summary>
-    static void NormalScreenshot(string path, byte[] topDownBgra, int w, int h, string topmost)
-    {
-        string why = string.IsNullOrEmpty(topmost) ? "not a Unity window" : $"topmost window here is '{topmost}'";
-        bool ok = TrySetClipboardImageAndPath(path, topDownBgra, w, h);
-        Console.WriteLine(ok
-            ? $"clipboard: image + path copied ({why} — plain screenshot)"
-            : "clipboard: could not copy (another app is holding it)");
-    }
-
-    static bool TrySetClipboardImageAndPath(string path, byte[] topDownBgra, int w, int h)
+    static bool TrySetClipboard(string text, byte[] topDownBgra, int w, int h)
     {
         for (int attempt = 0; attempt < 15; attempt++)
         {
@@ -472,6 +491,8 @@ static class RegionCapture
                 EmptyClipboard();
 
                 // CF_DIB wants bottom-up rows and a header in front of the pixels.
+                if (topDownBgra != null && w > 0 && h > 0)
+                {
                 int stride = w * 4;
                 var header = new BITMAPINFOHEADER
                 {
@@ -500,15 +521,16 @@ static class RegionCapture
                     }
                     else GlobalFree(hDib);
                 }
+                }
 
-                byte[] text = Encoding.Unicode.GetBytes(path + "\0");
-                IntPtr hTxt = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)(uint)text.Length);
+                byte[] textBytes = Encoding.Unicode.GetBytes((text ?? "") + "\0");
+                IntPtr hTxt = text == null ? IntPtr.Zero : GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)(uint)textBytes.Length);
                 if (hTxt != IntPtr.Zero)
                 {
                     IntPtr p = GlobalLock(hTxt);
                     if (p != IntPtr.Zero)
                     {
-                        Marshal.Copy(text, 0, p, text.Length);
+                        Marshal.Copy(textBytes, 0, p, textBytes.Length);
                         GlobalUnlock(hTxt);
                         if (SetClipboardData(CF_UNICODETEXT, hTxt) == IntPtr.Zero) GlobalFree(hTxt);
                     }
@@ -522,8 +544,9 @@ static class RegionCapture
         return false;
     }
 
-    static bool TryWriteContext(string capturePath, Program.UnityWorkspaceInfo pick, string screenRect = null)
+    static bool TryWriteContext(string capturePath, Program.UnityWorkspaceInfo pick, string screenRect, out string clipText)
     {
+        clipText = null;
         try
         {
             if (pick == null || string.IsNullOrEmpty(pick.ProjectPath)) return false;
@@ -565,29 +588,17 @@ static class RegionCapture
             File.WriteAllText(dest, prompt);
             Console.WriteLine($"context: {dest}");
 
-            // The point of the whole feature is pasting it somewhere. Making the user go and open
-            // a temp file first would waste most of the value.
-            if (_copyToClipboard)
+            // Past a certain size a pasted prompt stops helping: it buries the question and, in a
+            // chat, costs more than it explains. The file already holds everything, so over the
+            // limit the clipboard carries a summary plus the path to read.
+            const int ClipboardLimit = 16000;
+            clipText = prompt;
+            if (prompt.Length > ClipboardLimit)
             {
-                // Past a certain size a pasted prompt stops helping: it buries the question and,
-                // in a chat, costs more than it explains. The file already holds everything, so
-                // over the limit the clipboard carries a summary plus the path to read.
-                const int ClipboardLimit = 16000;
-                string clip = prompt;
-                bool trimmed = prompt.Length > ClipboardLimit;
-                if (trimmed)
-                {
-                    clip = prompt.Substring(0, ClipboardLimit).TrimEnd()
+                clipText = prompt.Substring(0, ClipboardLimit).TrimEnd()
                          + "\n\n…truncated at " + ClipboardLimit + " of " + prompt.Length + " characters."
                          + "\nFull detail: `" + dest + "`  (read this file for the rest)";
-                }
-
-                bool copied = TrySetClipboardText(clip);
-                Console.WriteLine(copied
-                    ? (trimmed
-                        ? $"clipboard: copied first {ClipboardLimit} of {prompt.Length} chars — rest is in the .context.md"
-                        : "clipboard: prompt copied — paste it straight in")
-                    : "clipboard: could not copy (another app is holding it)");
+                Console.WriteLine($"clipboard text: first {ClipboardLimit} of {prompt.Length} chars — rest is in the .context.md");
             }
             return true;
         }
@@ -643,56 +654,6 @@ static class RegionCapture
             return text;
         }
         catch { return null; }
-    }
-
-    /// <summary>
-    /// Put text on the Windows clipboard via the raw API.
-    ///
-    /// No WinForms (it would dwarf the rest of this trimmed exe) and no `clip.exe` (it mangles
-    /// anything outside the active code page, and this text carries box-drawing and em dashes).
-    ///
-    /// Two things here are easy to get wrong: the HGLOBAL becomes the clipboard's property the
-    /// instant SetClipboardData succeeds, so freeing it afterwards corrupts the clipboard — it is
-    /// only freed on the failure path. And OpenClipboard fails outright while another process holds
-    /// it, which happens constantly on a busy desktop, so it is retried rather than treated as an
-    /// error.
-    /// </summary>
-    static bool TrySetClipboardText(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return false;
-
-        for (int attempt = 0; attempt < 15; attempt++)
-        {
-            // ~1.5s of patience: clipboard contention is routine (a password manager, a clipboard
-            // history tool, another paste in flight), and 300ms was short enough to lose races
-            // that would have resolved on their own.
-            if (!OpenClipboard(IntPtr.Zero)) { Thread.Sleep(100); continue; }
-
-            IntPtr hMem = IntPtr.Zero;
-            try
-            {
-                EmptyClipboard();
-
-                byte[] bytes = Encoding.Unicode.GetBytes(text + "\0");
-                hMem = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)(uint)bytes.Length);
-                if (hMem == IntPtr.Zero) return false;
-
-                IntPtr target = GlobalLock(hMem);
-                if (target == IntPtr.Zero) { GlobalFree(hMem); return false; }
-                Marshal.Copy(bytes, 0, target, bytes.Length);
-                GlobalUnlock(hMem);
-
-                if (SetClipboardData(CF_UNICODETEXT, hMem) == IntPtr.Zero)
-                {
-                    GlobalFree(hMem);   // still ours only because the hand-off failed
-                    return false;
-                }
-                return true;            // clipboard owns hMem now — do NOT free it
-            }
-            catch { if (hMem != IntPtr.Zero) GlobalFree(hMem); return false; }
-            finally { CloseClipboard(); }
-        }
-        return false;
     }
 
     /// <summary>Process that owned the foreground window, sampled before the overlay steals it.</summary>
@@ -983,6 +944,44 @@ static class RegionCapture
         catch { return 0; }
     }
 
+    static string ClipModeLabel() => _clipMode switch
+    {
+        ClipMode.Image => "just the screenshot (image only)",
+        ClipMode.Text  => "prompt text only",
+        ClipMode.Both  => "image + prompt text",
+        _              => "off",
+    };
+
+    /// <summary>
+    /// Put the most recent capture's prompt on the clipboard as text. This is what makes
+    /// image-only the right default: paste the picture where pictures go, then — if the editor
+    /// state is wanted too — one command turns the clipboard into the prompt.
+    /// </summary>
+    static int CopyLastPrompt()
+    {
+        try
+        {
+            string pointer = Path.Combine(CapturesDir, "latest.txt");
+            if (!File.Exists(pointer)) { Console.WriteLine("No capture yet."); return 1; }
+            string latest = File.ReadAllText(pointer).Trim();
+            string ctx = Path.ChangeExtension(latest, ".context.md");
+            if (!File.Exists(ctx))
+            {
+                Console.WriteLine($"The last capture was a plain screenshot with no editor state: {latest}");
+                return TrySetClipboard(latest, null, 0, 0) ? 0 : 1;
+            }
+            string text = File.ReadAllText(ctx);
+            const int Limit = 16000;
+            if (text.Length > Limit)
+                text = text.Substring(0, Limit).TrimEnd() + "\n\n…truncated. Full detail: `" + ctx + "`";
+            bool ok = TrySetClipboard(text, null, 0, 0);
+            Console.WriteLine(ok ? $"clipboard: prompt copied ({Path.GetFileName(ctx)})"
+                                 : "clipboard: could not copy (another app is holding it)");
+            return ok ? 0 : 1;
+        }
+        catch (Exception ex) { Console.Error.WriteLine("Error: " + ex.Message); return 1; }
+    }
+
     static int DaemonStatus()
     {
         int pid = LivePid();
@@ -1122,7 +1121,7 @@ static class RegionCapture
         Console.WriteLine($"  Start with PC   {(auto ? "yes" : "no")}");
         Console.WriteLine($"  Captures        {CapturesDir}");
         Console.WriteLine($"  Editor state    {(_collectContext ? "collected with each capture (.context.md)" : "off")}");
-        Console.WriteLine($"  Clipboard       {(_copyToClipboard ? "prompt copied on each capture" : "off")}");
+        Console.WriteLine($"  Clipboard       {ClipModeLabel()}   (CAPTURE --clipboard image|text|both|off)");
         if (File.Exists(StoppedMarker))
             Console.WriteLine("  Auto-restart    suppressed (stopped on purpose) — CAPTURE --daemon re-enables it");
         else if (AutostartInstalled)
@@ -1347,14 +1346,20 @@ static class RegionCapture
     // ─── Tray menu ────────────────────────────────────────────────────
 
     const int MENU_CAPTURE = 1, MENU_REC = 2, MENU_REC_TRANSCRIBE = 3, MENU_REC_STOP = 4;
-    const int MENU_FOLDER = 5, MENU_AUTOSTART = 6, MENU_EXIT = 7, MENU_CONTEXT = 8, MENU_CLIPBOARD = 9;
+    const int MENU_FOLDER = 5, MENU_AUTOSTART = 6, MENU_EXIT = 7, MENU_CONTEXT = 8;
+    const int MENU_CLIP_IMAGE = 9, MENU_CLIP_TEXT = 10, MENU_CLIP_BOTH = 11, MENU_LAST_PROMPT = 12;
 
     static WndProcDelegate _daemonProcRef;  // separate GC root — ShowOverlay reassigns _wndProcRef
     static uint _taskbarCreated;
     static bool _wasRecording;
     static bool _transcribeByDefault = true;   // what Ctrl+PrtScn does; toggled from the menu
     static bool _collectContext = true;        // snapshot editor state alongside each capture
-    static bool _copyToClipboard = true;       // put the assembled prompt on the clipboard
+    enum ClipMode { Off, Image, Text, Both }
+    // Image by default. Browser-based apps (claude.ai, Slack, Discord) given both formats paste
+    // the TEXT in preference to the image, or attach the image and then dump 16 KB of prompt
+    // after it — so if the screenshot is what should land, text cannot be on the clipboard too.
+    // The prompt is one command away ("Copy last prompt") and always in the .context.md.
+    static ClipMode _clipMode = ClipMode.Image;
 
     static bool AutostartInstalled
     {
@@ -1392,12 +1397,10 @@ static class RegionCapture
                 Text = "Collect editor state with captures",
                 Checked = _collectContext,
             },
-            new TrayIcon.Item
-            {
-                Id = MENU_CLIPBOARD,
-                Text = "Copy prompt to clipboard",
-                Checked = _copyToClipboard,
-            },
+            new TrayIcon.Item { Id = MENU_CLIP_IMAGE, Text = "Clipboard: just the screenshot", Checked = _clipMode == ClipMode.Image },
+            new TrayIcon.Item { Id = MENU_CLIP_TEXT,  Text = "Clipboard: prompt text",        Checked = _clipMode == ClipMode.Text },
+            new TrayIcon.Item { Id = MENU_CLIP_BOTH,  Text = "Clipboard: both",               Checked = _clipMode == ClipMode.Both },
+            new TrayIcon.Item { Id = MENU_LAST_PROMPT, Text = "Copy last prompt as text" },
             TrayIcon.Item.Sep(),
             new TrayIcon.Item { Id = MENU_FOLDER, Text = "Open captures folder" },
             new TrayIcon.Item { Id = MENU_AUTOSTART, Text = "Start at logon", Checked = AutostartInstalled },
@@ -1423,9 +1426,10 @@ static class RegionCapture
                 _collectContext = !_collectContext;
                 break;
 
-            case MENU_CLIPBOARD:
-                _copyToClipboard = !_copyToClipboard;
-                break;
+            case MENU_CLIP_IMAGE: _clipMode = ClipMode.Image; break;
+            case MENU_CLIP_TEXT:  _clipMode = ClipMode.Text;  break;
+            case MENU_CLIP_BOTH:  _clipMode = ClipMode.Both;  break;
+            case MENU_LAST_PROMPT: CopyLastPrompt(); break;
 
             case MENU_REC_STOP:
                 ScreenRecorder.Stop();

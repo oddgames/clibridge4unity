@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.1.84 — 2026-09-21
+
+## v1.1.84
+
+### New
+- `DEVICE` — the cable to a phone: `list|install <apk|ipa>|uninstall|launch|log|screenshot|ui|tap|swipe|type|key|shell|tools`. adb for Android, libimobiledevice for iOS (found in Ipaapk's `tools/` in place, then `CLIBRIDGE_IMOBILE_DIR`/PATH/scoop). `install --launch` resolves the package/bundle id from the build (aapt / Info.plist / installed-package diff).
+- `DEVICE up <build>` — single entry point: install → log capture → launch → wait for the Bugpunch tunnel, then every DEVICE/BUGPUNCH verb defaults to that phone (`DEVICE status` / `DEVICE down`). Prefers the SDK's on-device Remote IDE API over USB (`adb forward` / `iproxy` to port 47701, no server or token needed); `--via-server` forces the server route, `--lan <ip>` / `DEVICE discover` cover LAN.
+- `DEVICE script <steps.txt>` — one command per line (DEVICE and `bp` verbs, `wait`, `waitfor "<text>"`, `assert`/`assert-not`), stops at first failure, writes a markdown report with screenshots.
+- Session dir per device (`~/.clibridge4unity/devices/<serial>/`) with numbered artifacts, `actions.log`, and an `[artifacts]` stdout footer (screenshot path, logcat lines since last command). `DEVICE log --start|--stop` runs a detached logcat/syslog capture; auto-started by launch.
+- `BUGPUNCH` (alias `BP`) — drive a game running the Bugpunch SDK through the server's personal-token API: `auth`, `devices`, and per-device `run|action|tap|swipe|screenshot|log|hierarchy|info|perf|prefs|get|post|memsnap`. Internal devices only (enforced server-side); needs a Device-control-scoped token.
+- `MEMSNAP <a.snap> [b.snap] [summary|types|objects|labels|allocators|chapters]` — parse a Unity Memory Profiler `.snap` (or diff two) with no Editor: memory-stats summary, native objects by type/name, labels, allocators, gfx totals, managed heap size. Folder argument summarises every capture in it. `BUGPUNCH <dev> memsnap` captures on-device and pulls it in 1 MB chunks straight into this.
+- iOS over USB: Developer Disk Image fetched and mounted automatically for iOS ≤ 16; iOS 17+ falls back to camera-roll screenshots over AFC.
+- `CAPTURE --clipboard image|text|both|off` (default **image**) and `CAPTURE --last-prompt` — browser-based chat apps paste the text in preference when both are on the clipboard, so the screenshot alone is now the default and the prompt is one command away.
+- New bundled skill `clibridge4unity-device` describing the device/Bugpunch workflow.
+
+### Fixed
+- Recording finish path no longer assumes a pixel buffer is in hand — the prompt goes on the clipboard as text with the contact sheet referenced from disk.
+
+### Internal
+- Repo hook: `.claude/hooks/block-cm-diff.py` refuses `cm diff <file>` / `cm difftool` / `cm gui` (GUI windows an agent can't read) and points to `.claude/scripts/pdiff.py`; changeset-level `cm diff cs:N` stays allowed.
+- Memory snapshot reader reads the true on-disk chapter header widths (18 / 14 / 10+8×(n+1)) rather than the Memory Profiler package's fixed 18-byte struct.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.83 — 2026-09-08
 
 ## v1.1.83

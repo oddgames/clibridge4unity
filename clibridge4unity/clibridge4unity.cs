@@ -213,7 +213,7 @@ class Program
         => cmdUpper is "PING" or "PROBE" or "DIAG" or "VERSION" or "HELP" or "LAST"
                     or "ANALYZE" or "CODE_ANALYZE" or "CODE_SEARCH" or "MAP" or "LINT"
                     or "EDITORLOG" or "ELOG" or "EDITORLOGS" or "SETUP" or "UPDATE" or "HOOK"
-                    or "CAPTURE" or "RECORD"
+                    or "CAPTURE" or "RECORD" or "MEMSNAP" or "DEVICE" or "ADB" or "BUGPUNCH" or "BP"
                     ;
 
     private static int SafeCurrentPid()
@@ -226,6 +226,10 @@ class Program
     {
         try { _tickLease?.Request(SafeCurrentPid(), TickSignal.DefaultLease); } catch { }
     }
+    // The data args exactly as the shell delivered them. `data` re-joins them with spaces, which
+    // is right for a bridge command but loses quoting for CLI-side commands that take file
+    // paths or code (DEVICE install "C:\My Builds\x.apk", BUGPUNCH <dev> run <code>).
+    private static string[] _dataArgs = Array.Empty<string>();
     private static string _lastCommandResponse = "";
     private static long _preCompileLogId;
     private static string _intent;       // set via --intent flag; purely descriptive
@@ -987,6 +991,11 @@ class Program
             case "VSCODE":
             case "CAPTURE":
             case "RECORD":
+            case "MEMSNAP":
+            case "DEVICE":
+            case "ADB":
+            case "BUGPUNCH":
+            case "BP":
                 return true;
             default:
                 return false;
@@ -1647,6 +1656,7 @@ class Program
             {
                 // Rest is data
                 data = string.Join(" ", args, argIndex, args.Length - argIndex);
+                _dataArgs = args.Skip(argIndex).ToArray();
                 break;
             }
         }
@@ -1727,6 +1737,23 @@ class Program
         if (cmdUpper == "RECORD")
         {
             return ScreenRecorder.Run(data);
+        }
+
+        // MEMSNAP: read and compare Memory Profiler .snap files offline — no Unity, no pipe.
+        if (cmdUpper == "MEMSNAP")
+        {
+            return MemorySnapshot.Run(data);
+        }
+
+        // DEVICE: adb / libimobiledevice over the cable. BUGPUNCH: the Bugpunch server's
+        // personal-token device API. Neither needs Unity or a project.
+        if (cmdUpper == "DEVICE" || cmdUpper == "ADB")
+        {
+            return DeviceCommands.RunDevice(_dataArgs);
+        }
+        if (cmdUpper == "BUGPUNCH" || cmdUpper == "BP")
+        {
+            return DeviceCommands.RunBugpunch(_dataArgs);
         }
 
         // RELEASENOTES: fetch Unity Editor release notes for a version range from
@@ -2506,6 +2533,9 @@ class Program
         Console.Error.WriteLine("  RECORD [--audio both|mic|system|none] [--seconds N] [--transcribe]");
         Console.Error.WriteLine("                             Record a screen region with audio; emits mp4 + frame contact sheet");
         Console.Error.WriteLine("  RECORD --stop / --status / --devices  Finish the recording, check state, list audio devices");
+        Console.Error.WriteLine("  MEMSNAP <a.snap> [b.snap] [types|objects|labels|allocators|managed] [top:N] [filter:X]");
+        Console.Error.WriteLine("                             Inspect a Memory Profiler snapshot, or diff two — no Unity needed;");
+        Console.Error.WriteLine("                             managed crawls the heap (objects by type, referrers with filter:X)");
         Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");
         Console.Error.WriteLine("  WAKEUP refresh             Bring to foreground + force recompile (Ctrl+R)");
         Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");
@@ -2513,6 +2543,9 @@ class Program
         Console.Error.WriteLine("  EDITORLOG [N|errors|grep PAT|path|reload [N]]  Tail Unity's Editor.log FILE (works with no pipe / on clones; aliases: ELOG)");
         Console.Error.WriteLine("                                      'reload' shows Unity's own domain-reload timing breakdown");
         Console.Error.WriteLine("  RELEASENOTES [from] [to] [-c Cat] [-g regex]  Unity release notes; bare = current project version -> latest (--list to browse)");
+        Console.Error.WriteLine("  DEVICE list|install <apk|ipa>|uninstall|launch|log|tools   Phone over the cable (adb / libimobiledevice)");
+        Console.Error.WriteLine("  BUGPUNCH auth <token> | devices | <device> run|tap|swipe|screenshot|hierarchy|log|info|get|post");
+        Console.Error.WriteLine("                             Drive INTERNAL devices running the Bugpunch SDK via the server API");
         Console.Error.WriteLine("  LAST [N|-n N|-all|-list] [-head N|-tail N|-grep PAT]  Replay one of the last 10 responses (no re-run)");
         Console.Error.WriteLine("  OPEN                       Launch Unity (or restart if in Safe Mode)");
         Console.Error.WriteLine("  KILL                       Force-terminate Unity for this project (loses unsaved work)");
@@ -2950,6 +2983,7 @@ class Program
     {
         "DISMISS", "LAST", "OPEN", "KILL", "WAKEUP", "CODE_ANALYZE", "MAP", "LINT", "SCREENSHOT",
         "EDITORLOG", "EDITORLOGS", "ELOG", "RELEASENOTES", "UNITYNOTES", "RELNOTES",
+        "DEVICE", "ADB", "BUGPUNCH", "BP",
         // The gate must answer while the editor is busy in a play session — that is the
         // entire situation it exists for, so it can never depend on the pipe.
         "REQUESTS", "ALLOW", "DENY"
