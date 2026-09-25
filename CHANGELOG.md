@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.86 — 2026-09-25
+
+## v1.1.86
+
+### New
+- **Turn off play-mode prompts until the play session ends.** `REQUESTS --session` (or the popup's *Allow until play stops*) stops asking every agent in the project until play mode exits. `REQUESTS --always` stops asking for good; `REQUESTS --forget` revokes either. `ALLOW <id> session|always` does the same while answering a request.
+
+### Changed
+- **Simpler play-mode popup:** one line naming what the agent wants to run (a script shows as its file name), one line noting play mode keeps running, and four plain buttons — *Allow* · *Allow until play stops* · *Always allow* · *Deny*. The checkbox and Details section are gone; Esc / the close box now means Deny. *Exit play mode and hand over* moved to `ALLOW <id> yield` only.
+
+### Fixed
+- **"Don't ask again this play session" kept asking.** It was stored per window, and a window's id is derived from a parent process — in some hosts that process is short-lived, so the id changed on almost every command (one project had 18 grant files from one conversation) and the saved permission was never matched. Both standing permissions are now project-wide (`grants/_session.txt`, `grants/_always.txt`).
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.85 — 2026-09-25
 
 ## v1.1.85

@@ -715,38 +715,33 @@ class Program
 
         // A standing answer from earlier. Without this the owner is asked once per command,
         // and a single task can issue a dozen — which is unusable, not safe.
-        string standing = PlayGate.FindGrant(projectPath, owner, since);
-        if (standing == PlayGate.RunNow || standing == PlayGate.Always) return true;
-        if (standing == PlayGate.Deny)
-        {
-            Console.Error.WriteLine("[gate] Standing 'deny' for this window this play session. Nothing was run.");
-            Console.Error.WriteLine("       Clear it with: clibridge4unity REQUESTS --forget");
-            return false;
-        }
+        if (PlayGate.IsGranted(projectPath, owner, since)) return true;
 
         var req = PlayGate.File_(projectPath, command, data, owner);
         // Not "you entered manually" — that is an inference, and it was wrong whenever an agent
         // started play mode by a route that leaves no claim.
-        string who = owner == PlayGate.OwnerUser
-            ? "no agent claimed it — the Play button, or a tool outside the bridge"
-            : "agent " + owner;
-        Console.Error.WriteLine($"[gate] Play mode belongs to {who}. Asking before running {cmdUpper}...");
+        string who = owner == PlayGate.OwnerUser ? "the Play button" : "agent " + owner;
+        Console.Error.WriteLine($"[gate] Play mode was started by {who}. Asking before running {cmdUpper}...");
 
         // Prompt on the desktop; if that cannot be shown, fall back to waiting on the request
         // file so another surface (a terminal, the editor) can answer instead.
-        string decision = GateNotify.Ask(req, who, out bool remember);
+        string decision = GateNotify.Ask(req, who);
         if (decision != null) PlayGate.Decide(projectPath, req.Id, decision);
         else decision = PlayGate.Await(projectPath, req.Id, PlayGate.DefaultWait);
 
-        // "Always" is a run-now that also stops the asking, for every agent in the project.
+        // Both are a run-now that also stops the asking, for every agent in the project.
         if (decision == PlayGate.Always)
         {
             PlayGate.StoreAlways(projectPath);
             Console.Error.WriteLine("[gate] Always allowing agents in this project. Revoke with: REQUESTS --forget");
             return true;
         }
-        if (remember && decision != null)
-            PlayGate.StoreGrant(projectPath, owner, since, decision);
+        if (decision == PlayGate.Session)
+        {
+            PlayGate.StoreSession(projectPath, owner, since);
+            Console.Error.WriteLine("[gate] Allowing agents until this play session ends.");
+            return true;
+        }
 
         switch (decision)
         {
@@ -5321,22 +5316,45 @@ class Program
     ///   REQUESTS            list what is waiting
     ///   ALLOW &lt;id&gt;          run it inside the live play session (default)
     ///   ALLOW &lt;id&gt; yield    leave play mode and hand the editor over
+    ///   ALLOW &lt;id&gt; session  run it, and stop asking any agent until play mode ends
+    ///   ALLOW &lt;id&gt; always   run it, and stop asking any agent in this project
     ///   DENY &lt;id&gt;
+    ///   REQUESTS --session | --always | --forget   set or revoke that without a pending request
     /// </summary>
     static int HandlePlayGate(string projectPath, string cmdUpper, string data)
     {
+        var (playOwner, playSince) = ReadPlayOwner(projectPath);
+        bool Flag(string f) => !string.IsNullOrWhiteSpace(data) &&
+            data.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0;
+
         if (cmdUpper == "REQUESTS")
         {
-            if (!string.IsNullOrWhiteSpace(data) &&
-                data.IndexOf("--forget", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (Flag("--forget"))
             {
                 Console.WriteLine(PlayGate.ClearGrant(projectPath)
-                    ? "Standing permission revoked (project-wide 'always' and this window's) — you'll be asked again."
+                    ? "Standing permission revoked — agents will be asked again."
                     : "There was no standing permission.");
                 return EXIT_SUCCESS;
             }
+            if (Flag("--always"))
+            {
+                PlayGate.StoreAlways(projectPath);
+                Console.WriteLine("Agents in this project will no longer be asked. Revoke with: REQUESTS --forget");
+                return EXIT_SUCCESS;
+            }
+            if (Flag("--session"))
+            {
+                if (string.IsNullOrEmpty(playOwner))
+                {
+                    Console.Error.WriteLine("Not in play mode — there is no play session to allow. Use --always to stop asking for good.");
+                    return EXIT_COMMAND_ERROR;
+                }
+                PlayGate.StoreSession(projectPath, playOwner, playSince);
+                Console.WriteLine("Agents will not be asked again until this play session ends.");
+                return EXIT_SUCCESS;
+            }
 
-            string grant = PlayGate.DescribeGrant(projectPath);
+            string grant = PlayGate.DescribeGrant(projectPath, playOwner, playSince);
             if (grant != null)
                 Console.WriteLine($"Standing permission: {grant}\n  (REQUESTS --forget to revoke)\n");
 
@@ -5354,9 +5372,11 @@ class Program
             }
             Console.WriteLine("\n  ALLOW <id>         run it in your play session (play mode untouched)");
             Console.WriteLine("  ALLOW <id> yield   exit play mode and hand over");
-            Console.WriteLine("  ALLOW <id> always  run it, and stop asking for any agent in this project");
+            Console.WriteLine("  ALLOW <id> session run it, and stop asking any agent until play mode ends");
+            Console.WriteLine("  ALLOW <id> always  run it, and stop asking any agent in this project");
             Console.WriteLine("  DENY <id>");
-            Console.WriteLine("\n  REQUESTS --forget  revoke standing permission");
+            Console.WriteLine("\n  REQUESTS --session | --always   stop asking without a pending request");
+            Console.WriteLine("  REQUESTS --forget  revoke standing permission");
             Console.WriteLine("  CLIBRIDGE_NO_PLAYGATE=1 in the environment disables the gate for a window");
             return EXIT_SUCCESS;
         }
@@ -5364,22 +5384,25 @@ class Program
         var parts = (data ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0)
         {
-            Console.Error.WriteLine($"Usage: {cmdUpper} <id>" + (cmdUpper == "ALLOW" ? " [yield]" : ""));
+            Console.Error.WriteLine($"Usage: {cmdUpper} <id>" + (cmdUpper == "ALLOW" ? " [yield|session|always]" : ""));
             Console.Error.WriteLine("       REQUESTS   to see what is waiting");
             return EXIT_USAGE_ERROR;
         }
 
         string id = parts[0];
         string modifier = parts.Length > 1 ? parts[1] : "";
-        bool always = modifier.StartsWith("a", StringComparison.OrdinalIgnoreCase);
         string decision = cmdUpper == "DENY" ? PlayGate.Deny
             : modifier.StartsWith("y", StringComparison.OrdinalIgnoreCase)
                 ? PlayGate.Yield : PlayGate.RunNow;
 
-        // `ALLOW <id> always` is a run-now that also stops the asking. Project-wide: a per-window
-        // grant written here would land on the answering terminal's id, not the requester's.
-        if (always && cmdUpper == "ALLOW")
-            PlayGate.StoreAlways(projectPath);
+        // `ALLOW <id> session|always` is a run-now that also stops the asking, project-wide.
+        if (cmdUpper == "ALLOW")
+        {
+            if (modifier.StartsWith("a", StringComparison.OrdinalIgnoreCase))
+                PlayGate.StoreAlways(projectPath);
+            else if (modifier.StartsWith("s", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(playOwner))
+                PlayGate.StoreSession(projectPath, playOwner, playSince);
+        }
 
         if (!PlayGate.Decide(projectPath, id, decision))
         {

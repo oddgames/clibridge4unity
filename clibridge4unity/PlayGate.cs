@@ -38,11 +38,11 @@ internal static class PlayGate
     /// <summary>Owner value meaning a person pressed Play, rather than any agent.</summary>
     public const string OwnerUser = "user";
 
-    /// <summary>Sentinel session id for a grant that outlives any single play session.</summary>
-    public const long AnySession = -1;
-
     /// <summary>Answer meaning "run it, and stop asking me for any agent in this project".</summary>
     public const string Always = "always";
+
+    /// <summary>Answer meaning "run it, and stop asking for any agent until play mode ends".</summary>
+    public const string Session = "session";
 
     public const string Yield = "yield";
     public const string RunNow = "run-now";
@@ -232,106 +232,88 @@ internal static class PlayGate
     // ---------------------------------------------------------------- grants
     //
     // Asking once per command is unusable: a single task can issue a dozen mutating commands,
-    // and the owner is not going to answer a dozen dialogs. A grant records "this window may
-    // proceed for THIS play session", so the question is asked once and then honoured.
+    // and the owner is not going to answer a dozen dialogs. Two standing answers, both
+    // PROJECT-wide rather than per window:
     //
-    // Scoped to (requesting window, play session). `since` is the play session's start tick
-    // from the heartbeat, so leaving play mode and re-entering invalidates every grant — a
-    // permission given for one session never silently carries into the next.
+    //   _session  every agent may run in THIS play session. Keyed on (owner, playOwnerSince)
+    //             from the heartbeat, so leaving play mode and re-entering invalidates it.
+    //   _always   every agent, every play session, until REQUESTS --forget.
+    //
+    // Not per window: a window id is its anchor process's pid, and that is not stable enough
+    // to hang permission on — every new conversation is a new id, and some hosts anchor on a
+    // short-lived process so the id changes per command. A per-window grant was then never
+    // matched again, which read as "I said don't ask, and it keeps asking".
 
-    static string GrantPath(string projectPath, string peerId)
+    static string GrantPath(string projectPath, string name)
     {
         string dir = Path.Combine(projectPath, ".clibridge4unity", "grants");
         Directory.CreateDirectory(dir);
-        return Path.Combine(dir, peerId + ".txt");
+        return Path.Combine(dir, name + ".txt");
     }
 
-    // "Always" is project-wide, not per window. A window id is its anchor process's pid, and
-    // every Claude conversation is a new process — so a per-window "always" died with the
-    // conversation and the next one asked again, which read as the button not working.
     static string AlwaysPath(string projectPath) => GrantPath(projectPath, "_always");
+    static string SessionPath(string projectPath) => GrantPath(projectPath, "_session");
 
-    /// <summary>Stop asking for every agent window in this project, until revoked.</summary>
+    /// <summary>Stop asking for every agent in this project, until revoked.</summary>
     public static void StoreAlways(string projectPath)
     {
         try { System.IO.File.WriteAllText(AlwaysPath(projectPath), DateTime.UtcNow.ToString("o")); }
         catch { }
     }
 
-    public static bool HasAlways(string projectPath)
+    /// <summary>Stop asking for every agent in this project until this play session ends.</summary>
+    public static void StoreSession(string projectPath, string owner, long since)
+    {
+        try { System.IO.File.WriteAllText(SessionPath(projectPath), $"{owner}\t{since}"); }
+        catch { }
+    }
+
+    static bool HasAlways(string projectPath)
     {
         try { return System.IO.File.Exists(AlwaysPath(projectPath)); }
         catch { return false; }
     }
 
-    /// <summary>Remember an answer for the rest of this play session.</summary>
-    public static void StoreGrant(string projectPath, string owner, long since, string decision)
+    static bool HasSession(string projectPath, string owner, long since)
     {
         try
         {
-            System.IO.File.WriteAllText(GrantPath(projectPath, PeerLedger.SelfId),
-                                        $"{owner}\t{since}\t{decision}");
-        }
-        catch { }
-    }
-
-    /// <summary>The standing answer for this window in this play session, or null.</summary>
-    public static string FindGrant(string projectPath, string owner, long since)
-    {
-        if (HasAlways(projectPath)) return RunNow;
-        try
-        {
-            string path = GrantPath(projectPath, PeerLedger.SelfId);
-            if (!System.IO.File.Exists(path)) return null;
+            string path = SessionPath(projectPath);
+            if (!System.IO.File.Exists(path)) return false;
             var parts = System.IO.File.ReadAllText(path).Split('\t');
-            if (parts.Length < 3) return null;
-            if (!long.TryParse(parts[1], out long grantedSince)) return null;
-            // AnySession is a standing "always allow" and ignores who owns play mode.
-            if (grantedSince == AnySession) return parts[2];
-            // Otherwise the grant is valid only for the exact session it was given in.
-            if (!string.Equals(parts[0], owner, StringComparison.OrdinalIgnoreCase)) return null;
-            if (grantedSince != since) return null;
-            return parts[2];
+            return parts.Length >= 2
+                && string.Equals(parts[0], owner, StringComparison.OrdinalIgnoreCase)
+                && long.TryParse(parts[1], out long s) && s == since;
         }
-        catch { return null; }
+        catch { return false; }
     }
 
-    /// <summary>
-    /// Revoke the project-wide "always" and this window's standing permission.
-    /// Returns false if there was neither.
-    /// </summary>
+    /// <summary>True when a standing answer already allows running in this play session.</summary>
+    public static bool IsGranted(string projectPath, string owner, long since) =>
+        HasAlways(projectPath) || HasSession(projectPath, owner, since);
+
+    /// <summary>Revoke every standing permission in this project. Returns false if there was none.</summary>
     public static bool ClearGrant(string projectPath)
     {
         bool any = false;
-        foreach (string path in new[] { AlwaysPath(projectPath), GrantPath(projectPath, PeerLedger.SelfId) })
+        try
         {
-            try
+            // Everything in the folder, including per-window files older versions wrote.
+            foreach (string path in Directory.EnumerateFiles(Path.GetDirectoryName(AlwaysPath(projectPath)), "*.txt"))
             {
-                if (!System.IO.File.Exists(path)) continue;
-                System.IO.File.Delete(path);
-                any = true;
+                try { System.IO.File.Delete(path); any = true; } catch { }
             }
-            catch { }
         }
+        catch { }
         return any;
     }
 
-    /// <summary>Describe the standing permission for this window, or null.</summary>
-    public static string DescribeGrant(string projectPath)
+    /// <summary>Describe the standing permission, or null.</summary>
+    public static string DescribeGrant(string projectPath, string owner, long since)
     {
-        if (HasAlways(projectPath)) return "always allow every agent window in this project — until revoked";
-        try
-        {
-            string path = GrantPath(projectPath, PeerLedger.SelfId);
-            if (!System.IO.File.Exists(path)) return null;
-            var parts = System.IO.File.ReadAllText(path).Split('\t');
-            if (parts.Length < 3) return null;
-            bool always = long.TryParse(parts[1], out long s) && s == AnySession;
-            return always
-                ? $"always allow ({parts[2]}) — until revoked"
-                : $"{parts[2]} — for the current play session only";
-        }
-        catch { return null; }
+        if (HasAlways(projectPath)) return "always allow every agent in this project — until revoked";
+        if (HasSession(projectPath, owner, since)) return "allow every agent until this play session ends";
+        return null;
     }
 
     /// <summary>Same liveness convention as PeerLedger: if the pid cannot be opened, it is gone.</summary>

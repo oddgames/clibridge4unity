@@ -57,16 +57,14 @@ internal static class GateNotify
         public uint cxWidth;
     }
 
-    const uint TDF_USE_COMMAND_LINKS = 0x0010;
+    const uint TDF_ALLOW_DIALOG_CANCELLATION = 0x0008;
     const uint TDF_POSITION_RELATIVE_TO_WINDOW = 0x1000;
-    const uint TDCBF_CANCEL_BUTTON = 0x0008;
-    const int IDCANCEL = 2;
 
     // Button ids — arbitrary, just distinct from the standard ones.
-    const int ID_RUN_NOW = 101;
-    const int ID_YIELD = 102;
-    const int ID_DENY = 103;
-    const int ID_ALWAYS = 104;
+    const int ID_ALLOW = 101;
+    const int ID_SESSION = 102;
+    const int ID_ALWAYS = 103;
+    const int ID_DENY = 104;
 
     [DllImport("comctl32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern int TaskDialogIndirect(ref TASKDIALOGCONFIG pTaskConfig,
@@ -74,45 +72,21 @@ internal static class GateNotify
                                          out int pfVerificationFlagChecked);
 
     /// <summary>
-    /// Ask the owner what to do. Returns a PlayGate decision, or null if the dialog could
-    /// not be shown or was dismissed without choosing.
-    /// <paramref name="remember"/> is true when the owner ticked "don't ask again", meaning
-    /// the answer should stand for the rest of this play session instead of being asked
-    /// again on the very next command.
+    /// Ask the owner what to do. Returns a PlayGate decision, or null if the dialog could not
+    /// be shown. Closing it counts as Deny. Four plain buttons and a two-line body: it pops up
+    /// in the middle of someone's play session, so it has to be answerable at a glance.
+    /// "Exit play mode and hand over" is deliberately not here — `ALLOW <id> yield` covers it.
     /// </summary>
-    public static string Ask(PlayGate.Request request, string ownerLabel, out bool remember)
+    public static string Ask(PlayGate.Request request, string startedBy)
     {
-        remember = false;
         try
         {
             var buttons = new[]
             {
-                new TASKDIALOG_BUTTON
-                {
-                    nButtonID = ID_RUN_NOW,
-                    pszButtonText = "Run it now in my play session\n" +
-                                    "Play mode keeps running. Best for CODE_EXEC — it carries " +
-                                    "its own compiler and does not need edit mode.",
-                },
-                new TASKDIALOG_BUTTON
-                {
-                    nButtonID = ID_YIELD,
-                    pszButtonText = "Exit play mode and let the agent take over\n" +
-                                    "Ends your play session, then runs the command.",
-                },
-                new TASKDIALOG_BUTTON
-                {
-                    nButtonID = ID_ALWAYS,
-                    pszButtonText = "Always allow agents in this project\n" +
-                                    "Stop asking for every agent window, across play sessions and " +
-                                    "conversations. Revoke later with  clibridge4unity REQUESTS --forget.",
-                },
-                new TASKDIALOG_BUTTON
-                {
-                    nButtonID = ID_DENY,
-                    pszButtonText = "Not now\n" +
-                                    "The agent is told no and changes nothing.",
-                },
+                new TASKDIALOG_BUTTON { nButtonID = ID_ALLOW, pszButtonText = "Allow" },
+                new TASKDIALOG_BUTTON { nButtonID = ID_SESSION, pszButtonText = "Allow until play stops" },
+                new TASKDIALOG_BUTTON { nButtonID = ID_ALWAYS, pszButtonText = "Always allow" },
+                new TASKDIALOG_BUTTON { nButtonID = ID_DENY, pszButtonText = "Deny" },
             };
 
             int size = Marshal.SizeOf<TASKDIALOG_BUTTON>();
@@ -125,41 +99,24 @@ internal static class GateNotify
                 var config = new TASKDIALOGCONFIG
                 {
                     cbSize = (uint)Marshal.SizeOf<TASKDIALOGCONFIG>(),
-                    dwFlags = TDF_USE_COMMAND_LINKS | TDF_POSITION_RELATIVE_TO_WINDOW,
-                    dwCommonButtons = TDCBF_CANCEL_BUTTON,
+                    dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW,
                     pszWindowTitle = "Unity bridge",
-                    pszMainInstruction = "An agent wants to use the editor",
-                    pszContent =
-                        $"The editor is in play mode — {ownerLabel}.\n\n" +
-                        $"Window {request.From} wants to run:\n{request.Summary()}",
-                    pszExpandedControlText = "Details",
-                    pszCollapsedControlText = "Details",
-                    pszExpandedInformation =
-                        $"Request {request.Id}\nFrom process {request.FromPid}\n\n" +
-                        "Answer later from any terminal:\n" +
-                        $"  clibridge4unity ALLOW {request.Id}\n" +
-                        $"  clibridge4unity ALLOW {request.Id} yield\n" +
-                        $"  clibridge4unity DENY {request.Id}",
-                    pszVerificationText = "Don't ask again while this play session lasts",
+                    pszMainInstruction = "An agent wants to run " + request.Command,
+                    pszContent = $"{Describe(request)}\nPlay mode (started by {startedBy}) keeps running.",
                     cButtons = (uint)buttons.Length,
                     pButtons = array,
-                    nDefaultButton = ID_RUN_NOW,
+                    nDefaultButton = ID_ALLOW,
                 };
 
-                int pressed;
-                int verified;
-                int hr = TaskDialogIndirect(ref config, out pressed, IntPtr.Zero, out verified);
+                int hr = TaskDialogIndirect(ref config, out int pressed, IntPtr.Zero, out _);
                 if (hr != 0) return null;          // no interactive desktop, or comctl32 unavailable
-                remember = verified != 0;
 
                 return pressed switch
                 {
-                    ID_RUN_NOW => PlayGate.RunNow,
-                    ID_YIELD => PlayGate.Yield,
+                    ID_ALLOW => PlayGate.RunNow,
+                    ID_SESSION => PlayGate.Session,
                     ID_ALWAYS => PlayGate.Always,
-                    ID_DENY => PlayGate.Deny,
-                    IDCANCEL => null,              // dismissed — leave it pending for another surface
-                    _ => null,
+                    _ => PlayGate.Deny,            // Deny, Esc, or the close box
                 };
             }
             finally
@@ -172,5 +129,15 @@ internal static class GateNotify
             // Never let the prompt itself break the command path.
             return null;
         }
+    }
+
+    /// <summary>The argument, shortened: a script path shows as its file name.</summary>
+    static string Describe(PlayGate.Request request)
+    {
+        string data = (request.Data ?? "").Trim();
+        if (data.Length == 0) return request.Command;
+        try { if (System.IO.File.Exists(data)) return System.IO.Path.GetFileName(data); } catch { }
+        data = data.Replace("\r", " ").Replace("\n", " ");
+        return data.Length > 80 ? data.Substring(0, 77) + "..." : data;
     }
 }
