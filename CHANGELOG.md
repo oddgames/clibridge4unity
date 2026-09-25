@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.1.85 — 2026-09-25
+
+## v1.1.85
+
+### Fixed
+- **UXML renders no longer appear on screen.** `SCREENSHOT <file>.uxml` hosts the UI in a throwaway popup and meant to park it at -30000, but it read the HWND from `ContainerWindow.m_WindowPtr` — which is Unity's native ContainerWindow object, not a Win32 handle — so `SetWindowPos` failed silently and every render sat visibly at (0,0) on the primary monitor. The popup's real HWND is now found by diffing the process's top-level windows across `ShowPopup`; GrabPixels still renders correctly offscreen, and focus is not stolen.
+- **"Always allow" in the play-mode gate now actually sticks.** It was keyed on the window id, which is the Claude process's pid — so every new conversation got a new id and was asked again. "Always allow agents in this project" (and `ALLOW <id> always`) now writes one project-wide grant (`.clibridge4unity/grants/_always.txt`) that lasts across play sessions and conversations until `REQUESTS --forget`.
+- `ALLOW <id> always` stored its grant under the *answering* terminal's id instead of the requesting agent's — it never took effect for the agent that asked.
+
+### New
+- Capture daemon: hotkeys are re-armed once a minute (a `RegisterHotKey` registration can go silently dead in a long-lived process), and the hidden daemon now logs to `captures/daemon.log`. `CAPTURE --status` shows the daemon's start time, version and log tail.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.84 — 2026-09-21
 
 ## v1.1.84

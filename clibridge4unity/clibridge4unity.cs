@@ -178,7 +178,7 @@ class Program
     }
 
     // Version from assembly (set in .csproj <Version>)
-    private static readonly string CLI_VERSION =
+    internal static readonly string CLI_VERSION =
         typeof(Program).Assembly.GetName().Version is { } v ? $"{v.Major}.{v.Minor}.{v.Build}" : "0.0.0";
 
     // GitHub repository for package installation and updates
@@ -738,11 +738,11 @@ class Program
         if (decision != null) PlayGate.Decide(projectPath, req.Id, decision);
         else decision = PlayGate.Await(projectPath, req.Id, PlayGate.DefaultWait);
 
-        // "Always" is a run-now that also stops the asking, permanently.
+        // "Always" is a run-now that also stops the asking, for every agent in the project.
         if (decision == PlayGate.Always)
         {
-            PlayGate.StoreGrant(projectPath, owner, PlayGate.AnySession, PlayGate.RunNow);
-            Console.Error.WriteLine("[gate] Always allowing this window. Revoke with: REQUESTS --forget");
+            PlayGate.StoreAlways(projectPath);
+            Console.Error.WriteLine("[gate] Always allowing agents in this project. Revoke with: REQUESTS --forget");
             return true;
         }
         if (remember && decision != null)
@@ -5331,14 +5331,14 @@ class Program
                 data.IndexOf("--forget", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 Console.WriteLine(PlayGate.ClearGrant(projectPath)
-                    ? "Standing permission for this window revoked — you'll be asked again."
-                    : "This window had no standing permission.");
+                    ? "Standing permission revoked (project-wide 'always' and this window's) — you'll be asked again."
+                    : "There was no standing permission.");
                 return EXIT_SUCCESS;
             }
 
             string grant = PlayGate.DescribeGrant(projectPath);
             if (grant != null)
-                Console.WriteLine($"Standing permission for this window: {grant}\n  (REQUESTS --forget to revoke)\n");
+                Console.WriteLine($"Standing permission: {grant}\n  (REQUESTS --forget to revoke)\n");
 
             var pending = PlayGate.Pending(projectPath);
             if (pending.Count == 0)
@@ -5354,9 +5354,9 @@ class Program
             }
             Console.WriteLine("\n  ALLOW <id>         run it in your play session (play mode untouched)");
             Console.WriteLine("  ALLOW <id> yield   exit play mode and hand over");
-            Console.WriteLine("  ALLOW <id> always  run it, and stop asking for this window entirely");
+            Console.WriteLine("  ALLOW <id> always  run it, and stop asking for any agent in this project");
             Console.WriteLine("  DENY <id>");
-            Console.WriteLine("\n  REQUESTS --forget  revoke this window's standing permission");
+            Console.WriteLine("\n  REQUESTS --forget  revoke standing permission");
             Console.WriteLine("  CLIBRIDGE_NO_PLAYGATE=1 in the environment disables the gate for a window");
             return EXIT_SUCCESS;
         }
@@ -5376,12 +5376,10 @@ class Program
             : modifier.StartsWith("y", StringComparison.OrdinalIgnoreCase)
                 ? PlayGate.Yield : PlayGate.RunNow;
 
-        // `ALLOW <id> always` is a run-now that also stops the asking for this window.
+        // `ALLOW <id> always` is a run-now that also stops the asking. Project-wide: a per-window
+        // grant written here would land on the answering terminal's id, not the requester's.
         if (always && cmdUpper == "ALLOW")
-        {
-            var (grantOwner, _) = ReadPlayOwner(projectPath);
-            PlayGate.StoreGrant(projectPath, grantOwner, PlayGate.AnySession, PlayGate.RunNow);
-        }
+            PlayGate.StoreAlways(projectPath);
 
         if (!PlayGate.Decide(projectPath, id, decision))
         {

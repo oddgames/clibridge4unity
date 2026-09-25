@@ -132,33 +132,31 @@ namespace clibridge4unity
             return tex;
         }
 
-        // Walks EditorWindow → m_Parent (HostView) → window (ContainerWindow) → windowPtr/m_WindowPtr
-        // (IntPtr HWND on Windows). Internal Unity API; returns IntPtr.Zero if the chain breaks.
-        static IntPtr GetEditorWindowHwnd(EditorWindow w)
+        delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        [DllImport("user32.dll")]
+        static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+        [DllImport("user32.dll")]
+        static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        // Top-level windows owned by this Unity process. Diffing this set across ShowPopup is how
+        // the popup's HWND is found: ContainerWindow.m_WindowPtr looks like one but is Unity's
+        // native ContainerWindow object (IsWindow() is false), so SetWindowPos on it silently did
+        // nothing and every UXML render sat visibly at (0,0) on the primary monitor.
+        static HashSet<IntPtr> OwnTopLevelWindows()
         {
+            var set = new HashSet<IntPtr>();
             try
             {
-                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
-                var parent = typeof(EditorWindow).GetField("m_Parent", bf)?.GetValue(w);
-                if (parent == null) return IntPtr.Zero;
-                var window = parent.GetType().GetField("window", bf)?.GetValue(parent)
-                          ?? parent.GetType().GetProperty("window", bf)?.GetValue(parent);
-                if (window == null) return IntPtr.Zero;
-                var t = window.GetType();
-                var ptrProp = t.GetProperty("windowPtr", bf);
-                if (ptrProp != null) return (IntPtr)ptrProp.GetValue(window);
-                var ptrField = t.GetField("m_WindowPtr", bf);
-                if (ptrField != null)
+                uint me = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+                EnumWindows((h, _) =>
                 {
-                    var v = ptrField.GetValue(window);
-                    if (v is IntPtr p) return p;
-                    // m_WindowPtr is sometimes a wrapper struct (MonoOrJobHandle) — try .m_IntPtr
-                    var inner = v?.GetType().GetField("m_IntPtr", bf);
-                    if (inner != null) return (IntPtr)inner.GetValue(v);
-                }
+                    GetWindowThreadProcessId(h, out uint pid);
+                    if (pid == me) set.Add(h);
+                    return true;
+                }, IntPtr.Zero);
             }
             catch { }
-            return IntPtr.Zero;
+            return set;
         }
 
         static readonly string OutputDir = Path.Combine(
@@ -356,20 +354,22 @@ namespace clibridge4unity
                 //  2. ShowPopup on a backgrounded Unity wakes the message pump and brings
                 //     Unity to the foreground.
                 //
-                // Solution: ShowPopup at minimal size, then immediately call Win32 SetWindowPos
-                // to coords Unity does not clamp. SWP_NOACTIVATE keeps Unity in the background.
+                // Solution: ShowPopup, then in the same main-thread call (before the message pump
+                // can paint it) Win32 SetWindowPos to coords Unity does not clamp. SWP_NOACTIVATE
+                // keeps Unity in the background. GrabPixels renders the view into a RenderTexture,
+                // so it works identically with the window offscreen (verified on 6000.3).
                 await CommandRegistry.RunOnMainThreadAsync<int>(() =>
                 {
+                    var before = OwnTopLevelWindows();
                     window = ScriptableObject.CreateInstance<EditorWindow>();
                     window.minSize = new Vector2(width, height);
                     window.position = new Rect(-4000, -4000, width, height);
                     window.ShowPopup();
 
-                    // Force the popup truly offscreen via Win32 (Unity's clamping does not apply
-                    // to direct SetWindowPos calls). -30000 is well past any conceivable monitor.
-                    var hwnd = GetEditorWindowHwnd(window);
-                    if (hwnd != IntPtr.Zero)
+                    // -30000 is well past any conceivable monitor.
+                    foreach (var hwnd in OwnTopLevelWindows())
                     {
+                        if (before.Contains(hwnd)) continue;
                         SetWindowPos(hwnd, IntPtr.Zero, -30000, -30000, 0, 0,
                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
                     }

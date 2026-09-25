@@ -41,7 +41,7 @@ internal static class PlayGate
     /// <summary>Sentinel session id for a grant that outlives any single play session.</summary>
     public const long AnySession = -1;
 
-    /// <summary>Answer meaning "run it, and stop asking me for this window entirely".</summary>
+    /// <summary>Answer meaning "run it, and stop asking me for any agent in this project".</summary>
     public const string Always = "always";
 
     public const string Yield = "yield";
@@ -246,6 +246,24 @@ internal static class PlayGate
         return Path.Combine(dir, peerId + ".txt");
     }
 
+    // "Always" is project-wide, not per window. A window id is its anchor process's pid, and
+    // every Claude conversation is a new process — so a per-window "always" died with the
+    // conversation and the next one asked again, which read as the button not working.
+    static string AlwaysPath(string projectPath) => GrantPath(projectPath, "_always");
+
+    /// <summary>Stop asking for every agent window in this project, until revoked.</summary>
+    public static void StoreAlways(string projectPath)
+    {
+        try { System.IO.File.WriteAllText(AlwaysPath(projectPath), DateTime.UtcNow.ToString("o")); }
+        catch { }
+    }
+
+    public static bool HasAlways(string projectPath)
+    {
+        try { return System.IO.File.Exists(AlwaysPath(projectPath)); }
+        catch { return false; }
+    }
+
     /// <summary>Remember an answer for the rest of this play session.</summary>
     public static void StoreGrant(string projectPath, string owner, long since, string decision)
     {
@@ -260,6 +278,7 @@ internal static class PlayGate
     /// <summary>The standing answer for this window in this play session, or null.</summary>
     public static string FindGrant(string projectPath, string owner, long since)
     {
+        if (HasAlways(projectPath)) return RunNow;
         try
         {
             string path = GrantPath(projectPath, PeerLedger.SelfId);
@@ -277,22 +296,30 @@ internal static class PlayGate
         catch { return null; }
     }
 
-    /// <summary>Revoke this window's standing permission. Returns false if there was none.</summary>
+    /// <summary>
+    /// Revoke the project-wide "always" and this window's standing permission.
+    /// Returns false if there was neither.
+    /// </summary>
     public static bool ClearGrant(string projectPath)
     {
-        try
+        bool any = false;
+        foreach (string path in new[] { AlwaysPath(projectPath), GrantPath(projectPath, PeerLedger.SelfId) })
         {
-            string path = GrantPath(projectPath, PeerLedger.SelfId);
-            if (!System.IO.File.Exists(path)) return false;
-            System.IO.File.Delete(path);
-            return true;
+            try
+            {
+                if (!System.IO.File.Exists(path)) continue;
+                System.IO.File.Delete(path);
+                any = true;
+            }
+            catch { }
         }
-        catch { return false; }
+        return any;
     }
 
     /// <summary>Describe the standing permission for this window, or null.</summary>
     public static string DescribeGrant(string projectPath)
     {
+        if (HasAlways(projectPath)) return "always allow every agent window in this project — until revoked";
         try
         {
             string path = GrantPath(projectPath, PeerLedger.SelfId);

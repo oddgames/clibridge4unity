@@ -103,9 +103,9 @@ internal static class GateNotify
                 new TASKDIALOG_BUTTON
                 {
                     nButtonID = ID_ALWAYS,
-                    pszButtonText = "Always allow this window\n" +
-                                    "Stop asking for this window entirely, across play sessions. " +
-                                    "Revoke later with  clibridge4unity REQUESTS --forget.",
+                    pszButtonText = "Always allow agents in this project\n" +
+                                    "Stop asking for every agent window, across play sessions and " +
+                                    "conversations. Revoke later with  clibridge4unity REQUESTS --forget.",
                 },
                 new TASKDIALOG_BUTTON
                 {

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -988,6 +989,25 @@ static class RegionCapture
         if (pid == 0) { Console.WriteLine("Capture daemon: not running."); return 1; }
         Console.WriteLine($"Capture daemon: running (pid {pid}) — PrtScn grabs a region, Ctrl+PrtScn records.");
         Console.WriteLine($"Captures: {CapturesDir}");
+        try
+        {
+            var p = Process.GetProcessById(pid);
+            Console.WriteLine($"Started:  {p.StartTime:yyyy-MM-dd HH:mm} (v{FileVersionInfo.GetVersionInfo(p.MainModule.FileName).ProductVersion?.Split('+')[0]})");
+        }
+        catch { }
+        // The daemon's own console is hidden, so this tail is the only place its warnings and
+        // failures are ever visible. A "PrtScn: overlay opening" with no "captured" after it, or
+        // no line at all after the key was pressed, says which half is broken.
+        try
+        {
+            if (File.Exists(DaemonLogFile))
+            {
+                var lines = File.ReadAllLines(DaemonLogFile);
+                Console.WriteLine($"Log ({Path.GetFileName(DaemonLogFile)}, last {Math.Min(6, lines.Length)} of {lines.Length}):");
+                foreach (var l in lines.Skip(Math.Max(0, lines.Length - 6))) Console.WriteLine("  " + l);
+            }
+        }
+        catch { }
         return 0;
     }
 
@@ -1281,8 +1301,9 @@ static class RegionCapture
         // claims it at the OS level, and OneDrive/Dropbox/ShareX all offer to take it. Register
         // each chord independently and report exactly which one lost, rather than failing whole —
         // a working record hotkey is still worth having if capture lost the race.
-        bool gotCapture = RegisterHotKey(hwnd, HOTKEY_CAPTURE, MOD_NOREPEAT, VK_SNAPSHOT);
-        bool gotRecord = RegisterHotKey(hwnd, HOTKEY_RECORD, MOD_CONTROL | MOD_NOREPEAT, VK_SNAPSHOT);
+        DaemonLog($"daemon starting (pid {Process.GetCurrentProcess().Id}, v{Program.CLI_VERSION})");
+        ArmHotkeys(hwnd);
+        bool gotCapture = _hotCapture, gotRecord = _hotRecord;
 
         if (!gotCapture)
         {
@@ -1297,6 +1318,7 @@ static class RegionCapture
         {
             Console.Error.WriteLine("Error: neither hotkey could be registered. The tray menu would still work,");
             Console.Error.WriteLine("but starting a hotkey daemon with no hotkeys is almost certainly not what you wanted.");
+            DaemonLog("exiting: neither hotkey could be registered");
             DestroyWindow(hwnd);
             return 1;
         }
@@ -1335,12 +1357,63 @@ static class RegionCapture
         {
             KillTimer(hwnd, (UIntPtr)1);
             TrayIcon.Remove();
-            if (gotCapture) UnregisterHotKey(hwnd, HOTKEY_CAPTURE);
-            if (gotRecord) UnregisterHotKey(hwnd, HOTKEY_RECORD);
+            if (_hotCapture) UnregisterHotKey(hwnd, HOTKEY_CAPTURE);
+            if (_hotRecord) UnregisterHotKey(hwnd, HOTKEY_RECORD);
             DestroyWindow(hwnd);
+            DaemonLog("daemon stopped");
             try { File.Delete(PidFile); } catch { }
         }
         return 0;
+    }
+
+    static bool _hotCapture, _hotRecord;
+    static int _rearmTicks;
+    const int RearmEverySeconds = 60;
+
+    /// <summary>
+    /// (Re)register both chords. Called at startup and then once a minute from the timer, because
+    /// a RegisterHotKey registration can go quietly dead in a long-lived process — the daemon
+    /// still *holds* the key (a second RegisterHotKey elsewhere fails with 1409) but no WM_HOTKEY
+    /// ever arrives, typically after a lock screen / RDP / secure-desktop switch. Seen in the
+    /// wild: a daemon two days old that opened the overlay on a posted WM_HOTKEY but ignored the
+    /// real key; a restart fixed it. Re-arming is the cure without the restart. Windows refuses a
+    /// duplicate registration, so each is dropped and re-taken; the loss window is microseconds.
+    /// </summary>
+    static void ArmHotkeys(IntPtr hwnd)
+    {
+        bool hadCapture = _hotCapture, hadRecord = _hotRecord;
+        if (_hotCapture) UnregisterHotKey(hwnd, HOTKEY_CAPTURE);
+        if (_hotRecord) UnregisterHotKey(hwnd, HOTKEY_RECORD);
+        _hotCapture = RegisterHotKey(hwnd, HOTKEY_CAPTURE, MOD_NOREPEAT, VK_SNAPSHOT);
+        _hotRecord = RegisterHotKey(hwnd, HOTKEY_RECORD, MOD_CONTROL | MOD_NOREPEAT, VK_SNAPSHOT);
+
+        // Log only transitions (and the very first arm), so a healthy daemon writes one line an
+        // hour at most rather than one a minute.
+        bool first = !hadCapture && !hadRecord && _rearmTicks == 0;
+        if (first || hadCapture != _hotCapture)
+            DaemonLog(_hotCapture ? "PrtScn hotkey armed" : "PrtScn hotkey NOT available — another app holds Print Screen");
+        if (first || hadRecord != _hotRecord)
+            DaemonLog(_hotRecord ? "Ctrl+PrtScn hotkey armed" : "Ctrl+PrtScn hotkey NOT available — another app holds Ctrl+Print Screen");
+    }
+
+    /// <summary>
+    /// The daemon runs with its console hidden, so anything it prints is lost — which is how a
+    /// dead hotkey and a failed capture both looked identical to "nothing happened" for two days.
+    /// One flat, timestamped file beside the captures; `CAPTURE --status` shows the tail.
+    /// Truncated (not rotated) past 256 KB: it is a diagnostic, not a record.
+    /// </summary>
+    static string DaemonLogFile => Path.Combine(CapturesDir, "daemon.log");
+
+    static void DaemonLog(string line)
+    {
+        try
+        {
+            Directory.CreateDirectory(CapturesDir);
+            var fi = new FileInfo(DaemonLogFile);
+            if (fi.Exists && fi.Length > 256 * 1024) fi.Delete();
+            File.AppendAllText(DaemonLogFile, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {line}\n");
+        }
+        catch { /* a diagnostic that cannot be written must not take the daemon down */ }
     }
 
     // ─── Tray menu ────────────────────────────────────────────────────
@@ -1462,12 +1535,18 @@ static class RegionCapture
     /// </summary>
     static void DoCapture()
     {
+        DaemonLog("PrtScn: overlay opening");
         try
         {
             string saved = CaptureOnce(null);
             Console.WriteLine(saved != null ? $"captured: {saved}" : "cancelled");
+            DaemonLog(saved != null ? $"captured {Path.GetFileName(saved)}" : "cancelled");
         }
-        catch (Exception ex) { Console.Error.WriteLine($"capture failed: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"capture failed: {ex.Message}");
+            DaemonLog($"capture FAILED: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     static IntPtr DaemonProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -1484,7 +1563,9 @@ static class RegionCapture
             {
                 // One chord toggles, because reaching for a different key to stop a recording you
                 // started with Ctrl+PrtScn is exactly the moment you fumble it.
-                if (ScreenRecorder.IsRecording) ScreenRecorder.Stop();
+                bool recording = ScreenRecorder.IsRecording;
+                DaemonLog(recording ? "Ctrl+PrtScn: stopping recording" : "Ctrl+PrtScn: starting recording");
+                if (recording) ScreenRecorder.Stop();
                 else ScreenRecorder.StartDetached(_transcribeByDefault ? "--transcribe" : "");
                 return IntPtr.Zero;
             }
@@ -1507,6 +1588,9 @@ static class RegionCapture
                     ? "clibridge — RECORDING (right-click to stop)"
                     : "clibridge — PrtScn: region · Ctrl+PrtScn: record");
             }
+            // Not while the overlay is up: the capture runs its own modal loop on this thread,
+            // so this tick cannot fire mid-drag, but a re-arm the instant it ends is pointless.
+            if (++_rearmTicks % RearmEverySeconds == 0 && !_dragging) ArmHotkeys(hWnd);
             return IntPtr.Zero;
         }
 
