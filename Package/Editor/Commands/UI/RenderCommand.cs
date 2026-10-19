@@ -148,15 +148,30 @@ namespace clibridge4unity
             try
             {
                 uint me = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+#if UNITY_EDITOR_LINUX
+                foreach (var w in X11.ListWindows(Environment.GetEnvironmentVariable("DISPLAY"), new[] { me }, includeHidden: true))
+                    set.Add(new IntPtr((long)w.Id));
+#else
                 EnumWindows((h, _) =>
                 {
                     GetWindowThreadProcessId(h, out uint pid);
                     if (pid == me) set.Add(h);
                     return true;
                 }, IntPtr.Zero);
+#endif
             }
             catch { }
             return set;
+        }
+
+        static void MoveOffscreen(IntPtr window)
+        {
+            // -30000 is well past any conceivable monitor, and inside X11's 16-bit coordinate range.
+#if UNITY_EDITOR_LINUX
+            X11.Move(Environment.GetEnvironmentVariable("DISPLAY"), (ulong)window.ToInt64(), -30000, -30000);
+#else
+            SetWindowPos(window, IntPtr.Zero, -30000, -30000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+#endif
         }
 
         static readonly string OutputDir = Path.Combine(
@@ -366,12 +381,10 @@ namespace clibridge4unity
                     window.position = new Rect(-4000, -4000, width, height);
                     window.ShowPopup();
 
-                    // -30000 is well past any conceivable monitor.
                     foreach (var hwnd in OwnTopLevelWindows())
                     {
                         if (before.Contains(hwnd)) continue;
-                        SetWindowPos(hwnd, IntPtr.Zero, -30000, -30000, 0, 0,
-                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                        MoveOffscreen(hwnd);
                     }
 
                     var root = uxml.Instantiate();
@@ -599,7 +612,6 @@ namespace clibridge4unity
                     if (unhiddenCount > 0) cropNote += $", force-unhid {unhiddenCount} ancestor(s)";
                 }
 
-                // Read pixels and fix orientation (GrabPixels returns vertically flipped)
                 var prev = RenderTexture.active;
                 RenderTexture.active = rt;
                 var tex = new Texture2D(cropW, cropH, TextureFormat.RGBA32, false);
@@ -608,12 +620,16 @@ namespace clibridge4unity
                 tex.Apply();
                 RenderTexture.active = prev;
 
-                var pixels = tex.GetPixels32();
-                var flipped = new Color32[pixels.Length];
-                for (int y = 0; y < cropH; y++)
-                    System.Array.Copy(pixels, y * cropW, flipped, (cropH - 1 - y) * cropW, cropW);
-                tex.SetPixels32(flipped);
-                tex.Apply();
+                // GrabPixels returns the image upside down where UVs start at the top (D3D), upright on OpenGL.
+                if (SystemInfo.graphicsUVStartsAtTop)
+                {
+                    var pixels = tex.GetPixels32();
+                    var flipped = new Color32[pixels.Length];
+                    for (int y = 0; y < cropH; y++)
+                        System.Array.Copy(pixels, y * cropW, flipped, (cropH - 1 - y) * cropW, cropW);
+                    tex.SetPixels32(flipped);
+                    tex.Apply();
+                }
 
                 string baseName = Path.GetFileNameWithoutExtension(uxmlPath);
                 if (!string.IsNullOrEmpty(fileSuffix)) baseName += "_" + fileSuffix;

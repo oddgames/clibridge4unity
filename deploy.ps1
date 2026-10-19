@@ -16,6 +16,7 @@ $root = $PSScriptRoot
 $cliProject = Join-Path $root "clibridge4unity"
 $csproj = Join-Path $cliProject "clibridge4unity.csproj"
 $publishDir = Join-Path $cliProject "bin\Release\net8.0\win-x64\publish"
+$linuxPublishDir = Join-Path $cliProject "bin\Release\net8.0\linux-x64\publish"
 $packageTools = Join-Path $root "Package\Tools\win-x64"
 $repo = "oddgames/clibridge4unity"
 
@@ -39,6 +40,8 @@ if (-not $SkipBuild) {
     try {
         dotnet publish -c Release
         if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
+        dotnet publish -c Release -r linux-x64
+        if ($LASTEXITCODE -ne 0) { throw "dotnet publish (linux-x64) failed" }
     } finally {
         Pop-Location
     }
@@ -50,6 +53,13 @@ if (-not $SkipBuild) {
     }
     $exeSize = (Get-Item $exe).Length / 1MB
     Write-Host ("  Built: clibridge4unity.exe ({0:N1} MB)" -f $exeSize) -ForegroundColor Green
+
+    $linuxBin = Join-Path $linuxPublishDir "clibridge4unity"
+    if (-not (Test-Path $linuxBin)) {
+        Write-Host "Error: Published Linux binary not found at $linuxBin" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host ("  Built: clibridge4unity (linux-x64, {0:N1} MB)" -f ((Get-Item $linuxBin).Length / 1MB)) -ForegroundColor Green
 } else {
     Write-Host "[1/5] Skipping build" -ForegroundColor DarkGray
 }
@@ -114,10 +124,21 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "  Uploaded clibridge4unity.exe" -ForegroundColor Green
 }
 
+# The release asset name is what UPDATE, install.sh and the package's SetupWizard download.
+$linuxAsset = Join-Path $env:TEMP "clibridge4unity-linux-x64"
+Copy-Item (Join-Path $linuxPublishDir "clibridge4unity") $linuxAsset -Force
+gh release upload $tag $linuxAsset --clobber
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Error: Linux asset upload failed" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  Uploaded clibridge4unity-linux-x64" -ForegroundColor Green
+
 # Done
 Write-Host ""
 Write-Host "=== Deploy complete ===" -ForegroundColor Cyan
 Write-Host "Release: https://github.com/$repo/releases/tag/$tag"
 Write-Host ""
 Write-Host "Install command:" -ForegroundColor Yellow
-Write-Host "  irm https://raw.githubusercontent.com/$repo/main/install.ps1 | iex"
+Write-Host "  Windows: irm https://raw.githubusercontent.com/$repo/main/install.ps1 | iex"
+Write-Host "  Linux:   curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sh"

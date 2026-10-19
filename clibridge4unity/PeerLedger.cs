@@ -66,38 +66,51 @@ internal static class PeerLedger
     /// "claude" ancestor; otherwise the first ancestor that isn't a shell/terminal/CLI (typically
     /// the node/editor host). Caveat: two chat panels hosted by ONE process (e.g. two panels in the
     /// same VSCode window) collapse to the same id — set CLIBRIDGE_PEER_ID to disambiguate.
-    /// Windows-only (toolhelp); other OSes degrade to the current pid (per-invocation, like sessions).
+    /// Toolhelp on Windows, /proc on Linux; other OSes degrade to the current pid (per-invocation, like sessions).
     /// </summary>
     static (int pid, string name) ResolveAnchor()
     {
         int self = SafeSelfPid();
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return (self, "self");
+        bool windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        if (!windows && !RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) return (self, "self");
 
         try
         {
-            var parent = new Dictionary<int, int>();
-            var name = new Dictionary<int, string>();
-            IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return (self, "self");
-            try
+            Func<int, int> parentOf;
+            Func<int, string> nameOf;
+            if (windows)
             {
-                var e = new PROCESSENTRY32 { dwSize = (uint)Marshal.SizeOf<PROCESSENTRY32>() };
-                if (Process32First(snap, ref e))
+                var parent = new Dictionary<int, int>();
+                var name = new Dictionary<int, string>();
+                IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return (self, "self");
+                try
                 {
-                    do
+                    var e = new PROCESSENTRY32 { dwSize = (uint)Marshal.SizeOf<PROCESSENTRY32>() };
+                    if (Process32First(snap, ref e))
                     {
-                        parent[(int)e.th32ProcessID] = (int)e.th32ParentProcessID;
-                        name[(int)e.th32ProcessID] = e.szExeFile ?? "";
-                    } while (Process32Next(snap, ref e));
+                        do
+                        {
+                            parent[(int)e.th32ProcessID] = (int)e.th32ParentProcessID;
+                            name[(int)e.th32ProcessID] = e.szExeFile ?? "";
+                        } while (Process32Next(snap, ref e));
+                    }
                 }
+                finally { CloseHandle(snap); }
+                parentOf = pid => parent.TryGetValue(pid, out int p) ? p : 0;
+                nameOf = pid => name.TryGetValue(pid, out var n) ? n : "";
             }
-            finally { CloseHandle(snap); }
+            else
+            {
+                parentOf = LinuxProc.ParentPid;
+                nameOf = LinuxProc.Comm;
+            }
 
             int cur = self, firstStable = 0; string firstStableName = null;
             var seen = new HashSet<int>();
-            for (int depth = 0; depth < 24 && parent.TryGetValue(cur, out int p) && p != 0 && seen.Add(p); depth++)
+            for (int depth = 0, p; depth < 24 && (p = parentOf(cur)) != 0 && seen.Add(p); depth++)
             {
-                string pn = name.TryGetValue(p, out var n) ? n : "";
+                string pn = nameOf(p);
                 string low = pn.ToLowerInvariant();
                 if (low.Contains("claude")) return (p, pn);
                 if (firstStable == 0 && !IsTransientProcess(low)) { firstStable = p; firstStableName = pn; }
@@ -114,7 +127,10 @@ internal static class PeerLedger
         => lowerExe.StartsWith("clibridge4unity")
         || lowerExe is "pwsh.exe" or "powershell.exe" or "cmd.exe" or "bash.exe" or "sh.exe"
             or "zsh.exe" or "wsl.exe" or "wslhost.exe" or "conhost.exe" or "windowsterminal.exe"
-            or "openconsole.exe" or "dotnet.exe";
+            or "openconsole.exe" or "dotnet.exe"
+            // Linux /proc comm names. sshd forks per connection, so remote callers anchor past it.
+            or "bash" or "sh" or "dash" or "zsh" or "fish" or "sudo" or "sshd" or "timeout" or "env"
+            or "nohup" or "setsid" or "dotnet";
 
     // ───────────────────── Storage ─────────────────────
 

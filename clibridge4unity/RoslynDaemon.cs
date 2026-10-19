@@ -252,7 +252,7 @@ static class RoslynDaemon
     static string StartBackgroundCore(string projectPath)
     {
         string exePath = Process.GetCurrentProcess().MainModule?.FileName
-            ?? Path.Combine(AppContext.BaseDirectory, "clibridge4unity.exe");
+            ?? Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "clibridge4unity.exe" : "clibridge4unity");
 
         // Spawn the daemon FULLY DETACHED — no stdio redirection. Otherwise the daemon
         // inherits CLI's stdin/stdout/stderr handles. Even if we redirect them to our own
@@ -264,24 +264,30 @@ static class RoslynDaemon
         // Detach via cmd.exe `start "" /b` so the new process gets fresh NUL handles, no
         // inheritance from us, and pick up the pipe name via file (`daemon.pipe`).
         try { File.Delete(GetPipeFile(projectPath)); } catch { }
-        var psi = new ProcessStartInfo
-        {
-            FileName = exePath,
-            Arguments = $"-d \"{projectPath}\" DAEMON",
-            // UseShellExecute=true → ShellExecuteEx → does NOT inherit our std handles. The
-            // child gets fresh console handles (or none with WindowStyle=Hidden + CreateNoWindow).
-            // The trade-off: we can't redirect stdout/stderr — but we don't need to, because
-            // the daemon also writes its pipe name to `daemon.pipe` (file-based handshake).
-            UseShellExecute = true,
-            CreateNoWindow = true,
-            WindowStyle = ProcessWindowStyle.Hidden,
-        };
 
         try
         {
-            var proc = Process.Start(psi);
-            if (proc == null) return null;
-            try { proc.WaitForExit(2000); } catch { } // cmd.exe exits immediately after start
+            if (OperatingSystem.IsWindows())
+            {
+                var proc = Process.Start(new ProcessStartInfo
+                {
+                    FileName = exePath,
+                    Arguments = $"-d \"{projectPath}\" DAEMON",
+                    // UseShellExecute=true → ShellExecuteEx → does NOT inherit our std handles. The
+                    // child gets fresh console handles (or none with WindowStyle=Hidden + CreateNoWindow).
+                    // The trade-off: we can't redirect stdout/stderr — but we don't need to, because
+                    // the daemon also writes its pipe name to `daemon.pipe` (file-based handshake).
+                    UseShellExecute = true,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                });
+                if (proc == null) return null;
+                try { proc.WaitForExit(2000); } catch { } // cmd.exe exits immediately after start
+            }
+            else
+            {
+                LinuxProc.StartDetached(exePath, "-d", projectPath, "DAEMON");
+            }
 
             // Poll the daemon.pipe file for up to 15 seconds.
             string pipeFile = GetPipeFile(projectPath);

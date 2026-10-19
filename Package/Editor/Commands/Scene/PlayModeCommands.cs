@@ -626,13 +626,16 @@ namespace clibridge4unity
                 tex.Apply();
                 RenderTexture.active = prev;
 
-                // GrabPixels writes top-down; Texture2D is bottom-up — flip vertically
-                var pixels = tex.GetPixels32();
-                var flipped = new Color32[pixels.Length];
-                for (int y = 0; y < h; y++)
-                    System.Array.Copy(pixels, y * w, flipped, (h - 1 - y) * w, w);
-                tex.SetPixels32(flipped);
-                tex.Apply();
+                // GrabPixels returns the image upside down where UVs start at the top (D3D), upright on OpenGL.
+                if (SystemInfo.graphicsUVStartsAtTop)
+                {
+                    var pixels = tex.GetPixels32();
+                    var flipped = new Color32[pixels.Length];
+                    for (int y = 0; y < h; y++)
+                        System.Array.Copy(pixels, y * w, flipped, (h - 1 - y) * w, w);
+                    tex.SetPixels32(flipped);
+                    tex.Apply();
+                }
 
                 string path = System.IO.Path.Combine(outputDir, "gameview.png");
                 System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());

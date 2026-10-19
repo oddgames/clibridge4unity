@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.1.87 — 2026-10-19
+
+## v1.1.87
+
+### Fixed
+- **CAPTURE: a second PrtScn while the selection overlay was up started a nested capture** — the overlay's message loop dispatched the hotkey back into the daemon, the inner capture freed the shared desktop buffer, and the outer one crashed (`ArgumentNullException 'src'`). Repeat presses are now ignored and logged.
+- **CAPTURE: screenshots sometimes never reached the clipboard** — the image was only copied after the Unity editor-state round trip (seconds on a busy editor), the clipboard was opened with no owner window, and a failed `SetClipboardData` still reported success. The image is now copied immediately after the PNG is saved, with the daemon window as owner, and every format is checked; the result (or the real error) is written to `daemon.log` / `CAPTURE --status`.
+- **RECORD: Ctrl+PrtScn during region selection started another recorder** — `recorder.pid` only exists once ffmpeg runs, so the daemon thought nothing was recording. The daemon now tracks its recorder child and ignores the chord until selection finishes; PrtScn and Ctrl+PrtScn no longer open over each other.
+- **RECORD ignored the tray's clipboard / editor-state settings** — the recorder child ran with defaults. The daemon now passes `--clipboard <mode>` / `--no-context` (RECORD accepts both).
+- **RECORD clipboard** — image mode now copies the 4x3 contact sheet as an image (previously always the prompt text, and nothing when no editor was open); text mode falls back to the video path. Set before transcription instead of after it; logged to `daemon.log`.
+
+### New
+- Linux groundwork: `/proc`-based process queries (`LinuxProc`), per-OS Unity install / Editor.log resolution (`UnityInstall`), X11 window listing/capture/focus for Linux editors (`X11.cs`), and an `install.sh` installer.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.86 — 2026-09-25
 
 ## v1.1.86

@@ -374,6 +374,7 @@ namespace clibridge4unity
                             ProcessAllPendingWork();
                         }, null);
 
+#if UNITY_EDITOR_WIN
                         var hwnd = _unityWindowHandle;
                         if (hwnd != IntPtr.Zero)
                         {
@@ -383,6 +384,7 @@ namespace clibridge4unity
                             InvalidateRect(hwnd, IntPtr.Zero, false);
                             PostMessage(hwnd, WM_PAINT, IntPtr.Zero, IntPtr.Zero);
                         }
+#endif
 
                         Thread.Sleep(50);
                     }
@@ -395,12 +397,14 @@ namespace clibridge4unity
                         if (IsClientWaiting())
                         {
                             _mainThreadContext?.Post(_ => { EnsureEditorUpdateSubscribed(); PumpTick(); }, null);
+#if UNITY_EDITOR_WIN
                             var waitHwnd = _unityWindowHandle;
                             if (waitHwnd != IntPtr.Zero)
                             {
                                 PostMessage(waitHwnd, WM_NULL, IntPtr.Zero, IntPtr.Zero);
                                 PostMessage(waitHwnd, WM_TIMER, IntPtr.Zero, IntPtr.Zero);
                             }
+#endif
                         }
                         Thread.Sleep(10);
                     }
@@ -428,6 +432,16 @@ namespace clibridge4unity
             }
         }
 
+#if UNITY_EDITOR_LINUX
+        private static List<X11.Window> OwnX11Windows() =>
+            X11.ListWindows(Environment.GetEnvironmentVariable("DISPLAY"), new[] { (uint)Process.GetCurrentProcess().Id });
+
+        private static IntPtr FindUnityMainWindow()
+        {
+            var main = OwnX11Windows().Find(w => w.Title.Contains(" - Unity "));
+            return main == null ? IntPtr.Zero : new IntPtr((long)main.Id);
+        }
+#else
         private static IntPtr FindUnityMainWindow()
         {
             // Unity 6+ uses separate processes: our scripting runtime may be in a different
@@ -479,6 +493,7 @@ namespace clibridge4unity
 
             return found;
         }
+#endif
 
         /// <summary>Main-thread-only lazy HWND discovery. No-op once we have a handle.</summary>
         private static void TryRefreshUnityHwndThrottled()
@@ -500,6 +515,7 @@ namespace clibridge4unity
         {
             try
             {
+#if !UNITY_EDITOR_LINUX
                 string rawSessionHwnd = SessionState.GetString(SessionKeys.UnityHwnd, "0");
                 if (long.TryParse(rawSessionHwnd, out long savedHwnd) && savedHwnd != 0)
                 {
@@ -515,6 +531,7 @@ namespace clibridge4unity
                         }
                     }
                 }
+#endif
 
                 var found = FindUnityMainWindow();
                 if (found != IntPtr.Zero)
@@ -552,6 +569,10 @@ namespace clibridge4unity
         /// </summary>
         public static void EnumProcessWindows(uint pid, StringBuilder sb)
         {
+#if UNITY_EDITOR_LINUX
+            foreach (var w in X11.ListWindows(Environment.GetEnvironmentVariable("DISPLAY"), new[] { pid }))
+                sb.AppendLine($"  wnd: {w.Id} class={w.WmClass} {w.Width}x{w.Height}+{w.X}+{w.Y} title=\"{w.Title}\"");
+#else
             var classNameBuf = new StringBuilder(256);
             EnumWindows((hwnd, _) =>
             {
@@ -565,6 +586,7 @@ namespace clibridge4unity
                 sb.AppendLine($"  wnd: {hwnd} class={className} visible={visible}");
                 return true;
             }, IntPtr.Zero);
+#endif
         }
 
         /// <summary>
@@ -572,6 +594,11 @@ namespace clibridge4unity
         /// </summary>
         public static void EnumWindowsByTitle(string titleSubstring, StringBuilder sb)
         {
+#if UNITY_EDITOR_LINUX
+            foreach (var w in X11.ListWindows(Environment.GetEnvironmentVariable("DISPLAY"), null))
+                if (w.Title.IndexOf(titleSubstring, StringComparison.OrdinalIgnoreCase) >= 0)
+                    sb.AppendLine($"  wnd: {w.Id} pid={w.Pid} class={w.WmClass} title=\"{w.Title}\"");
+#else
             var classNameBuf = new StringBuilder(256);
             EnumWindows((hwnd, _) =>
             {
@@ -590,6 +617,7 @@ namespace clibridge4unity
                 }
                 return true;
             }, IntPtr.Zero);
+#endif
         }
 
         /// <summary>
@@ -1143,6 +1171,11 @@ namespace clibridge4unity
         public static List<string> DetectOpenDialogs()
         {
             var dialogs = new List<string>();
+#if UNITY_EDITOR_LINUX
+            foreach (var w in OwnX11Windows())
+                if (w.Dialog) dialogs.Add(w.Title);
+            return dialogs;
+#else
             var hwnd = GetUnityHwnd();
             if (hwnd == IntPtr.Zero) return dialogs;
 
@@ -1169,6 +1202,7 @@ namespace clibridge4unity
                 return true;
             }, IntPtr.Zero);
             return dialogs;
+#endif
         }
 
         /// <summary>

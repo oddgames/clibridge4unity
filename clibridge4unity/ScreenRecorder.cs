@@ -64,6 +64,7 @@ static class ScreenRecorder
             else if (p == "--full") full = true;
             else if (p == "--transcribe") transcribe = true;
             else if (p == "--no-sheet") noSheet = true;
+            else if (RegionCapture.TryParseClipOption(parts, ref i)) { }
             else if (p == "--stop" || p == "stop") return Stop();
             else if (p == "--status" || p == "status") return Status();
             else if (p == "--devices" || p == "devices") return ListDevices();
@@ -343,21 +344,29 @@ static class ScreenRecorder
         Console.WriteLine($"duration: {dur:0.0}s");
 
         // The parts an assistant can actually read.
+        byte[] sheetDib = null;
         if (!noSheet)
         {
             string sheet = BuildContactSheet(ffmpeg, dest, dur);
-            if (sheet != null) Console.WriteLine($"frames: {sheet}");
+            if (sheet != null)
+            {
+                Console.WriteLine($"frames: {sheet}");
+                sheetDib = SheetDib(ffmpeg, sheet);
+            }
         }
+
+        RegionCapture.PublishLatest(dest);
+        // Same reasoning as a still: capture the editor state now, while it still matches what
+        // was recorded, rather than whenever someone gets round to opening the panel. Before
+        // transcription, too — whisper can take longer than the clip, and the clipboard sat on
+        // stale content the whole time. The prompt does not reference the transcript.
+        RegionCapture.WriteContextFor(dest, sheetDib);
+
         if (transcribe && wanted.Count > 0)
         {
             string txt = Transcribe(ffmpeg, dest);
             if (txt != null) Console.WriteLine($"transcript: {txt}");
         }
-
-        RegionCapture.PublishLatest(dest);
-        // Same reasoning as a still: capture the editor state now, while it still matches what
-        // was recorded, rather than whenever someone gets round to opening the panel.
-        RegionCapture.WriteContextFor(dest);
         return 0;
     }
 
@@ -467,6 +476,32 @@ static class ScreenRecorder
     }
 
     /// <summary>
+    /// The contact sheet as CF_DIB bytes. ffmpeg writes it as a 24-bit .bmp, and a .bmp is a DIB
+    /// behind a 14-byte file header — so no PNG decoder is needed to put it on the clipboard.
+    /// </summary>
+    static byte[] SheetDib(string ffmpeg, string sheetPng)
+    {
+        string bmp = Path.Combine(Path.GetTempPath(), $"clibridge_sheet_{Environment.ProcessId}.bmp");
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo(ffmpeg,
+                $"-hide_banner -loglevel error -y -i \"{sheetPng}\" -pix_fmt bgr24 \"{bmp}\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+            });
+            p.StandardError.ReadToEnd();
+            p.WaitForExit(30000);
+            byte[] file = File.ReadAllBytes(bmp);
+            if (file.Length <= 14 || file[0] != (byte)'B' || file[1] != (byte)'M') return null;
+            return file[14..];
+        }
+        catch { return null; }
+        finally { try { File.Delete(bmp); } catch { } }
+    }
+
+    /// <summary>
     /// Transcribe with ffmpeg's built-in whisper filter (this build is compiled --enable-whisper,
     /// so there is no separate whisper.cpp to install — only the model weights).
     /// </summary>
@@ -537,16 +572,16 @@ static class ScreenRecorder
     // ─── Used by the tray menu ────────────────────────────────────────
 
     /// <summary>Start a recording in a detached child so the tray's message loop keeps pumping.</summary>
-    public static void StartDetached(string extraArgs)
+    public static Process StartDetached(string extraArgs)
     {
         try
         {
-            Process.Start(new ProcessStartInfo(Environment.ProcessPath, $"RECORD {extraArgs}")
+            return Process.Start(new ProcessStartInfo(Environment.ProcessPath, $"RECORD {extraArgs}")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
             });
         }
-        catch (Exception ex) { Console.Error.WriteLine($"Could not start recording: {ex.Message}"); }
+        catch (Exception ex) { Console.Error.WriteLine($"Could not start recording: {ex.Message}"); return null; }
     }
 }

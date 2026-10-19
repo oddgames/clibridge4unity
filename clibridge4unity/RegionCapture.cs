@@ -142,8 +142,8 @@ static class RegionCapture
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
     [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr hWndNewOwner);
     [DllImport("user32.dll")] static extern bool CloseClipboard();
-    [DllImport("user32.dll")] static extern bool EmptyClipboard();
-    [DllImport("user32.dll")] static extern IntPtr SetClipboardData(uint format, IntPtr hMem);
+    [DllImport("user32.dll", SetLastError = true)] static extern bool EmptyClipboard();
+    [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetClipboardData(uint format, IntPtr hMem);
     [DllImport("kernel32.dll")] static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
     [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr hMem);
     [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr hMem);
@@ -204,14 +204,7 @@ static class RegionCapture
             else if (p == "--daemon" || p == "daemon") daemon = true;
             else if (p == "--full") full = true;
             else if (p == "--rect" && i + 1 < parts.Length) fixedRect = parts[++i];
-            else if (p == "--no-context") _collectContext = false;
-            else if (p == "--no-clipboard") _clipMode = ClipMode.Off;
-            else if (p == "--clipboard" && i + 1 < parts.Length)
-            {
-                string m = parts[++i].ToLowerInvariant();
-                _clipMode = m == "text" ? ClipMode.Text : m == "both" ? ClipMode.Both
-                          : m == "off" || m == "none" ? ClipMode.Off : ClipMode.Image;
-            }
+            else if (TryParseClipOption(parts, ref i)) { }
             else if (p == "--last-prompt" || p == "last-prompt") return CopyLastPrompt();
             else if (p == "--stop" || p == "stop") return StopDaemon();
             else if (p == "--status" || p == "status") return DaemonStatus();
@@ -237,6 +230,31 @@ static class RegionCapture
         Console.WriteLine($"output: {saved}");
         return 0;
     }
+
+    /// <summary>
+    /// --clipboard / --no-clipboard / --no-context, shared with RECORD: the daemon passes its tray
+    /// settings to the recorder child this way, which otherwise ran with the defaults whatever
+    /// the menu said.
+    /// </summary>
+    internal static bool TryParseClipOption(string[] parts, ref int i)
+    {
+        string p = parts[i].ToLowerInvariant();
+        if (p == "--no-context") { _collectContext = false; return true; }
+        if (p == "--no-clipboard") { _clipMode = ClipMode.Off; return true; }
+        if (p == "--clipboard" && i + 1 < parts.Length)
+        {
+            string m = parts[++i].ToLowerInvariant();
+            _clipMode = m == "text" ? ClipMode.Text : m == "both" ? ClipMode.Both
+                      : m == "off" || m == "none" ? ClipMode.Off : ClipMode.Image;
+            return true;
+        }
+        return false;
+    }
+
+    static string RecorderArgs() =>
+        (_transcribeByDefault ? "--transcribe " : "")
+        + "--clipboard " + _clipMode.ToString().ToLowerInvariant()
+        + (_collectContext ? "" : " --no-context");
 
     /// <summary>
     /// Freeze the desktop, let the user drag a rectangle, and hand back the result in SCREEN
@@ -275,6 +293,7 @@ static class RegionCapture
     /// <summary>Show the overlay and return the saved PNG path, or null if the user cancelled.</summary>
     public static string CaptureOnce(string outPath, bool full = false, string fixedRect = null)
     {
+        _lastClipStatus = null;
         // Sample the foreground owner FIRST — the overlay is about to become the foreground
         // window, and after that we can no longer tell which editor you were looking at.
         uint fgPid = ForegroundPid();
@@ -320,6 +339,14 @@ static class RegionCapture
 
             PublishLatest(dest);
 
+            bool wantText = _clipMode == ClipMode.Text || _clipMode == ClipMode.Both;
+            bool wantImage = _clipMode == ClipMode.Image || _clipMode == ClipMode.Both;
+
+            // The image goes on the clipboard BEFORE asking Unity for context: that round trip can
+            // take seconds on a busy editor, and a paste inside that window found the previous
+            // clipboard — which reads as "the capture never reached the clipboard".
+            bool imageOk = !wantImage || TrySetClipboard(null, crop, rw, rh);
+
             // Screen coords, not virtual-desktop-relative: the bridge compares against
             // EditorWindow.position, which is desktop-space.
             int sx = _vx + rx, sy = _vy + ry;
@@ -332,8 +359,7 @@ static class RegionCapture
             if (_clipMode != ClipMode.Off)
             {
                 string text = describedUnity ? clipText : dest;
-                bool wantText = _clipMode == ClipMode.Text || _clipMode == ClipMode.Both;
-                bool wantImage = _clipMode == ClipMode.Image || _clipMode == ClipMode.Both;
+                bool ok = wantText ? TrySetClipboard(text, wantImage ? crop : null, rw, rh) : imageOk;
 
                 string what = _clipMode == ClipMode.Image ? "image"
                             : _clipMode == ClipMode.Text ? (describedUnity ? "prompt" : "path")
@@ -341,9 +367,10 @@ static class RegionCapture
                 string why = describedUnity ? ""
                     : " (" + (string.IsNullOrEmpty(topmost) ? "not a Unity window" : "topmost window here is '" + topmost + "'") + " — plain screenshot)";
 
-                Console.WriteLine(TrySetClipboard(wantText ? text : null, wantImage ? crop : null, rw, rh)
+                _lastClipStatus = ok
                     ? "clipboard: " + what + " copied" + why
-                    : "clipboard: could not copy (another app is holding it)");
+                    : "clipboard: could not copy (" + _lastClipError + ")";
+                Console.WriteLine(_lastClipStatus);
             }
             return dest;
         }
@@ -364,19 +391,34 @@ static class RegionCapture
     /// you were actually looking at.
     /// </summary>
     /// <summary>
-    /// Entry for a finished recording: no region to hit-test and no pixel buffer in hand, so the
-    /// prompt goes on the clipboard as text alone. The contact sheet is a file on disk, referenced
-    /// from the prompt.
+    /// Entry for a finished recording: no region to hit-test and no pixel buffer of its own, so
+    /// the clipboard gets the contact sheet (<paramref name="sheetDib"/>, CF_DIB bytes) as the
+    /// image and the prompt — or, with no editor to describe, the video's path — as the text,
+    /// following the same clipboard mode as a still. Previously this put the prompt text on the
+    /// clipboard regardless of mode, and nothing at all when no Unity editor was open.
     /// </summary>
-    public static void WriteContextFor(string capturePath)
+    public static void WriteContextFor(string capturePath, byte[] sheetDib = null)
     {
-        if (!_collectContext) return;
-        var all = Program.EnumerateUnityWorkspaces();
-        if (all == null || all.Count == 0) return;
-        if (TryWriteContext(capturePath, all[0], null, out string clipText) && _clipMode != ClipMode.Off)
-            Console.WriteLine(TrySetClipboard(clipText, null, 0, 0)
-                ? "clipboard: prompt copied"
-                : "clipboard: could not copy (another app is holding it)");
+        string clipText = null;
+        if (_collectContext)
+        {
+            var all = Program.EnumerateUnityWorkspaces();
+            if (all != null && all.Count > 0) TryWriteContext(capturePath, all[0], null, out clipText);
+        }
+        if (_clipMode == ClipMode.Off) return;
+
+        bool wantText = _clipMode == ClipMode.Text || _clipMode == ClipMode.Both;
+        byte[] dib = _clipMode == ClipMode.Text ? null : sheetDib;
+        string text = wantText || dib == null ? clipText ?? capturePath : null;  // never leave the clipboard empty
+
+        string what = dib != null && text != null ? "contact sheet + " + (clipText != null ? "prompt" : "path")
+                    : dib != null ? "contact sheet"
+                    : clipText != null ? "prompt" : "path";
+        string status = TrySetClipboard(text, dib)
+            ? $"clipboard: {what} copied"
+            : $"clipboard: could not copy ({_lastClipError})";
+        Console.WriteLine(status);
+        DaemonLog($"recording {Path.GetFileName(capturePath)}: {status}");
     }
 
     /// <summary>
@@ -480,66 +522,67 @@ static class RegionCapture
     /// holds it, which is routine, so it is retried rather than reported.
     /// </summary>
     static bool TrySetClipboard(string text, byte[] topDownBgra, int w, int h)
+        => TrySetClipboard(text, topDownBgra != null && w > 0 && h > 0 ? BuildDib(topDownBgra, w, h) : null);
+
+    /// <summary>CF_DIB payload: a BITMAPINFOHEADER then bottom-up rows — a .bmp minus its 14-byte file header.</summary>
+    static byte[] BuildDib(byte[] topDownBgra, int w, int h)
     {
+        int stride = w * 4;
+        var header = new BITMAPINFOHEADER
+        {
+            biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
+            biWidth = w,
+            biHeight = h,          // positive = bottom-up, which is CF_DIB's convention
+            biPlanes = 1,
+            biBitCount = 32,
+            biCompression = 0,
+            biSizeImage = (uint)(stride * h),
+        };
+        int headerSize = (int)header.biSize;
+        var dib = new byte[headerSize + stride * h];
+        var hp = GCHandle.Alloc(dib, GCHandleType.Pinned);
+        try { Marshal.StructureToPtr(header, hp.AddrOfPinnedObject(), false); }
+        finally { hp.Free(); }
+        for (int y = 0; y < h; y++)
+            Buffer.BlockCopy(topDownBgra, (h - 1 - y) * stride, dib, headerSize + y * stride, stride);
+        return dib;
+    }
+
+    /// <summary>Copy bytes into a fresh HGLOBAL and hand it to the clipboard; frees it only if the clipboard refused it.</summary>
+    static bool PutClipboard(uint format, byte[] data, string what)
+    {
+        IntPtr h = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)(uint)data.Length);
+        if (h == IntPtr.Zero) { _lastClipError = $"out of memory for {what}"; return false; }
+        IntPtr p = GlobalLock(h);
+        if (p == IntPtr.Zero) { GlobalFree(h); _lastClipError = $"out of memory for {what}"; return false; }
+        Marshal.Copy(data, 0, p, data.Length);
+        GlobalUnlock(h);
+        if (SetClipboardData(format, h) != IntPtr.Zero) return true;
+        _lastClipError = $"SetClipboardData({what}) failed ({Marshal.GetLastWin32Error()})";
+        GlobalFree(h);
+        return false;
+    }
+
+    static bool TrySetClipboard(string text, byte[] dib)
+    {
+        _lastClipError = "another app is holding it";
         for (int attempt = 0; attempt < 15; attempt++)
         {
             // ~1.5s of patience: clipboard contention is routine (a password manager, a clipboard
             // history tool, another paste in flight), and 300ms was short enough to lose races
             // that would have resolved on their own.
-            if (!OpenClipboard(IntPtr.Zero)) { Thread.Sleep(100); continue; }
+            // A real owner window, not NULL: per the docs, EmptyClipboard after OpenClipboard(NULL)
+            // leaves the clipboard ownerless and SetClipboardData may then fail — intermittently.
+            if (!OpenClipboard(_daemonHwnd)) { Thread.Sleep(100); continue; }
+            bool ok = true;
             try
             {
-                EmptyClipboard();
-
-                // CF_DIB wants bottom-up rows and a header in front of the pixels.
-                if (topDownBgra != null && w > 0 && h > 0)
-                {
-                int stride = w * 4;
-                var header = new BITMAPINFOHEADER
-                {
-                    biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
-                    biWidth = w,
-                    biHeight = h,          // positive = bottom-up, which is CF_DIB's convention
-                    biPlanes = 1,
-                    biBitCount = 32,
-                    biCompression = 0,
-                    biSizeImage = (uint)(stride * h),
-                };
-
-                int headerSize = (int)header.biSize;
-                IntPtr hDib = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)(uint)(headerSize + stride * h));
-                if (hDib != IntPtr.Zero)
-                {
-                    IntPtr p = GlobalLock(hDib);
-                    if (p != IntPtr.Zero)
-                    {
-                        Marshal.StructureToPtr(header, p, false);
-                        for (int y = 0; y < h; y++)
-                            Marshal.Copy(topDownBgra, (h - 1 - y) * stride,
-                                         p + headerSize + y * stride, stride);
-                        GlobalUnlock(hDib);
-                        if (SetClipboardData(CF_DIB, hDib) == IntPtr.Zero) GlobalFree(hDib);
-                    }
-                    else GlobalFree(hDib);
-                }
-                }
-
-                byte[] textBytes = Encoding.Unicode.GetBytes((text ?? "") + "\0");
-                IntPtr hTxt = text == null ? IntPtr.Zero : GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)(uint)textBytes.Length);
-                if (hTxt != IntPtr.Zero)
-                {
-                    IntPtr p = GlobalLock(hTxt);
-                    if (p != IntPtr.Zero)
-                    {
-                        Marshal.Copy(textBytes, 0, p, textBytes.Length);
-                        GlobalUnlock(hTxt);
-                        if (SetClipboardData(CF_UNICODETEXT, hTxt) == IntPtr.Zero) GlobalFree(hTxt);
-                    }
-                    else GlobalFree(hTxt);
-                }
-                return true;
+                if (!EmptyClipboard()) { ok = false; _lastClipError = $"EmptyClipboard failed ({Marshal.GetLastWin32Error()})"; }
+                if (dib != null) ok &= PutClipboard(CF_DIB, dib, "image");
+                if (text != null) ok &= PutClipboard(CF_UNICODETEXT, Encoding.Unicode.GetBytes(text + " "), "text");
+                return ok;
             }
-            catch { return false; }
+            catch (Exception ex) { _lastClipError = ex.Message; return false; }
             finally { CloseClipboard(); }
         }
         return false;
@@ -1295,6 +1338,7 @@ static class RegionCapture
             Console.Error.WriteLine("Error: could not create the daemon window.");
             return 1;
         }
+        _daemonHwnd = hwnd;
 
         // Print Screen is the natural key, but it is also the most contested one on Windows:
         // "Use the Print screen key to open screen capture" (Settings > Ease of Access > Keyboard)
@@ -1367,6 +1411,9 @@ static class RegionCapture
     }
 
     static bool _hotCapture, _hotRecord;
+    static IntPtr _daemonHwnd;            // clipboard owner; zero outside the daemon
+    static bool _capturing;               // an overlay is up — see DoCapture
+    static string _lastClipStatus, _lastClipError;
     static int _rearmTicks;
     const int RearmEverySeconds = 60;
 
@@ -1488,7 +1535,7 @@ static class RegionCapture
                 break;
 
             case MENU_REC:
-                ScreenRecorder.StartDetached(_transcribeByDefault ? "--transcribe" : "");
+                ToggleRecording("menu");
                 break;
 
             case MENU_REC_TRANSCRIBE:
@@ -1532,21 +1579,65 @@ static class RegionCapture
     /// _wndProcRef for its own window class, which is why the daemon keeps its delegate in a
     /// separate field — sharing one would leave the daemon's class pointing at a collected
     /// delegate as soon as the first capture finished.
+    ///
+    /// Not re-entrant, and it would be entered twice without the guard: the overlay pumps its own
+    /// GetMessage loop on this thread, which dispatches a second PrtScn's WM_HOTKEY straight back
+    /// here. The nested capture then overwrote the shared desktop buffers, freed them on exit,
+    /// and the outer one crashed cropping null pixels (ArgumentNullException 'src').
     /// </summary>
     static void DoCapture()
     {
+        if (_capturing) { DaemonLog("PrtScn: ignored — overlay already up"); return; }
+        if (RecorderSelecting) { DaemonLog("PrtScn: ignored — recording region selection is up"); return; }
+        _capturing = true;
         DaemonLog("PrtScn: overlay opening");
         try
         {
             string saved = CaptureOnce(null);
             Console.WriteLine(saved != null ? $"captured: {saved}" : "cancelled");
             DaemonLog(saved != null ? $"captured {Path.GetFileName(saved)}" : "cancelled");
+            if (_lastClipStatus != null) DaemonLog(_lastClipStatus);
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"capture failed: {ex.Message}");
             DaemonLog($"capture FAILED: {ex.GetType().Name}: {ex.Message}");
         }
+        finally { _capturing = false; }
+    }
+
+    // The recorder child we last started, and whether it has been seen recording yet. Until then
+    // it is showing its region overlay — and since recorder.pid is written only once ffmpeg is
+    // running, IsRecording is false that whole time, so a second Ctrl+PrtScn used to start a
+    // second recorder (and a third: three "starting recording" lines in 17s in daemon.log).
+    static Process _recChild;
+    static bool _recChildSeenRecording;
+
+    static bool RecorderSelecting
+    {
+        get
+        {
+            if (_recChild == null) return false;
+            try { if (_recChild.HasExited) { _recChild = null; return false; } }
+            catch { _recChild = null; return false; }
+            if (ScreenRecorder.IsRecording) _recChildSeenRecording = true;
+            return !_recChildSeenRecording;
+        }
+    }
+
+    static void ToggleRecording(string source)
+    {
+        if (_capturing) { DaemonLog($"{source}: ignored — capture overlay is up"); return; }
+        if (ScreenRecorder.IsRecording)
+        {
+            DaemonLog($"{source}: stopping recording");
+            ScreenRecorder.Stop();
+            return;
+        }
+        if (RecorderSelecting) { DaemonLog($"{source}: ignored — recording region selection already up"); return; }
+        DaemonLog($"{source}: starting recording");
+        _recChild = ScreenRecorder.StartDetached(RecorderArgs());
+        _recChildSeenRecording = false;
     }
 
     static IntPtr DaemonProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -1563,10 +1654,7 @@ static class RegionCapture
             {
                 // One chord toggles, because reaching for a different key to stop a recording you
                 // started with Ctrl+PrtScn is exactly the moment you fumble it.
-                bool recording = ScreenRecorder.IsRecording;
-                DaemonLog(recording ? "Ctrl+PrtScn: stopping recording" : "Ctrl+PrtScn: starting recording");
-                if (recording) ScreenRecorder.Stop();
-                else ScreenRecorder.StartDetached(_transcribeByDefault ? "--transcribe" : "");
+                ToggleRecording("Ctrl+PrtScn");
                 return IntPtr.Zero;
             }
         }
@@ -1588,9 +1676,8 @@ static class RegionCapture
                     ? "clibridge — RECORDING (right-click to stop)"
                     : "clibridge — PrtScn: region · Ctrl+PrtScn: record");
             }
-            // Not while the overlay is up: the capture runs its own modal loop on this thread,
-            // so this tick cannot fire mid-drag, but a re-arm the instant it ends is pointless.
-            if (++_rearmTicks % RearmEverySeconds == 0 && !_dragging) ArmHotkeys(hWnd);
+            // Not while the overlay is up: its nested message loop dispatches this timer too.
+            if (++_rearmTicks % RearmEverySeconds == 0 && !_capturing) ArmHotkeys(hWnd);
             return IntPtr.Zero;
         }
 

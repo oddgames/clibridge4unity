@@ -177,17 +177,17 @@ namespace clibridge4unity
         }
 
         /// <summary>
-        /// Download the Windows CLI zip from GitHub Releases (matching the package version),
-        /// extract it, and copy the exe into <paramref name="destDir"/>. Handles locked exes via rename-swap.
-        /// Windows-only — macOS/Linux are not supported.
+        /// Download the CLI from GitHub Releases (matching the package version) into <paramref name="destDir"/>:
+        /// the Windows zip (extracted, locked exe handled via rename-swap) or the Linux binary.
+        /// macOS is not supported.
         /// </summary>
         static bool TryDownloadAndInstallCli(string destDir, out string destExe, out string error)
         {
             destExe = null;
             error = null;
 
-#if !UNITY_EDITOR_WIN
-            error = "CLI Bridge auto-install is Windows-only. macOS/Linux are not supported.";
+#if !UNITY_EDITOR_WIN && !UNITY_EDITOR_LINUX
+            error = "CLI Bridge auto-install supports Windows and Linux. macOS is not supported.";
             return false;
 #else
             string version = GetPackageVersion();
@@ -197,8 +197,13 @@ namespace clibridge4unity
                 return false;
             }
 
+#if UNITY_EDITOR_WIN
             const string assetName = "clibridge4unity-win-x64.zip";
             const string exeName = "clibridge4unity.exe";
+#else
+            const string assetName = "clibridge4unity-linux-x64";
+            const string exeName = "clibridge4unity";
+#endif
 
             string url = $"https://github.com/oddgames/clibridge4unity/releases/download/v{version}/{assetName}";
             string tempZip = Path.Combine(Path.GetTempPath(), $"clibridge4unity_install_{Guid.NewGuid():N}.zip");
@@ -207,13 +212,30 @@ namespace clibridge4unity
             try
             {
                 EditorUtility.DisplayProgressBar("CLI Bridge", $"Downloading {assetName} (v{version})...", 0.3f);
+                byte[] bytes;
                 using (var http = new System.Net.Http.HttpClient())
                 {
                     http.Timeout = TimeSpan.FromMinutes(2);
                     http.DefaultRequestHeaders.UserAgent.ParseAdd("clibridge4unity-setup");
-                    var bytes = http.GetByteArrayAsync(url).GetAwaiter().GetResult();
-                    File.WriteAllBytes(tempZip, bytes);
+                    bytes = http.GetByteArrayAsync(url).GetAwaiter().GetResult();
                 }
+
+#if UNITY_EDITOR_LINUX
+                EditorUtility.DisplayProgressBar("CLI Bridge", "Installing...", 0.9f);
+                Directory.CreateDirectory(destDir);
+                destExe = Path.Combine(destDir, exeName);
+                string tempExe = destExe + ".update";
+                File.WriteAllBytes(tempExe, bytes);
+                if (chmod(tempExe, Convert.ToUInt32("755", 8)) != 0)
+                {
+                    error = $"chmod failed on {tempExe} (errno {System.Runtime.InteropServices.Marshal.GetLastWin32Error()})";
+                    return false;
+                }
+                if (File.Exists(destExe)) File.Delete(destExe);
+                File.Move(tempExe, destExe);
+                return true;
+#else
+                File.WriteAllBytes(tempZip, bytes);
 
                 EditorUtility.DisplayProgressBar("CLI Bridge", "Extracting...", 0.7f);
                 Directory.CreateDirectory(tempExtract);
@@ -245,6 +267,7 @@ namespace clibridge4unity
                 if (File.Exists(oldExe)) { try { File.Delete(oldExe); } catch { } }
 
                 return true;
+#endif
             }
             catch (System.Net.Http.HttpRequestException ex)
             {
@@ -264,6 +287,11 @@ namespace clibridge4unity
             }
 #endif
         }
+
+#if UNITY_EDITOR_LINUX
+        [System.Runtime.InteropServices.DllImport("libc.so.6", SetLastError = true)]
+        static extern int chmod(string path, uint mode);
+#endif
 
         static bool TrySafeExtractZip(string zipPath, string destDir, out string error)
         {

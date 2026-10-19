@@ -16,6 +16,7 @@
 !ConsoleUnityBridge.sln
 !pyproject.toml
 !install.ps1
+!install.sh
 !deploy.ps1
 !.gitignore
 !.claude/

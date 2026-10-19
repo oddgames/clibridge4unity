@@ -8,7 +8,7 @@
     <PublishTrimmed>true</PublishTrimmed>
     <PublishReadyToRun>true</PublishReadyToRun>
     <AssemblyName>clibridge4unity</AssemblyName>
-    <Version>1.1.86</Version>
+    <Version>1.1.87</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
@@ -16,6 +16,7 @@
     <Compile Include="..\Package\Editor\Commands\Core\StackTraceMinimizer.cs" Link="StackTraceMinimizer.cs" />
     <Compile Include="..\Package\Editor\Core\FuzzyMatch.cs" Link="FuzzyMatch.cs" />
     <Compile Include="..\Package\Editor\Core\TickSignal.cs" Link="TickSignal.cs" />
+    <Compile Include="..\Package\Editor\Core\X11.cs" Link="X11.cs" />
   </ItemGroup>
 
   <ItemGroup>

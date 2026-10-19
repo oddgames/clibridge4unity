@@ -269,19 +269,10 @@ internal sealed class DllIndex
             }
             if (string.IsNullOrEmpty(version)) return null;
 
-            var candidates = new[]
-            {
-                // Windows Hub
-                $@"C:\Program Files\Unity\Hub\Editor\{version}\Editor\Data\Managed",
-                $@"C:\Program Files (x86)\Unity\Hub\Editor\{version}\Editor\Data\Managed",
-                // macOS Hub
-                $"/Applications/Unity/Hub/Editor/{version}/Unity.app/Contents/Managed",
-                // Linux Hub
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                             "Unity", "Hub", "Editor", version, "Editor", "Data", "Managed"),
-            };
-            foreach (var c in candidates)
-                if (Directory.Exists(c)) return c;
+            string editorDir = UnityInstall.FindEditorDir(version);
+            if (editorDir != null) return Path.Combine(editorDir, "Data", "Managed");
+            string macManaged = $"/Applications/Unity/Hub/Editor/{version}/Unity.app/Contents/Managed";
+            if (Directory.Exists(macManaged)) return macManaged;
         }
         catch { }
         return null;

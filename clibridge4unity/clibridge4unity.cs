@@ -185,6 +185,10 @@ class Program
     private const string GITHUB_REPO = "oddgames/clibridge4unity";
     private const string UPM_PACKAGE_NAME = "au.com.oddgames.clibridge4unity";
 
+    static string InstallCommand => OperatingSystem.IsWindows()
+        ? $"irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex"
+        : $"curl -fsSL https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.sh | sh";
+
     // Exit codes — distinct codes let AI agents branch on failure type without parsing stderr
     const int EXIT_SUCCESS = 0;           // Command succeeded
     const int EXIT_COMMAND_ERROR = 1;     // Command ran but failed (e.g., "not found")
@@ -270,6 +274,8 @@ class Program
     /// </summary>
     static void WakeUnityEditor(string projectPath)
     {
+        // Only Windows throttles a background editor's message pump.
+        if (!OperatingSystem.IsWindows()) return;
         try
         {
             string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
@@ -488,7 +494,7 @@ class Program
             }
         }
         Console.Error.WriteLine();
-        Console.Error.WriteLine("  Run: irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex");
+        Console.Error.WriteLine($"  Run: {InstallCommand}");
         Console.Error.WriteLine();
     }
 
@@ -1044,7 +1050,7 @@ class Program
                 catch (Exception fetchEx)
                 {
                     Console.Error.WriteLine($"Error: could not reach GitHub — {DescribeGitHubFailure(fetchEx)}");
-                    Console.Error.WriteLine($"  Run: irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
+                    Console.Error.WriteLine($"  Run: {InstallCommand}");
                     return EXIT_COMMAND_ERROR;
                 }
             }
@@ -1078,6 +1084,7 @@ class Program
 
             // Asset URLs are deterministic, so the API JSON is optional here. Scan it when we happen
             // to have it (fallback path); otherwise construct the canonical release-download URL.
+            string assetName = OperatingSystem.IsWindows() ? "clibridge4unity.exe" : "clibridge4unity-linux-x64";
             string exeUrl = null;
             int searchStart = 0;
             while (json != null)
@@ -1085,33 +1092,36 @@ class Program
                 int urlIdx = json.IndexOf("\"browser_download_url\"", searchStart, StringComparison.Ordinal);
                 if (urlIdx < 0) break;
                 string url = ExtractJsonString(json.Substring(urlIdx), "browser_download_url");
-                if (url != null && url.EndsWith("clibridge4unity.exe", StringComparison.OrdinalIgnoreCase))
+                if (url != null && url.EndsWith("/" + assetName, StringComparison.OrdinalIgnoreCase))
                 {
                     exeUrl = url;
                     break;
                 }
                 searchStart = urlIdx + 1;
             }
-            exeUrl ??= $"https://github.com/{GITHUB_REPO}/releases/download/v{latestVersion}/clibridge4unity.exe";
+            exeUrl ??= $"https://github.com/{GITHUB_REPO}/releases/download/v{latestVersion}/{assetName}";
 
             if (exeUrl == null)
             {
                 Console.Error.WriteLine("Error: Could not find exe in release assets.");
-                Console.Error.WriteLine($"  Run: irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
+                Console.Error.WriteLine($"  Run: {InstallCommand}");
                 return EXIT_COMMAND_ERROR;
             }
 
             // Download to temp file
             string installDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".clibridge4unity");
-            string exePath = Path.Combine(installDir, "clibridge4unity.exe");
+                OperatingSystem.IsWindows() ? ".clibridge4unity" : ".local/bin");
+            string exePath = Path.Combine(installDir, OperatingSystem.IsWindows() ? "clibridge4unity.exe" : "clibridge4unity");
             string tempPath = exePath + ".update";
 
             Console.WriteLine($"Downloading from GitHub...");
             byte[] exeBytes = http.GetByteArrayAsync(exeUrl).Result;
             Directory.CreateDirectory(installDir);
             File.WriteAllBytes(tempPath, exeBytes);
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(tempPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                    | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
             // Replace current exe: rename current → .old, rename .update → current.
             // If .old is locked by a stale clibridge4unity process, kill it and retry.
@@ -1148,18 +1158,25 @@ class Program
         catch (UnauthorizedAccessException ex)
         {
             Console.Error.WriteLine($"Error: {ex.Message}");
-            Console.Error.WriteLine("  Stale clibridge4unity process holding the file. Recover with:");
-            Console.Error.WriteLine("    Get-Process clibridge4unity -ErrorAction SilentlyContinue | Stop-Process -Force");
-            Console.Error.WriteLine("    Remove-Item \"$env:USERPROFILE\\.clibridge4unity\\clibridge4unity.exe.old\" -Force -ErrorAction SilentlyContinue");
-            Console.Error.WriteLine("    clibridge4unity UPDATE");
-            Console.Error.WriteLine("  Or fall back to a fresh install:");
-            Console.Error.WriteLine($"    irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
+            if (OperatingSystem.IsWindows())
+            {
+                Console.Error.WriteLine("  Stale clibridge4unity process holding the file. Recover with:");
+                Console.Error.WriteLine("    Get-Process clibridge4unity -ErrorAction SilentlyContinue | Stop-Process -Force");
+                Console.Error.WriteLine("    Remove-Item \"$env:USERPROFILE\\.clibridge4unity\\clibridge4unity.exe.old\" -Force -ErrorAction SilentlyContinue");
+                Console.Error.WriteLine("    clibridge4unity UPDATE");
+                Console.Error.WriteLine("  Or fall back to a fresh install:");
+            }
+            else
+            {
+                Console.Error.WriteLine("  No write access to ~/.local/bin. Reinstall with:");
+            }
+            Console.Error.WriteLine($"    {InstallCommand}");
             return EXIT_COMMAND_ERROR;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error: {ex.GetType().Name}: {ex.Message}");
-            Console.Error.WriteLine($"  Run: irm https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1 | iex");
+            Console.Error.WriteLine($"  Run: {InstallCommand}");
             return EXIT_COMMAND_ERROR;
         }
     }
@@ -1929,7 +1946,7 @@ class Program
         // Usage: DISMISS          — list dialogs, send WM_CLOSE to all
         //        DISMISS Yes      — click button labeled "Yes"
         //        DISMISS "Don't Save" — click button with exact label
-        var unityInfo = DetectUnityProcess(projectPath);
+        var unityInfo = DetectUnityProcess(projectPath, fullScan: cmdUpper is "DISMISS" or "KILL" or "OPEN");
         if (command.Equals("DISMISS", StringComparison.OrdinalIgnoreCase))
         {
             var dialogs = unityInfo.Dialogs;
@@ -1992,20 +2009,19 @@ class Program
                     else
                     {
                         Console.Error.WriteLine($"Button \"{targetButton}\" not found. Available: {string.Join(", ", buttons.Select(b => $"\"{b.text}\""))}");
-                        PostMessage(dlg.Hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                        CloseDialog(dlg);
                     }
                 }
                 else
                 {
-                    // No button specified — send WM_CLOSE
-                    PostMessage(dlg.Hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                    CloseDialog(dlg);
                 }
             }
 
             if (targetButton != null)
                 Console.WriteLine($"Clicked \"{targetButton}\" on {dialogs.Count} dialog(s).");
             else
-                Console.WriteLine($"Sent WM_CLOSE to {dialogs.Count} dialog(s).");
+                Console.WriteLine($"Sent {(OperatingSystem.IsWindows() ? "WM_CLOSE" : "WM_DELETE_WINDOW")} to {dialogs.Count} dialog(s).");
             return EXIT_SUCCESS;
         }
 
@@ -2826,13 +2842,19 @@ class Program
             return EXIT_COMMAND_ERROR;
         }
 
-        // Find Unity editor executable
-        string unityExe = FindUnityEditor(requiredVersion);
-        if (unityExe == null)
+        string editorDir = UnityInstall.FindEditorDir(requiredVersion);
+        if (editorDir == null)
         {
             Console.Error.WriteLine($"Error: Unity {requiredVersion} not found.");
-            Console.Error.WriteLine("  Searched: C:\\Program Files\\Unity\\Hub\\Editor\\");
+            Console.Error.WriteLine($"  Searched: {string.Join(", ", UnityInstall.InstallRoots())}");
             return EXIT_COMMAND_ERROR;
+        }
+        string unityExe = UnityInstall.Executable(editorDir);
+
+        if (!OperatingSystem.IsWindows() && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY")))
+        {
+            Console.Error.WriteLine("Error: DISPLAY is not set — the editor needs an X display to open on (e.g. DISPLAY=:7 for an Xvfb).");
+            return EXIT_USAGE_ERROR;
         }
 
         // If Unity is already running with this project, kill it first
@@ -2847,17 +2869,18 @@ class Program
         string fullProjectPath = Path.GetFullPath(projectPath);
         Console.Error.WriteLine($"Launching Unity {requiredVersion} with {projectName}...");
 
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = unityExe,
-            Arguments = $"-projectPath \"{fullProjectPath}\"",
-            UseShellExecute = false,
-            CreateNoWindow = false
-        };
-
         try
         {
-            Process.Start(startInfo);
+            if (OperatingSystem.IsWindows())
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = unityExe,
+                    Arguments = $"-projectPath \"{fullProjectPath}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = false
+                });
+            else
+                LinuxProc.StartDetached(unityExe, "-projectPath", fullProjectPath);
             Console.WriteLine($"Unity {requiredVersion} launched for {projectName}");
             Console.WriteLine("Waiting for bridge to start...");
 
@@ -2918,38 +2941,6 @@ class Program
         }
     }
 
-    static string FindUnityEditor(string version)
-    {
-        // Search Unity Hub installation paths
-        string[] searchPaths = {
-            Path.Combine("C:", "Program Files", "Unity", "Hub", "Editor"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Unity", "Hub", "Editor"),
-        };
-
-        foreach (var basePath in searchPaths)
-        {
-            if (!Directory.Exists(basePath)) continue;
-
-            // Exact version match
-            string versionPath = Path.Combine(basePath, version, "Editor", "Unity.exe");
-            if (File.Exists(versionPath)) return versionPath;
-
-            // Try without the revision suffix (e.g., 6000.3.10f1 -> 6000.3.10)
-            string baseVersion = version.Split('f', 'a', 'b', 'p')[0];
-            foreach (var dir in Directory.GetDirectories(basePath))
-            {
-                string dirName = Path.GetFileName(dir);
-                if (dirName.StartsWith(baseVersion))
-                {
-                    string exe = Path.Combine(dir, "Editor", "Unity.exe");
-                    if (File.Exists(exe)) return exe;
-                }
-            }
-        }
-
-        return null;
-    }
-
     static void SaveCommandHistory(string command, string data, string response)
     {
         try
@@ -2986,13 +2977,19 @@ class Program
 
     /// <summary>
     /// Sub-millisecond probe: is anything actually serving this pipe? Named pipes live in the
-    /// Win32 \\.\pipe\ namespace, so File.Exists answers without opening a connection. The whole
-    /// point is to avoid paying ~5s for DetectUnityProcess (window enum + Restart-Manager file
-    /// lookup) when the bridge clearly isn't listening.
+    /// Win32 \\.\pipe\ namespace, so File.Exists answers without opening a connection. On Linux
+    /// the pipe is a Unix socket at $TMPDIR/CoreFxPipe_&lt;name&gt; (Mono and .NET agree on the
+    /// path). The whole point is to avoid paying ~5s for DetectUnityProcess (window enum +
+    /// lockfile owner lookup) when the bridge clearly isn't listening.
     /// </summary>
     static bool BridgePipeAlive(string pipeName)
     {
-        try { return File.Exists($@"\\.\pipe\{pipeName}"); }
+        try
+        {
+            return OperatingSystem.IsWindows()
+                ? File.Exists($@"\\.\pipe\{pipeName}")
+                : LinuxProc.UnixSocketListening(Path.Combine(Path.GetTempPath(), "CoreFxPipe_" + pipeName));
+        }
         catch { return false; }
     }
 
@@ -4318,9 +4315,77 @@ class Program
         return sb.ToString();
     }
 
+    /// <summary>A visible top-level window of a Unity process: an HWND on Windows, an X11 client window on Linux.</summary>
+    class EditorWindow
+    {
+        public IntPtr Hwnd;
+        public X11.Window X;
+        public uint Pid;
+        public string Title;
+        public string ClassName;
+        public RECT Rect;
+    }
+
+    static HashSet<uint> UnityPids()
+        => Process.GetProcessesByName("Unity").Select(p => (uint)p.Id).ToHashSet();
+
+    static bool IsMainEditorTitle(string title)
+        => title.Contains(" - Unity ") || title.Contains(" - SAFE MODE -");
+
+    static List<EditorWindow> ListEditorWindows(ICollection<uint> pids)
+    {
+        var windows = new List<EditorWindow>();
+        if (pids.Count == 0) return windows;
+        if (OperatingSystem.IsWindows())
+        {
+            EnumWindows((hwnd, _) =>
+            {
+                if (!IsWindowVisible(hwnd)) return true;
+                GetWindowThreadProcessId(hwnd, out uint pid);
+                if (!pids.Contains(pid)) return true;
+                var title = new StringBuilder(512);
+                GetWindowText(hwnd, title, 512);
+                if (title.Length == 0) return true;
+                var cls = new StringBuilder(256);
+                GetClassName(hwnd, cls, 256);
+                GetWindowRect(hwnd, out RECT rect);
+                windows.Add(new EditorWindow { Hwnd = hwnd, Pid = pid, Title = title.ToString(), ClassName = cls.ToString(), Rect = rect });
+                return true;
+            }, IntPtr.Zero);
+            return windows;
+        }
+
+        // Each editor may run on its own X display (one Xvfb per editor); its own environ says which.
+        foreach (var byDisplay in pids.GroupBy(pid => LinuxProc.Environ((int)pid, "DISPLAY")))
+        {
+            if (string.IsNullOrEmpty(byDisplay.Key)) continue;
+            foreach (var w in X11.ListWindows(byDisplay.Key, byDisplay.ToHashSet()))
+                windows.Add(new EditorWindow
+                {
+                    X = w, Pid = w.Pid, Title = w.Title, ClassName = w.WmClass,
+                    Rect = new RECT { Left = w.X, Top = w.Y, Right = w.X + w.Width, Bottom = w.Y + w.Height },
+                });
+        }
+        return windows;
+    }
+
+    static string MainWindowTitle(Process proc)
+    {
+        if (OperatingSystem.IsWindows())
+            return proc.MainWindowHandle != IntPtr.Zero && !string.IsNullOrEmpty(proc.MainWindowTitle) ? proc.MainWindowTitle : null;
+        return ListEditorWindows(new[] { (uint)proc.Id }).FirstOrDefault(w => IsMainEditorTitle(w.Title))?.Title;
+    }
+
+    static void CloseDialog(DialogInfo dlg)
+    {
+        if (OperatingSystem.IsWindows()) PostMessage(dlg.Hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        else X11.Close(dlg.X);
+    }
+
     class DialogInfo
     {
         public IntPtr Hwnd;
+        public X11.Window X;
         public string Title;
         public RECT Rect;
         public List<DialogControl> Controls = new List<DialogControl>();
@@ -4471,7 +4536,7 @@ class Program
 
     /// <summary>
     /// Enumerate every non-batch Unity.exe process on the machine with its project path
-    /// (read via WMI from the `-projectPath` command-line arg) and main-window title.
+    /// (read from the `-projectPath` command-line arg) and main-window title.
     /// Used to tell the user exactly which Unity instances are open when auto-detect misses.
     /// </summary>
     internal static List<UnityWorkspaceInfo> EnumerateUnityWorkspaces()
@@ -4486,10 +4551,7 @@ class Program
                 try
                 {
                     uint pid = (uint)proc.Id;
-                    var info = new UnityWorkspaceInfo { Pid = pid };
-                    if (proc.MainWindowHandle != IntPtr.Zero && !string.IsNullOrEmpty(proc.MainWindowTitle))
-                        info.WindowTitle = proc.MainWindowTitle;
-                    byPid[pid] = info;
+                    byPid[pid] = new UnityWorkspaceInfo { Pid = pid, WindowTitle = MainWindowTitle(proc) };
                 }
                 catch { }
             }
@@ -4534,13 +4596,20 @@ class Program
     }
 
     /// <summary>
-    /// Returns (pid, commandLine) for every Unity.exe process, obtained via `wmic`.
-    /// Works around System.Management being broken under trimmed single-file publish.
+    /// Returns (pid, commandLine) for every Unity process: `wmic` on Windows (System.Management
+    /// breaks under trimmed single-file publish), /proc/&lt;pid&gt;/cmdline on Linux.
     /// </summary>
     static List<(uint pid, string cmdLine)> ReadUnityCommandLines()
     {
         var results = new List<(uint, string)>();
         bool diag = Environment.GetEnvironmentVariable("CLIBRIDGE_DEBUG") == "1";
+
+        if (!OperatingSystem.IsWindows())
+        {
+            foreach (var proc in Process.GetProcessesByName("Unity"))
+                results.Add(((uint)proc.Id, LinuxProc.CommandLine(proc.Id)));
+            return results;
+        }
 
         try
         {
@@ -4992,7 +5061,7 @@ class Program
         return values.ToArray();
     }
 
-    static UnityProcessInfo DetectUnityProcess(string projectPath)
+    static UnityProcessInfo DetectUnityProcess(string projectPath, bool fullScan = false)
     {
         var info = new UnityProcessInfo { State = UnityProcessState.NotRunning };
         string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
@@ -5001,7 +5070,8 @@ class Program
         // Early-out: if THIS project's bridge pipe is being served, state is unambiguously Running.
         // Skip the slow path (Restart-Manager lookup + per-window SendMessageTimeout enumeration
         // across every Unity on the machine) — each can take seconds. ~1ms instead of ~5s.
-        if (BridgePipeAlive(GeneratePipeName(projectPath)))
+        // It leaves Pids and Dialogs empty, so KILL/OPEN/DISMISS never take it (a modal blocks the main thread, not the pipe).
+        if (!fullScan && BridgePipeAlive(GeneratePipeName(projectPath)))
         {
             info.State = UnityProcessState.Running;
             return info;
@@ -5020,7 +5090,7 @@ class Program
         // Check lockfile — Unity creates this while project is open
         bool lockfileExists = File.Exists(lockfilePath);
         bool lockfileHeld = false;
-        if (lockfileExists)
+        if (lockfileExists && OperatingSystem.IsWindows())
         {
             try
             {
@@ -5040,12 +5110,23 @@ class Program
         bool foundProject = false;
         string fullProjectPath = Path.GetFullPath(projectPath).TrimEnd('\\', '/');
 
-        // AUTHORITATIVE: ask Windows Restart Manager which PIDs hold Temp/UnityLockfile.
-        // Works regardless of project-name collisions, path casing, or command-line quirks.
-        // Done first so subsequent passes can skip if RM already nailed it.
+        // AUTHORITATIVE: which PIDs hold Temp/UnityLockfile open (Restart Manager on Windows,
+        // /proc/<pid>/fd on Linux). Works regardless of project-name collisions, path casing, or
+        // command-line quirks. Done first so subsequent passes can skip if it already nailed it.
         // Skip Restart Manager when the lockfile is stale (exists but no one holds it). RM is the
         // slowest piece (serializes against the Windows SCM RPC) and would return nothing anyway.
-        var lockfileOwners = (lockfileExists && lockfileHeld) ? GetPidsHoldingFile(lockfilePath) : new List<uint>();
+        List<uint> lockfileOwners;
+        if (OperatingSystem.IsWindows())
+        {
+            lockfileOwners = (lockfileExists && lockfileHeld) ? GetPidsHoldingFile(lockfilePath) : new List<uint>();
+        }
+        else
+        {
+            lockfileOwners = lockfileExists
+                ? LinuxProc.PidsHoldingFile(lockfilePath, Process.GetProcessesByName("Unity").Select(p => p.Id))
+                : new List<uint>();
+            lockfileHeld = lockfileOwners.Count > 0;
+        }
         foreach (uint pid in lockfileOwners)
         {
             try
@@ -5056,8 +5137,7 @@ class Program
                     allUnityPids.Add(pid);
                     unityPids.Add(pid);
                     foundProject = true;
-                    if (proc.MainWindowHandle != IntPtr.Zero && !string.IsNullOrEmpty(proc.MainWindowTitle))
-                        info.TargetedWindowTitle = proc.MainWindowTitle;
+                    info.TargetedWindowTitle = MainWindowTitle(proc) ?? info.TargetedWindowTitle;
                 }
             }
             catch { }
@@ -5070,14 +5150,15 @@ class Program
                 try
                 {
                     allUnityPids.Add((uint)proc.Id);
-                    if (proc.MainWindowHandle != IntPtr.Zero && !string.IsNullOrEmpty(proc.MainWindowTitle))
+                    string mainTitle = MainWindowTitle(proc);
+                    if (mainTitle != null)
                     {
-                        info.OpenProjects.Add(proc.MainWindowTitle);
-                        if (proc.MainWindowTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase))
+                        info.OpenProjects.Add(mainTitle);
+                        if (mainTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase))
                         {
                             foundProject = true;
                             unityPids.Add((uint)proc.Id);
-                            info.TargetedWindowTitle = proc.MainWindowTitle;
+                            info.TargetedWindowTitle = mainTitle;
                         }
                     }
                 }
@@ -5086,8 +5167,7 @@ class Program
 
             // Command-line pass: match by `-projectPath`. Needed when the window title
             // isn't available yet (early load, import, upgrade dialog) AND to catch Unity 6's
-            // secondary scripting-runtime process for this project. Uses `wmic` because
-            // System.Management is unreliable under trimmed single-file publish.
+            // secondary scripting-runtime process for this project.
             if (allUnityPids.Count > 0)
             {
                 foreach (var (pid, cmdLine) in ReadUnityCommandLines())
@@ -5104,57 +5184,25 @@ class Program
                         }
 
                         // Extract -logFile path for this specific instance (authoritative per-workspace log)
-                        if (info.EditorLogPath == null)
-                        {
-                            var logMatch = System.Text.RegularExpressions.Regex.Match(
-                                cmdLine, @"-logFile\s+(""([^""]+)""|(\S+))",
-                                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                            if (logMatch.Success)
-                            {
-                                string logPath = logMatch.Groups[2].Success ? logMatch.Groups[2].Value : logMatch.Groups[3].Value;
-                                if (logPath != "-" && !string.IsNullOrWhiteSpace(logPath))
-                                    info.EditorLogPath = Path.GetFullPath(logPath);
-                            }
-                        }
+                        info.EditorLogPath ??= LogFileArg(cmdLine);
                     }
                 }
             }
 
             // Enumerate visible windows, but ONLY from PIDs matched to this project.
-            if (unityPids.Count > 0)
+            foreach (var win in ListEditorWindows(unityPids))
             {
-                var seenHwnds = new HashSet<IntPtr>();
-                EnumWindows((hwnd, _) =>
+                if (IsMainEditorTitle(win.Title)) continue;
+                // Skip undocked editor panels: same class as the main window on Windows, not dialog-typed on X11.
+                if (win.ClassName == "UnityContainerWndClass" || (win.X != null && !win.X.Dialog)) continue;
+
+                // Any other visible Unity window is potentially a dialog
+                if (win.Rect.Right - win.Rect.Left > 50 && win.Rect.Bottom - win.Rect.Top > 30)
                 {
-                    if (!IsWindowVisible(hwnd)) return true;
-                    GetWindowThreadProcessId(hwnd, out uint pid);
-                    if (!unityPids.Contains(pid)) return true;
-
-                    var sb = new StringBuilder(256);
-                    GetWindowText(hwnd, sb, 256);
-                    string title = sb.ToString();
-                    if (string.IsNullOrEmpty(title)) return true;
-
-                    // Skip the main Unity editor window (contains " - Unity" or "SAFE MODE")
-                    if (title.Contains(" - Unity ") || title.Contains(" - SAFE MODE -")) return true;
-
-                    // Skip undocked editor panels (same class as main window)
-                    var classBuf = new StringBuilder(256);
-                    GetClassName(hwnd, classBuf, 256);
-                    if (classBuf.ToString() == "UnityContainerWndClass") return true;
-
-                    // Any other visible Unity window is potentially a dialog
-                    GetWindowRect(hwnd, out RECT rect);
-                    int w = rect.Right - rect.Left;
-                    int h = rect.Bottom - rect.Top;
-                    if (w > 50 && h > 30 && seenHwnds.Add(hwnd))
-                    {
-                        var dlg = new DialogInfo { Hwnd = hwnd, Title = title, Rect = rect };
-                        EnumerateChildControls(hwnd, dlg.Controls);
-                        info.Dialogs.Add(dlg);
-                    }
-                    return true;
-                }, IntPtr.Zero);
+                    var dlg = new DialogInfo { Hwnd = win.Hwnd, X = win.X, Title = win.Title, Rect = win.Rect };
+                    if (OperatingSystem.IsWindows()) EnumerateChildControls(win.Hwnd, dlg.Controls);
+                    info.Dialogs.Add(dlg);
+                }
             }
         }
         catch { }
@@ -5207,33 +5255,17 @@ class Program
 
         info.State = UnityProcessState.Running;
 
-        if (unityPids.Count > 0)
+        // Detect long-running operations by window title
+        // "Importing" = asset import, "Compiling" = shader/script compile
+        // Skip transient states: "Reloading Domain", "Hold on...", "Loading"
+        var busyWindow = ListEditorWindows(unityPids).FirstOrDefault(w =>
+            w.Title.StartsWith("Importing", StringComparison.OrdinalIgnoreCase) ||
+            w.Title.StartsWith("Building", StringComparison.OrdinalIgnoreCase) ||
+            w.Title.StartsWith("Compiling", StringComparison.OrdinalIgnoreCase));
+        if (busyWindow != null)
         {
-            var titleBuf = new StringBuilder(512);
-            EnumWindows((hwnd, _) =>
-            {
-                if (!IsWindowVisible(hwnd)) return true;
-                GetWindowThreadProcessId(hwnd, out uint pid);
-                if (!unityPids.Contains(pid)) return true;
-
-                titleBuf.Clear();
-                GetWindowText(hwnd, titleBuf, 512);
-                string title = titleBuf.ToString();
-
-                // Detect long-running operations by window title
-                // "Importing" = asset import, "Compiling" = shader/script compile
-                // Skip transient states: "Reloading Domain", "Hold on...", "Loading"
-                if (!string.IsNullOrEmpty(title) &&
-                    (title.StartsWith("Importing", StringComparison.OrdinalIgnoreCase) ||
-                     title.StartsWith("Building", StringComparison.OrdinalIgnoreCase) ||
-                     title.StartsWith("Compiling", StringComparison.OrdinalIgnoreCase)))
-                {
-                    info.State = UnityProcessState.Importing;
-                    info.ImportStatus = title;
-                    return false;
-                }
-                return true;
-            }, IntPtr.Zero);
+            info.State = UnityProcessState.Importing;
+            info.ImportStatus = busyWindow.Title;
         }
 
         // Only check log files for errors when Unity is busy (can't use pipe)
@@ -5420,7 +5452,7 @@ class Program
 
     /// EDITORLOG — dump/tail Unity's Editor.log file from disk (CLI-side, no pipe). Resolves the
     /// per-instance log (-logFile arg via process detection, else header-matched scan, else the
-    /// default %LOCALAPPDATA%\Unity\Editor\Editor.log), then prints a tail — optionally filtered
+    /// default Editor.log in %LOCALAPPDATA%\Unity\Editor or ~/.config/unity3d), then prints a tail — optionally filtered
     /// to error lines or a grep pattern. Opens with FileShare.ReadWrite so it reads even while
     /// Unity holds the file open (during import/compile, or on a busy clone).
     ///   EDITORLOG            last ~200 lines        EDITORLOG errors     error/exception/fail lines
@@ -5542,6 +5574,32 @@ class Program
         return s.Count == 0 ? 0 : (s.Count % 2 == 1 ? s[s.Count / 2] : (s[s.Count / 2 - 1] + s[s.Count / 2]) / 2);
     }
 
+    static string LogFileArg(string cmdLine)
+    {
+        var logMatch = System.Text.RegularExpressions.Regex.Match(
+            cmdLine, @"-logFile\s+(""([^""]+)""|(\S+))",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!logMatch.Success) return null;
+        string logPath = logMatch.Groups[2].Success ? logMatch.Groups[2].Value : logMatch.Groups[3].Value;
+        return logPath != "-" && !string.IsNullOrWhiteSpace(logPath) ? Path.GetFullPath(logPath) : null;
+    }
+
+    /// <summary>The -logFile of the editor launched on this project. Process detection skips the
+    /// command-line pass whenever the bridge pipe answers, so EDITORLOG reads it itself.</summary>
+    static string LaunchLogFile(string projectPath)
+    {
+        string fullProjectPath = Path.GetFullPath(projectPath).TrimEnd('\\', '/');
+        foreach (var (_, cmdLine) in ReadUnityCommandLines())
+        {
+            if (cmdLine.Contains("-batchMode", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!cmdLine.Contains(fullProjectPath, StringComparison.OrdinalIgnoreCase) &&
+                !cmdLine.Contains(fullProjectPath.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase)) continue;
+            string logPath = LogFileArg(cmdLine);
+            if (logPath != null) return logPath;
+        }
+        return null;
+    }
+
     static int HandleEditorLog(string projectPath, UnityProcessInfo unityInfo, string data)
     {
         // Resolve the log path, most-specific first. Track HOW it was resolved: the last step is a
@@ -5549,20 +5607,18 @@ class Program
         // launched with -logFile. Whoever opened first owns it, so the file can easily belong to a
         // different project — reporting its contents as this project's is worse than saying nothing.
         bool logIsAttributed = true;
-        string logPath = unityInfo?.EditorLogPath;
+        string logPath = unityInfo?.EditorLogPath ?? LaunchLogFile(projectPath);
         if (logPath == null || !File.Exists(logPath))
             logPath = FindEditorLogForProject(projectPath);
         if (logPath == null || !File.Exists(logPath))
         {
-            string fallback = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Unity", "Editor", "Editor.log");
+            string fallback = Path.Combine(UnityInstall.EditorLogDir, "Editor.log");
             if (File.Exists(fallback)) { logPath = fallback; logIsAttributed = false; }
         }
         if (logPath == null || !File.Exists(logPath))
         {
             Console.Error.WriteLine("Error: No Editor.log found for this project.");
-            Console.Error.WriteLine("       Looked for a -logFile path, a header-matching Editor*.log, and the default %LOCALAPPDATA%\\Unity\\Editor\\Editor.log.");
+            Console.Error.WriteLine($"       Looked for a -logFile path, a header-matching Editor*.log, and the default {Path.Combine(UnityInstall.EditorLogDir, "Editor.log")}.");
             Console.Error.WriteLine("       If this is a clone launched with -logFile <path>, open it once so the log exists, or pass -d <cloneProjectPath>.");
             return EXIT_COMMAND_ERROR;
         }
@@ -5984,12 +6040,11 @@ class Program
     {
         try
         {
-            string editorLogDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Unity", "Editor");
+            string editorLogDir = UnityInstall.EditorLogDir;
             if (!Directory.Exists(editorLogDir)) return null;
 
-            string absProject = Path.GetFullPath(projectPath).Replace("/", "\\").TrimEnd('\\');
+            string absProject = Path.GetFullPath(projectPath).TrimEnd('\\', '/');
+            if (OperatingSystem.IsWindows()) absProject = absProject.Replace("/", "\\");
 
             // Unity's real log names: Editor.log, Editor-prev.log, Editor-1.log, Editor-2.log...
             // User backups (e.g. "Editor - Copy.log") contain spaces — exclude them.
@@ -6469,38 +6524,33 @@ class Program
     {
         string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
 
-        IntPtr previousWindow = GetForegroundWindow();
-        var titleBuf = new StringBuilder(256);
-        GetWindowText(previousWindow, titleBuf, 256);
-        string previousTitle = titleBuf.ToString();
-
-        // Find Unity editor windows matching this project
-        var unityWindows = new List<IntPtr>();
-        EnumWindows((hwnd, _) =>
-        {
-            if (!IsWindowVisible(hwnd)) return true;
-            var sb = new StringBuilder(256);
-            GetWindowText(hwnd, sb, 256);
-            string title = sb.ToString();
-            if (title.Contains(" - Unity") && title.Contains(projectName, StringComparison.OrdinalIgnoreCase))
-            {
-                GetWindowThreadProcessId(hwnd, out uint pid);
-                try
-                {
-                    var proc = Process.GetProcessById((int)pid);
-                    if (proc.ProcessName == "Unity")
-                        unityWindows.Add(hwnd);
-                }
-                catch { }
-            }
-            return true;
-        }, IntPtr.Zero);
-
-        if (unityWindows.Count == 0)
+        var editorWindows = ListEditorWindows(UnityPids())
+            .Where(w => w.Title.Contains(" - Unity") && w.Title.Contains(projectName, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (editorWindows.Count == 0)
         {
             Console.Error.WriteLine($"Error: No Unity window found for project '{projectName}'");
             return EXIT_CONNECTION;
         }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            foreach (var w in editorWindows) X11.Activate(w.X);
+            if (sendRefresh)
+            {
+                Thread.Sleep(500); // let Unity process the focus change
+                X11.SendCtrlR(editorWindows[0].X.Display);
+                Console.Error.WriteLine("Sent Ctrl+R (asset refresh)");
+            }
+            Console.WriteLine($"Woke {editorWindows.Count} Unity window(s)");
+            return EXIT_SUCCESS;
+        }
+
+        IntPtr previousWindow = GetForegroundWindow();
+        var titleBuf = new StringBuilder(256);
+        GetWindowText(previousWindow, titleBuf, 256);
+        string previousTitle = titleBuf.ToString();
+        var unityWindows = editorWindows.Select(w => w.Hwnd).ToList();
 
         // Attach to foreground thread to bypass SetForegroundWindow restrictions
         uint foregroundThreadId = GetWindowThreadProcessId(previousWindow, out _);
@@ -7194,69 +7244,46 @@ class Program
     {
         // Find Unity's main window
         string projectName = projectPath != null ? Path.GetFileName(Path.GetFullPath(projectPath)) : null;
-        IntPtr hwnd = IntPtr.Zero;
-
-        EnumWindows((h, _) =>
+        EditorWindow target = null;
+        foreach (var w in ListEditorWindows(UnityPids()))
         {
-            if (!IsWindowVisible(h)) return true;
-            var sb = new StringBuilder(256);
-            GetWindowText(h, sb, 256);
-            string title = sb.ToString();
-            if (!title.Contains("Unity") || !title.Contains(" - ")) return true;
-            GetWindowThreadProcessId(h, out uint pid);
-            try
+            if (!w.Title.Contains("Unity") || !w.Title.Contains(" - ")) continue;
+            if (projectName != null && w.Title.Contains(projectName, StringComparison.OrdinalIgnoreCase))
             {
-                var proc = Process.GetProcessById((int)pid);
-                if (proc.ProcessName != "Unity") return true;
-                if (projectName != null && title.Contains(projectName, StringComparison.OrdinalIgnoreCase))
-                {
-                    hwnd = h;
-                    return false; // exact match, stop
-                }
-                if (hwnd == IntPtr.Zero) hwnd = h; // fallback to first Unity window
+                target = w;
+                break;
             }
-            catch { }
-            return true;
-        }, IntPtr.Zero);
+            target ??= w; // fallback to first Unity window
+        }
 
-        if (hwnd == IntPtr.Zero)
+        if (target == null)
         {
             Console.Error.WriteLine("Error: Could not find Unity editor window");
             return EXIT_CONNECTION;
         }
 
-        // Get window dimensions
-        GetWindowRect(hwnd, out RECT rect);
-        int width = rect.Right - rect.Left;
-        int height = rect.Bottom - rect.Top;
+        int width = target.Rect.Right - target.Rect.Left;
+        int height = target.Rect.Bottom - target.Rect.Top;
         if (width <= 0 || height <= 0)
         {
             Console.Error.WriteLine($"Error: Invalid window rect: {width}x{height}");
             return EXIT_COMMAND_ERROR;
         }
 
-        // PrintWindow capture (works even when Unity is in background)
-        IntPtr winDC = GetDC(hwnd);
-        IntPtr memDC = CreateCompatibleDC(winDC);
-        IntPtr bitmap = CreateCompatibleBitmap(winDC, width, height);
-        IntPtr oldBmp = SelectObject(memDC, bitmap);
-        PrintWindow(hwnd, memDC, 2 /* PW_RENDERFULLCONTENT */);
-
-        // Read pixels as top-down (negative biHeight) for PNG output
-        var bmi = new BITMAPINFO();
-        bmi.bmiHeader.biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>();
-        bmi.bmiHeader.biWidth = width;
-        bmi.bmiHeader.biHeight = -height; // negative = top-down (correct for PNG)
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        byte[] pixels = new byte[width * height * 4];
-        GetDIBits(memDC, bitmap, 0, (uint)height, pixels, ref bmi, 0);
-
-        // Cleanup GDI
-        SelectObject(memDC, oldBmp);
-        DeleteObject(bitmap);
-        DeleteDC(memDC);
-        ReleaseDC(hwnd, winDC);
+        byte[] pixels;
+        if (OperatingSystem.IsWindows())
+        {
+            pixels = PrintWindowPixels(target.Hwnd, width, height);
+        }
+        else
+        {
+            (pixels, width, height) = X11.Capture(target.X);
+            if (pixels == null)
+            {
+                Console.Error.WriteLine($"Error: Unity window is off-screen on X display {target.X.Display}");
+                return EXIT_COMMAND_ERROR;
+            }
+        }
 
         // Downscale if larger than max dimension to keep PNGs small (4K → ~1280px)
         const int MAX_DIM = 1280;
@@ -7284,6 +7311,31 @@ class Program
 
         ShowNotification("Screenshot", $"Captured {outW}x{outH}", outputPath);
         return EXIT_SUCCESS;
+    }
+
+    /// <summary>Top-down BGRA pixels of the window via PrintWindow (works even when Unity is in background).</summary>
+    static byte[] PrintWindowPixels(IntPtr hwnd, int width, int height)
+    {
+        IntPtr winDC = GetDC(hwnd);
+        IntPtr memDC = CreateCompatibleDC(winDC);
+        IntPtr bitmap = CreateCompatibleBitmap(winDC, width, height);
+        IntPtr oldBmp = SelectObject(memDC, bitmap);
+        PrintWindow(hwnd, memDC, 2 /* PW_RENDERFULLCONTENT */);
+
+        var bmi = new BITMAPINFO();
+        bmi.bmiHeader.biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>();
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height; // negative = top-down (correct for PNG)
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        byte[] pixels = new byte[width * height * 4];
+        GetDIBits(memDC, bitmap, 0, (uint)height, pixels, ref bmi, 0);
+
+        SelectObject(memDC, oldBmp);
+        DeleteObject(bitmap);
+        DeleteDC(memDC);
+        ReleaseDC(hwnd, winDC);
+        return pixels;
     }
 
     /// <summary>Nearest-neighbor downscale of a top-down BGRA buffer.</summary>
@@ -7338,6 +7390,7 @@ class Program
 
     static void ShowNotification(string title, string message, string imagePath = null)
     {
+        if (!OperatingSystem.IsWindows()) return;
         try
         {
             // Windows toast notification with optional image

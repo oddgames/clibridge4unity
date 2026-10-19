@@ -102,7 +102,7 @@ namespace clibridge4unity
         {
             EnsurePaths();
             if (_projectRoot == null) return null;
-            return $"$WORKSPACE={_projectRoot.Replace('/', '\\')}";
+            return $"$WORKSPACE={_projectRoot.Replace('/', System.IO.Path.DirectorySeparatorChar)}";
         }
 
         /// <summary>

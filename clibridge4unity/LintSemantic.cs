@@ -53,10 +53,10 @@ internal static class LintSemantic
             if (string.IsNullOrEmpty(version))
                 return (null, null, null, false, null, null, "Could not read Unity version.");
 
-            string editorRoot = FindEditorRoot(version);
+            string editorRoot = UnityInstall.FindEditorDir(version);
             if (editorRoot == null)
                 return (null, null, null, false, null, null,
-                        $"Unity {version} not installed under C:\\Program Files\\Unity\\Hub\\Editor.");
+                        $"Unity {version} not installed under {string.Join(" or ", UnityInstall.InstallRoots())}.");
 
             string engineDll = Path.Combine(editorRoot, "Data", "Managed", "UnityEngine", "UnityEngine.CoreModule.dll");
             string projSettingsAsset = Path.Combine(projectPath, "ProjectSettings", "ProjectSettings.asset");
@@ -125,7 +125,8 @@ internal static class LintSemantic
                 }
                 else
                 {
-                    AddDir(Path.Combine(editorRoot, "Data", "MonoBleedingEdge", "lib", "mono", "unityjit-win32"));
+                    AddDir(Path.Combine(editorRoot, "Data", "MonoBleedingEdge", "lib", "mono",
+                        OperatingSystem.IsWindows() ? "unityjit-win32" : "unityjit-linux"));
                 }
             }
             // 2) Unity engine + editor modules. Filter to UnityEngine.*/UnityEditor.* only —
@@ -391,34 +392,6 @@ internal static class LintSemantic
         return null;
     }
 
-    /// <summary>Returns the inner `Editor/` directory containing `Data/` — e.g.
-    /// `C:\Program Files\Unity\Hub\Editor\6000.3.10f1\Editor`. All BCL/engine paths
-    /// hang off `<this>/Data/`.</summary>
-    static string FindEditorRoot(string version)
-    {
-        string[] bases = {
-            @"C:\Program Files\Unity\Hub\Editor",
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Unity", "Hub", "Editor"),
-        };
-        foreach (var b in bases)
-        {
-            if (!Directory.Exists(b)) continue;
-            string exact = Path.Combine(b, version, "Editor");
-            if (Directory.Exists(Path.Combine(exact, "Data"))) return exact;
-            string baseV = version.Split('f', 'a', 'b', 'p')[0];
-            foreach (var dir in Directory.GetDirectories(b))
-            {
-                string n = Path.GetFileName(dir);
-                if (n.StartsWith(baseV))
-                {
-                    string editorDir = Path.Combine(dir, "Editor");
-                    if (Directory.Exists(Path.Combine(editorDir, "Data"))) return editorDir;
-                }
-            }
-        }
-        return null;
-    }
-
     /// <summary>Parse ProjectSettings.asset YAML for `scriptingDefineSymbols` (all build targets, deduped).
     /// Format: `  scriptingDefineSymbols:` header followed by `    <buildTarget>: A;B;C` lines.
     /// Strict: only accepts the exact platform-keyed indent pattern to avoid leaking Color values etc.</summary>
@@ -608,7 +581,11 @@ internal static class LintSemantic
     {
         var symbols = new List<string>(builtin);
         symbols.AddRange(user);
-        if (IsEditorScope(file)) symbols.Add("UNITY_EDITOR");
+        if (IsEditorScope(file))
+        {
+            symbols.Add("UNITY_EDITOR");
+            symbols.Add(OperatingSystem.IsWindows() ? "UNITY_EDITOR_WIN" : OperatingSystem.IsMacOS() ? "UNITY_EDITOR_OSX" : "UNITY_EDITOR_LINUX");
+        }
         return CSharpParseOptions.Default
             .WithLanguageVersion(LanguageVersion.Latest)
             .WithPreprocessorSymbols(symbols);
