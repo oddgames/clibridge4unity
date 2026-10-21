@@ -626,8 +626,8 @@ namespace clibridge4unity
                 tex.Apply();
                 RenderTexture.active = prev;
 
-                // GrabPixels returns the image upside down where UVs start at the top (D3D), upright on OpenGL.
-                if (SystemInfo.graphicsUVStartsAtTop)
+                // GrabPixels returns the view bottom row first on every editor backend: D3D, and
+                // OpenGL Core too (Linux runner seats launched with -force-glcore came out upside down).
                 {
                     var pixels = tex.GetPixels32();
                     var flipped = new Color32[pixels.Length];
