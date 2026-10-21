@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.1.88 — 2026-10-21
+
+## v1.1.88
+
+### Fixed
+- **Play gate prompted on every command when the CLI ran under Git Bash `timeout` (or `env`, `nohup`, …).** MSYS wrappers exec away the bash between them and Claude Code, so the window-identity walk anchored on the wrapper and every call got a new `peer-` id. The agent's own PLAY was then owned by a dead id, each later command was gated as a stranger's, and STOP was refused as "not yours". The window id now comes from `CLAUDE_PID` first (same id as before when the chain was intact), the wrappers are skipped, and the walk stops at an exited parent instead of anchoring on a dead pid.
+- **A play session owned by a window that has exited is now unowned.** The CLI no longer prompts on its behalf, and `STOP` no longer refuses it; `PLAYMODE` says the owner's window has exited.
+- **Approving a gated STOP now stops play mode.** Any approval sends `STOP --force`; previously "Allow" let the STOP through and the server still refused it. Standing grants ("until play stops" / "always") no longer cover STOP, since it ends the session rather than running inside it.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.87 — 2026-10-19
 
 ## v1.1.87
