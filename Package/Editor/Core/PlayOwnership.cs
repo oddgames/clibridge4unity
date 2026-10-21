@@ -182,7 +182,41 @@ namespace clibridge4unity
             string owner = Owner;
             if (owner == null) return false;
             if (owner == User) return true;
-            return !string.Equals(owner, agentId, StringComparison.OrdinalIgnoreCase);
+            if (string.Equals(owner, agentId, StringComparison.OrdinalIgnoreCase)) return false;
+            // A window that has exited is watching nothing — its claim lapses.
+            return OwnerAlive(owner);
+        }
+
+        /// <summary>
+        /// Is the agent window that owns the session still running? Read from the CLI's peer
+        /// record (same layering compromise as ActiveCaller). No record = pruned as dead; a
+        /// CLIBRIDGE_PEER_ID window records the CLI's own pid, so it counts as alive.
+        /// Mirrors PeerLedger.IsWindowAlive. Only reached from STOP, never per-frame.
+        /// </summary>
+        static bool OwnerAlive(string owner)
+        {
+            try
+            {
+                string root = Path.GetDirectoryName(Application.dataPath);
+                string file = Path.Combine(root, ".clibridge4unity", "peers", owner + ".peer");
+                if (!File.Exists(file)) return false;
+
+                int pid = 0;
+                string anchorName = null;
+                foreach (string line in File.ReadAllLines(file))
+                {
+                    if (line.StartsWith("anchorPid=", StringComparison.Ordinal))
+                        int.TryParse(line.Substring(10), out pid);
+                    else if (line.StartsWith("anchorName=", StringComparison.Ordinal))
+                        anchorName = line.Substring(11);
+                }
+                if (anchorName == "env" || pid <= 0) return true;
+                return ProcessAlive(pid);
+            }
+            catch
+            {
+                return true;   // can't tell — keep protecting the session
+            }
         }
 
         /// <summary>One line for PLAYMODE / STATUS.</summary>
@@ -202,9 +236,10 @@ namespace clibridge4unity
             // Say what is actually known. "user" is an inference from the absence of any claim
             // and any in-flight command — not something the editor reports — so it must not be
             // stated as fact that a person pressed Play.
-            return owner == User
-                ? "owner: no agent claimed this session (Play button, or something outside the bridge)" + age
-                : "owner: agent " + owner + age;
+            if (owner == User)
+                return "owner: no agent claimed this session (Play button, or something outside the bridge)" + age;
+            return "owner: agent " + owner + age
+                 + (OwnerAlive(owner) ? "" : " — that window has exited, so the session is unowned");
         }
     }
 }

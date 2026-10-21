@@ -54,6 +54,23 @@ internal static class PeerLedger
             return;
         }
 
+        // Claude Code exports its own pid. Prefer it to the tree walk: an MSYS wrapper
+        // (`timeout`, `env`, ...) exec's away the bash between it and claude, orphaning the
+        // chain, so the walk anchored on the wrapper — a new id every call. Same pid the walk
+        // finds when the chain is intact, so ids don't change for anyone it already worked for.
+        if (int.TryParse(Environment.GetEnvironmentVariable("CLAUDE_PID"), out int claudePid) && claudePid > 0)
+        {
+            try
+            {
+                using var proc = Process.GetProcessById(claudePid);
+                _anchorPid = claudePid;
+                _anchorName = proc.ProcessName + " (CLAUDE_PID)";
+                _cachedId = $"peer-{_anchorPid:X}";
+                return;
+            }
+            catch { }   // stale value inherited from a dead session — fall through to the walk
+        }
+
         (_anchorPid, _anchorName) = ResolveAnchor();
         _cachedId = $"peer-{_anchorPid:X}";
     }
@@ -111,6 +128,9 @@ internal static class PeerLedger
             for (int depth = 0, p; depth < 24 && (p = parentOf(cur)) != 0 && seen.Add(p); depth++)
             {
                 string pn = nameOf(p);
+                // Parent already exited (MSYS exec does this): the chain is broken, and a dead
+                // pid must not become the anchor.
+                if (pn.Length == 0) break;
                 string low = pn.ToLowerInvariant();
                 if (low.Contains("claude")) return (p, pn);
                 if (firstStable == 0 && !IsTransientProcess(low)) { firstStable = p; firstStableName = pn; }
@@ -128,6 +148,8 @@ internal static class PeerLedger
         || lowerExe is "pwsh.exe" or "powershell.exe" or "cmd.exe" or "bash.exe" or "sh.exe"
             or "zsh.exe" or "wsl.exe" or "wslhost.exe" or "conhost.exe" or "windowsterminal.exe"
             or "openconsole.exe" or "dotnet.exe"
+            // MSYS/Git Bash coreutils wrappers — one per call, same as the shells
+            or "timeout.exe" or "env.exe" or "nohup.exe" or "stdbuf.exe" or "xargs.exe"
             // Linux /proc comm names. sshd forks per connection, so remote callers anchor past it.
             or "bash" or "sh" or "dash" or "zsh" or "fish" or "sudo" or "sshd" or "timeout" or "env"
             or "nohup" or "setsid" or "dotnet";
@@ -360,6 +382,25 @@ internal static class PeerLedger
             return string.IsNullOrEmpty(a.Command) ? null : a;
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// Is the window behind <paramref name="id"/> still running? A play session claimed by a
+    /// window that has exited has nobody left to protect. No record = pruned as dead. A
+    /// CLIBRIDGE_PEER_ID window records the CLI's own pid, which says nothing, so it counts as alive.
+    /// Mirrored in PlayOwnership.OwnerAlive on the Unity side.
+    /// </summary>
+    public static bool IsWindowAlive(string projectPath, string id)
+    {
+        try
+        {
+            var p = ReadPeer(PeerFile(projectPath, id));
+            if (p == null) return false;
+            if (p.AnchorName == "env" || p.AnchorPid <= 0) return true;
+            using var proc = Process.GetProcessById(p.AnchorPid);
+            return true;
+        }
+        catch { return false; }
     }
 
     static void PruneePeer(string projectPath, string id)

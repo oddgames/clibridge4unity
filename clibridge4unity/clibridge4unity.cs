@@ -705,7 +705,7 @@ class Program
     /// Ask the play-mode owner before running something that could change the editor.
     /// Returns true to proceed. See PlayGate for why the answers are yield/run-now/deny.
     /// </summary>
-    static bool PassesPlayGate(string pipeName, string projectPath, string command, string data)
+    static bool PassesPlayGate(string pipeName, string projectPath, string command, ref string data)
     {
         if (_gateBypass) return true;
         // Explicit opt-out for a window that knows what it is doing.
@@ -718,10 +718,19 @@ class Program
         if (string.IsNullOrEmpty(owner)) return true;                       // nobody is playing
         if (owner.Equals(PeerLedger.SelfId, StringComparison.OrdinalIgnoreCase))
             return true;                                                    // my own session
+        // The owning window has exited — nobody is left to ask, and the server lapses the
+        // claim the same way (PlayOwnership.OwnedByOther).
+        if (owner != PlayGate.OwnerUser && !PeerLedger.IsWindowAlive(projectPath, owner))
+            return true;
+
+        // STOP ends the session rather than running inside it, so a standing "run in my
+        // session" answer doesn't cover it, and any approval has to carry --force — the
+        // server refuses an unforced STOP of someone else's session.
+        bool isStop = cmdUpper == "STOP";
 
         // A standing answer from earlier. Without this the owner is asked once per command,
         // and a single task can issue a dozen — which is unusable, not safe.
-        if (PlayGate.IsGranted(projectPath, owner, since)) return true;
+        if (!isStop && PlayGate.IsGranted(projectPath, owner, since)) return true;
 
         var req = PlayGate.File_(projectPath, command, data, owner);
         // Not "you entered manually" — that is an inference, and it was wrong whenever an agent
@@ -734,6 +743,16 @@ class Program
         string decision = GateNotify.Ask(req, who);
         if (decision != null) PlayGate.Decide(projectPath, req.Id, decision);
         else decision = PlayGate.Await(projectPath, req.Id, PlayGate.DefaultWait);
+
+        if (isStop && decision != null && decision != PlayGate.Deny)
+        {
+            if (decision == PlayGate.Always) PlayGate.StoreAlways(projectPath);
+            else if (decision == PlayGate.Session) PlayGate.StoreSession(projectPath, owner, since);
+            if ((data ?? "").IndexOf("--force", StringComparison.OrdinalIgnoreCase) < 0)
+                data = string.IsNullOrWhiteSpace(data) ? "--force" : data + " --force";
+            Console.Error.WriteLine("[gate] Allowed — stopping the play session.");
+            return true;
+        }
 
         // Both are a run-now that also stops the asking, for every agent in the project.
         if (decision == PlayGate.Always)
@@ -3289,7 +3308,7 @@ class Program
 
         // Every pipe command funnels through here, so this is the one place the play-mode
         // gate has to sit to cover anything that could change the editor.
-        if (!PassesPlayGate(pipeName, projectPath, command, data))
+        if (!PassesPlayGate(pipeName, projectPath, command, ref data))
             return EXIT_COMMAND_ERROR;
 
         try
