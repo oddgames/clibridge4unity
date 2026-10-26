@@ -112,7 +112,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.89)
+│   └── package.json           # UPM manifest (v1.1.90)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```
@@ -295,10 +295,11 @@ Use `clibridge4unity -h` to get the current list of available commands from Unit
   - `ANALYZE usedby:Assets/Foo.prefab` (or `usedby:ClassName`) → reverse GUID lookup: every scene/prefab/SO/UXML referencing the asset (index-backed, instant)
 - `MAP task keywords` - Task-oriented project map (offline, daemon-served). Free keywords (e.g. `MAP double jump`) → one dossier: matching scripts with attach sites, scenes (with build index), prefabs, SO config assets, UXML/`.inputactions`, UnityEvent wiring. The "where do I start?" command. See [AssetGraph.cs](clibridge4unity/AssetGraph.cs)
 - **Daemon memory / package residency:** the daemon holds syntax trees for **user code only** (`Assets/`, non-PackageCache `Packages/`). `Library/PackageCache` keeps its source text (needed for the query pre-filter) plus a harvested type-name set, and is re-parsed on demand when a query matches it. On a large project this is ~400 MB less RSS and a faster index, at the cost of slower broad `kind:` queries (e.g. `method:Update`, which matches thousands of package files). Set `CLIBRIDGE_INDEX_PACKAGES=1` to make packages resident again and trade the memory back for that latency.
-- `CODE_EXEC code` - Compile and execute C# code (fire-and-forget). Alias: `EXEC`
+- `CODE_EXEC code` - Compile and execute C# code; answers with the logs it produced (waits for it, like CODE_EXEC_RETURN). Alias: `EXEC`
 - `CODE_EXEC_RETURN code` - Compile and execute C# code (waits for result, returns type). Alias: `EVAL`
 - `CODE_EXEC_RETURN code --inspect [depth] [--private]` - Execute and dump result object tree
 - `CODE_EXEC_RETURN code --trace [--maxlines N] [--from N] [--only var] [--vars x,y] [--skip pattern]` - Execute with line-by-line trace
+- `CODE_EXEC[_RETURN] code --timeout <seconds>` (or `--timeout=N`, before or after the path) - How long the snippet may run before the command answers; default 25 s. The server deadline and the CLI read window become N + grace (`TimeoutFlagGraceSeconds` on the attribute), so a snippet that awaits for 40 s with `--timeout 60` gets its result back. Past the deadline the command answers with the applied value but the snippet is NOT stopped - only `CLIBridge.Token` is cancelled. Needs package >= 1.1.90; against an older package the CLI drops the flag with a warning rather than letting it be compiled as code.
 - `TEST [mode] [groups...] [--category X,Y] [--tests Full.Name,Other.Name]` - Run Unity tests (streaming)
   - Mode: default `editmode`, or `playmode`, or `all`
   - Groups: positional args, comma- or space-separated — matches class/namespace paths (regex)

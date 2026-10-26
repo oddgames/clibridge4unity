@@ -30,6 +30,7 @@ namespace clibridge4unity
         public bool IsStreaming { get; set; }
         public int TimeoutSeconds { get; set; }
         public int DetachAfterSeconds { get; set; }
+        public int TimeoutFlagGraceSeconds { get; set; }
         public string[] RelatedCommands { get; set; }
         public string[] Aliases { get; set; }
         public MethodInfo Method { get; set; }
@@ -717,6 +718,7 @@ namespace clibridge4unity
                                 TimeoutSeconds = attr.TimeoutSeconds > 0 ? attr.TimeoutSeconds
                                     : attr.RequiresMainThread ? 25 : 10,
                                 DetachAfterSeconds = attr.DetachAfterSeconds,
+                                TimeoutFlagGraceSeconds = attr.TimeoutFlagGraceSeconds,
                                 RelatedCommands = attr.RelatedCommands ?? Array.Empty<string>(),
                                 Aliases = attr.Aliases ?? Array.Empty<string>(),
                                 Method = method,

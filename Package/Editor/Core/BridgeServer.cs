@@ -27,7 +27,7 @@ namespace clibridge4unity
     [InitializeOnLoad]
     public static class BridgeServer
     {
-        public const string Version = "1.1.89";
+        public const string Version = "1.1.90";
 
         // Minimum VSCode-extension version compatible with this bridge's interface — the command
         // verbs the extension sends (COMPILE/STATUS/VSCODE) and the STATUS fields it reads.
@@ -710,6 +710,10 @@ namespace clibridge4unity
                 // Timeout from attribute — no hardcoded fallbacks
                 var cmdInfo = CommandRegistry.GetCommand(command);
                 int timeoutSec = cmdInfo?.TimeoutSeconds ?? 10;
+                // A command that opts in takes a caller-supplied --timeout N; the deadline (and the hint
+                // the CLI sizes its read window from) becomes N plus that command's grace.
+                if (cmdInfo != null && cmdInfo.TimeoutFlagGraceSeconds > 0 && TimeoutFlag.TryParse(data, out int requestedSec))
+                    timeoutSec = requestedSec + cmdInfo.TimeoutFlagGraceSeconds;
                 int timeoutMs = timeoutSec * 1000;
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeoutCts.CancelAfter(timeoutMs);

@@ -70,7 +70,7 @@ Combine filters: `LOG errors verbose last:10`
 # Fire-and-forget (no return value)
 CODE_EXEC Debug.Log("Hello");
 
-# Wait for return value (25s timeout)
+# Wait for return value (25s default; --timeout 120 for snippets that await longer)
 CODE_EXEC_RETURN 1 + 2
 CODE_EXEC_RETURN GameObject.Find("Player").transform.position
 

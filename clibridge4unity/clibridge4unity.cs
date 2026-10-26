@@ -76,6 +76,8 @@ class Program
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")]
     private static extern bool FlashWindow(IntPtr hWnd, bool bInvert);
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
@@ -2583,7 +2585,8 @@ class Program
         Console.Error.WriteLine();
         Console.Error.WriteLine("Key bridge commands (requires Unity):");
         Console.Error.WriteLine("  PING / STATUS / HELP       Connection and status");
-        Console.Error.WriteLine("  CODE_EXEC_RETURN <code>    Execute C# and return result");
+        Console.Error.WriteLine("  CODE_EXEC_RETURN <code>    Execute C# and return result (code or a .cs file path)");
+        Console.Error.WriteLine("    --timeout <seconds>      Wait up to N s for the result (default 25); also --timeout=N");
         Console.Error.WriteLine("    --inspect [depth]        Dump result object tree");
         Console.Error.WriteLine("    --trace [--maxlines N]   Line-by-line execution trace");
         Console.Error.WriteLine("  TEST [mode] [group...] [--category X,Y] [--tests A,B]");
@@ -3302,6 +3305,81 @@ class Program
             || message.Contains("not found", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>First Unity package version whose CODE_EXEC/CODE_EXEC_RETURN understand --timeout.</summary>
+    const string TIMEOUT_FLAG_MIN_BRIDGE = "1.1.90";
+
+    // Same token rules as the package's TimeoutFlag: a standalone `--timeout N` / `--timeout=N`.
+    static readonly System.Text.RegularExpressions.Regex TimeoutFlagValued = new(
+        @"(?<=^|\s)--timeout(?:=|\s+)(\d+)(?=\s|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    static readonly System.Text.RegularExpressions.Regex TimeoutFlagBare = new(
+        @"(?<=^|\s)--timeout(?==|\s|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Strips every `--timeout` from CODE_EXEC data, wherever it sits. <paramref name="seconds"/> is the last
+    /// valid value (null when absent); <paramref name="error"/> is set for a malformed or out-of-range one.
+    /// </summary>
+    static string ExtractTimeoutFlag(string data, out int? seconds, out string error)
+    {
+        seconds = null;
+        error = null;
+        if (string.IsNullOrEmpty(data) || data.IndexOf("--timeout", StringComparison.OrdinalIgnoreCase) < 0)
+            return data;
+
+        const int maxSeconds = 86400;
+        var matches = TimeoutFlagValued.Matches(data);
+        if (matches.Count > 0)
+        {
+            string raw = matches[matches.Count - 1].Groups[1].Value;
+            if (int.TryParse(raw, out int parsed) && parsed >= 1 && parsed <= maxSeconds)
+                seconds = parsed;
+            else
+                error = $"--timeout must be a whole number of seconds from 1 to {maxSeconds} (got '{raw}').";
+            data = TimeoutFlagValued.Replace(data, "");
+        }
+        if (TimeoutFlagBare.IsMatch(data))
+        {
+            error ??= "--timeout needs a value in seconds, e.g. --timeout 120 or --timeout=120.";
+            data = TimeoutFlagBare.Replace(data, "");
+        }
+        return data.Trim();
+    }
+
+    /// <summary>
+    /// Whether the running package understands CODE_EXEC --timeout, from the version in its heartbeat
+    /// status file (a file read, no pipe). Unknown counts as yes — no heartbeat means no Unity to talk to.
+    /// </summary>
+    static bool BridgeSupportsTimeoutFlag(string projectPath, out string bridgeVersion)
+    {
+        bridgeVersion = "unknown";
+        try
+        {
+            string normalizedPath = Path.GetFullPath(projectPath).ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
+            int hash1 = 5381, hash2 = hash1;
+            for (int i = 0; i < normalizedPath.Length && normalizedPath[i] != '\0'; i += 2)
+            {
+                hash1 = ((hash1 << 5) + hash1) ^ normalizedPath[i];
+                if (i == normalizedPath.Length - 1 || normalizedPath[i + 1] == '\0') break;
+                hash2 = ((hash2 << 5) + hash2) ^ normalizedPath[i + 1];
+            }
+            int hash = hash1 + (hash2 * 1566083941);
+            string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}_{GetProjectName(projectPath)}.status");
+            if (!File.Exists(statusFile)) return true;
+            string v = ExtractJsonString(File.ReadAllText(statusFile), "version");
+            if (string.IsNullOrEmpty(v)) return true;
+            bridgeVersion = v;
+            string core = v.Split('-', '+')[0];
+            if (!Version.TryParse(core, out var running) || !Version.TryParse(TIMEOUT_FLAG_MIN_BRIDGE, out var min))
+                return true;
+            CliTrace("BridgeSupportsTimeoutFlag", $"bridge={running} min={min}");
+            return running >= min;
+        }
+        catch (Exception ex)
+        {
+            CliTrace("BridgeSupportsTimeoutFlag", $"exception: {ex.Message}");
+            return true;
+        }
+    }
+
     static int SendCommand(string pipeName, string projectPath, string command, string data)
     {
         CliTrace("SendCommand", $"begin command={command}, dataChars={data?.Length ?? 0}, pipe={pipeName}, project={projectPath}");
@@ -3311,6 +3389,9 @@ class Program
         if (!PassesPlayGate(pipeName, projectPath, command, ref data))
             return EXIT_COMMAND_ERROR;
 
+        // CODE_EXEC --timeout N: seconds the snippet may run. Null = the server's default.
+        int? requestedTimeoutSec = null;
+
         try
         {
             // For CODE_EXEC commands, resolve file paths and fix shell mangling
@@ -3318,6 +3399,27 @@ class Program
                 (command == "CODE_EXEC" || command == "CODE_EXEC_RETURN" ||
                  command == "EXEC" || command == "EVAL"))
             {
+                // --timeout may sit before or after the path. Pull it out first: left in place, a leading
+                // flag defeats the file detection below and the path gets compiled as inline C#.
+                data = ExtractTimeoutFlag(data, out requestedTimeoutSec, out string timeoutError);
+                if (timeoutError != null)
+                {
+                    Console.Error.WriteLine($"Error: {timeoutError}");
+                    return EXIT_USAGE_ERROR;
+                }
+                if (requestedTimeoutSec.HasValue && !BridgeSupportsTimeoutFlag(projectPath, out string bridgeVersion))
+                {
+                    // An older package does not know the flag and would compile "@path --timeout N" as code.
+                    Console.Error.WriteLine($"[timeout] Unity's clibridge4unity package is v{bridgeVersion}; --timeout needs >= {TIMEOUT_FLAG_MIN_BRIDGE}. " +
+                                            $"Ignoring --timeout {requestedTimeoutSec} — that package's built-in limit (~25-30 s) applies. Update the package to use it.");
+                    requestedTimeoutSec = null;
+                }
+                if (string.IsNullOrWhiteSpace(data))
+                {
+                    Console.Error.WriteLine("Error: Code required (inline C# or a .cs file path).");
+                    return EXIT_USAGE_ERROR;
+                }
+
                 // Detect file path input:
                 //   @script.cs           — explicit @ prefix
                 //   script.cs            — bare filename
@@ -3383,6 +3485,10 @@ class Program
                     File.WriteAllText(tempFile, codeForFile);
                     data = $"@{tempFile}{trailingFlags}";
                 }
+
+                // Re-attach in the one place the server parses flags: after the @path.
+                if (requestedTimeoutSec.HasValue)
+                    data = $"{data} --timeout {requestedTimeoutSec.Value}";
             }
 
             // Heartbeat-aware pre-wait: if Unity is busy (compiling/reloading/importing), use the
@@ -3432,6 +3538,9 @@ class Program
                 {
                     if (int.TryParse(line.Substring("__timeout:".Length), out int hintSec))
                         readTimeoutMs = Math.Max(2000, hintSec * 1000 - waitedForBusyMs);
+                    // The server already widens its hint for --timeout; never wait less than asked for.
+                    if (requestedTimeoutSec.HasValue)
+                        readTimeoutMs = Math.Max(readTimeoutMs, requestedTimeoutSec.Value * 1000 + 5000);
                     gotTimeoutHint = true;
                     cts.CancelAfter(readTimeoutMs);
                     CliTrace("SendCommand", $"timeout hint command={command}, timeoutMs={readTimeoutMs}");
@@ -3495,6 +3604,10 @@ class Program
                 {
                     CliTrace("SendCommand", $"timeout command={command}, readTimeoutMs={readTimeoutMs}");
                     Console.Error.WriteLine($"\nError: Command '{command}' timed out after {readTimeoutMs / 1000}s.");
+                    if (command is "CODE_EXEC" or "CODE_EXEC_RETURN" or "EXEC" or "EVAL")
+                        Console.Error.WriteLine(requestedTimeoutSec.HasValue
+                            ? $"       (--timeout {requestedTimeoutSec.Value} applied.) The snippet may still be running in Unity."
+                            : "       (default timeout applied; pass --timeout <seconds> to wait longer.) The snippet may still be running in Unity.");
                 }
                 Console.Error.Write(BuildDiagnosticReport(projectPath));
                 return EXIT_TIMEOUT;
@@ -4593,13 +4706,9 @@ class Program
                 byPid[pid] = info;
             }
 
-            var m = System.Text.RegularExpressions.Regex.Match(
-                cmdLine,
-                @"-(?:projectpath|createProject)\s+(?:""([^""]+)""|(\S+))",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            if (m.Success)
+            string path = ProjectPathArg(cmdLine);
+            if (path != null)
             {
-                string path = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
                 try { info.ProjectPath = Path.GetFullPath(path); }
                 catch { info.ProjectPath = path; }
             }
@@ -5164,7 +5273,19 @@ class Program
 
         try
         {
-            foreach (var proc in Process.GetProcessesByName("Unity"))
+            var unityProcs = Process.GetProcessesByName("Unity");
+            var cmdLines = unityProcs.Length > 0 ? ReadUnityCommandLines() : new List<(uint pid, string cmdLine)>();
+
+            // Window titles only carry the folder name, so two checkouts named alike look identical.
+            string expectedNorm = NormalizeProjectPath(projectPath);
+            var otherProjectPids = new HashSet<uint>();
+            foreach (var (pid, cmdLine) in cmdLines)
+            {
+                string arg = ProjectPathArg(cmdLine);
+                if (arg != null && NormalizeProjectPath(arg) != expectedNorm) otherProjectPids.Add(pid);
+            }
+
+            foreach (var proc in unityProcs)
             {
                 try
                 {
@@ -5173,7 +5294,8 @@ class Program
                     if (mainTitle != null)
                     {
                         info.OpenProjects.Add(mainTitle);
-                        if (mainTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase))
+                        if (mainTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase) &&
+                            !otherProjectPids.Contains((uint)proc.Id))
                         {
                             foundProject = true;
                             unityPids.Add((uint)proc.Id);
@@ -5189,7 +5311,7 @@ class Program
             // secondary scripting-runtime process for this project.
             if (allUnityPids.Count > 0)
             {
-                foreach (var (pid, cmdLine) in ReadUnityCommandLines())
+                foreach (var (pid, cmdLine) in cmdLines)
                 {
                     if (cmdLine.Contains("-batchMode", StringComparison.OrdinalIgnoreCase)) continue;
                     if (cmdLine.Contains(fullProjectPath, StringComparison.OrdinalIgnoreCase) ||
@@ -5591,6 +5713,16 @@ class Program
     {
         var s = xs.OrderBy(x => x).ToList();
         return s.Count == 0 ? 0 : (s.Count % 2 == 1 ? s[s.Count / 2] : (s[s.Count / 2 - 1] + s[s.Count / 2]) / 2);
+    }
+
+    static string ProjectPathArg(string cmdLine)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(
+            cmdLine,
+            @"-(?:projectpath|createProject)\s+(?:""([^""]+)""|(\S+))",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!m.Success) return null;
+        return m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
     }
 
     static string LogFileArg(string cmdLine)
@@ -6232,6 +6364,10 @@ class Program
         md.AppendLine();
         md.AppendLine("Flags: `--inspect [depth]` dumps the result tree, `--trace` emits line-by-line execution, `--vars x,y` filters.");
         md.AppendLine();
+        md.AppendLine("**`--timeout <seconds>`** (default 25, also `--timeout=N`, before or after the path) — for snippets that");
+        md.AppendLine("`await` longer, e.g. sampling physics with `Awaitable.WaitForSecondsAsync`: `clibridge4unity CODE_EXEC_RETURN /tmp/sample.cs --timeout 120`.");
+        md.AppendLine("Past the deadline the command answers, but the snippet is NOT stopped — only `CLIBridge.Token` is cancelled.");
+        md.AppendLine();
         md.AppendLine("## LINT / COMPILE — troubleshooting tools, NOT routine steps");
         md.AppendLine();
         md.AppendLine("**Don't lint or compile after every edit.** When Unity's auto-refresh is on it compiles as soon as it");
@@ -6581,7 +6717,9 @@ class Program
         {
             foreach (var hwnd in unityWindows)
             {
-                ShowWindow(hwnd, 9 /* SW_RESTORE */);
+                // SW_RESTORE also un-maximizes, so only use it to bring back a minimized editor.
+                if (IsIconic(hwnd))
+                    ShowWindow(hwnd, 9 /* SW_RESTORE */);
                 SetForegroundWindow(hwnd);
                 BringWindowToTop(hwnd);
             }

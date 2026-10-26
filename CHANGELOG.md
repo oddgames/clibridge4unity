@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.1.90 — 2026-10-26
+
+## v1.1.90
+
+### New
+- **`CODE_EXEC` / `CODE_EXEC_RETURN --timeout <seconds>`** (also `--timeout=N`, before or after the file path, inline code too). The snippet may run up to N s before the command answers; the default stays 25 s. The server's deadline and the `__timeout` hint that sizes the CLI's read window become N plus a per-command grace (new `TimeoutFlagGraceSeconds` on `[BridgeCommand]`), and `CLIBridge.Token` is cancelled at N, not at 25 s — so a snippet that `await`s `Awaitable.WaitForSecondsAsync(40f)` with `--timeout 60` gets its result back.
+- Timeout replies name the value that applied: `Code did not finish within 25s (the default; pass --timeout <seconds> to wait longer)` / `within 60s (--timeout 60)`, and say the snippet was not stopped (only `CLIBridge.Token` is cancelled).
+
+### Fixed
+- **`CODE_EXEC_RETURN <file.cs> --timeout N` compiled the file PATH as C#** (`Script.cs(16,x)` backslash errors). The flag was not recognised, so `@path --timeout N` failed the file lookup and fell through to inline code; a flag placed before the path defeated the CLI's file detection the same way. The CLI now strips `--timeout` wherever it sits and re-attaches it after the `@path`.
+- **A long `CODE_EXEC_RETURN` came back empty**: the snippet deadline (30 s) and the CLI's read window (30 s) were the same number, so the CLI gave up at the instant the timeout error was being written. The snippet default is now 25 s (as documented) with a 30 s reply window.
+- **`CODE_EXEC` gave up after 10 s** while the snippet was allowed 25 s plus 5 s of log settling — it had no `TimeoutSeconds`, so it inherited the 10 s non-main-thread default. It now waits 35 s.
+- **`WAKEUP` (and the automatic Safe Mode recovery) un-maximized the Unity editor.** It called `ShowWindow(SW_RESTORE)` on every editor window to bring it forward, which also restores a maximized window to its smaller normal size. It now restores only a minimized window; a maximized one stays maximized.
+
+### Compatibility
+- Against a package older than 1.1.90 the CLI drops `--timeout` with a warning (that package would compile the flag as code) and the old limit applies.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
 ## v1.1.88 — 2026-10-21
 
 ## v1.1.88

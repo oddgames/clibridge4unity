@@ -271,11 +271,14 @@ namespace clibridge4unity
                         if ((bool)getEntry.Invoke(null, new object[] { i, entry }))
                         {
                             var msg = logEntryType.GetField("message")?.GetValue(entry)?.ToString();
-                            // Require Unity compiler format: path/to/file.cs(line,col): error CS
-                            // This avoids matching CODE_EXEC Roslyn errors logged to console.
-                            if (msg != null && System.Text.RegularExpressions.Regex.IsMatch(msg, @"\.cs\(\d+,\d+\).*error CS"))
+                            // Unity logs one compiler error per entry, the error itself on the first line. CODE_EXEC
+                            // Roslyn failures are logged as "[Bridge] Roslyn compilation error" with Script.cs(l,c)
+                            // errors on the following lines; matching the whole message counted those as project
+                            // errors, and runners rebuilt a healthy seat's Library over an agent's typo.
+                            string firstLine = msg?.Split('\n')[0];
+                            if (firstLine != null && !firstLine.StartsWith("[Bridge]")
+                                && System.Text.RegularExpressions.Regex.IsMatch(firstLine, @"\.cs\(\d+,\d+\).*error CS"))
                             {
-                                string firstLine = msg.Split('\n')[0];
                                 if (!fallback.Contains(firstLine))
                                     fallback.Add(firstLine);
                                 if (fallback.Count >= 20) break;

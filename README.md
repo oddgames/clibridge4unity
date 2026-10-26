@@ -27,6 +27,7 @@ clibridge4unity CODE_EXEC_RETURN "return 1+1"   # Get the result back (alias: EV
 clibridge4unity CODE_EXEC @script.cs            # Run from file (no size limit)
 clibridge4unity CODE_EXEC_RETURN "Selection.activeGameObject" --inspect 3   # Dump object tree
 clibridge4unity CODE_EXEC_RETURN @script.cs --trace --vars pos,vel          # Line-by-line trace
+clibridge4unity CODE_EXEC_RETURN script.cs --timeout 120                    # Wait up to 120 s (default 25)
 ```
 CODE_EXEC has its own Roslyn compiler — no COMPILE needed, works even when Unity's main thread is busy.
 

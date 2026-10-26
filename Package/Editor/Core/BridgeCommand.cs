@@ -65,6 +65,20 @@ namespace clibridge4unity
         public int DetachAfterSeconds { get; set; } = 0;
 
         /// <summary>
+        /// Opts the command into a caller-supplied <c>--timeout &lt;seconds&gt;</c> flag. 0 (default) = no flag.
+        /// </summary>
+        /// <remarks>
+        /// When &gt; 0 and the command data carries <c>--timeout N</c> (or <c>--timeout=N</c>), the server's
+        /// deadline — and the <c>__timeout</c> hint that sizes the CLI's read window — becomes
+        /// <c>N + TimeoutFlagGraceSeconds</c> instead of <see cref="TimeoutSeconds"/>. The command parses the
+        /// same flag itself with <see cref="TimeoutFlag"/> and applies N to its own work; the grace is the
+        /// headroom that lets its reply (including a "did not finish within N s" error) get back before
+        /// anything upstream gives up. Without it the two deadlines are equal and the caller's read window
+        /// closes at the instant the answer is being written.
+        /// </remarks>
+        public int TimeoutFlagGraceSeconds { get; set; } = 0;
+
+        /// <summary>
         /// Related commands suggested to the caller on successful responses.
         /// Appended as "Related: CMD1, CMD2, ..." so the AI is reminded of adjacent tools.
         /// </summary>
@@ -80,6 +94,71 @@ namespace clibridge4unity
         {
             Name = name?.ToUpperInvariant() ?? throw new ArgumentNullException(nameof(name));
             Description = description ?? throw new ArgumentNullException(nameof(description));
+        }
+    }
+
+    /// <summary>
+    /// The <c>--timeout &lt;seconds&gt;</c> / <c>--timeout=&lt;seconds&gt;</c> flag, parsed one way for the server
+    /// (which sizes its deadline from it) and the command (which applies it). The CLI mirrors this pattern.
+    /// Only a standalone token matches, so <c>--timeout</c> inside a longer word is left alone.
+    /// </summary>
+    public static class TimeoutFlag
+    {
+        /// <summary>Upper bound — a day. Keeps seconds * 1000 well inside an int.</summary>
+        public const int MaxSeconds = 86400;
+
+        static readonly System.Text.RegularExpressions.Regex Valued = new System.Text.RegularExpressions.Regex(
+            @"(?<=^|\s)--timeout(?:=|\s+)(\d+)(?=\s|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        static readonly System.Text.RegularExpressions.Regex Bare = new System.Text.RegularExpressions.Regex(
+            @"(?<=^|\s)--timeout(?==|\s|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        /// <summary>The requested seconds, if the data carries a valid flag. Leaves the data untouched.</summary>
+        public static bool TryParse(string data, out int seconds)
+        {
+            seconds = 0;
+            if (string.IsNullOrEmpty(data) || data.IndexOf("--timeout", StringComparison.OrdinalIgnoreCase) < 0)
+                return false;
+            var matches = Valued.Matches(data);
+            if (matches.Count == 0) return false;
+            return int.TryParse(matches[matches.Count - 1].Groups[1].Value, out seconds)
+                && seconds >= 1 && seconds <= MaxSeconds;
+        }
+
+        /// <summary>
+        /// Strips every <c>--timeout</c> occurrence from <paramref name="data"/>. <paramref name="seconds"/> is the
+        /// last valid value, or <paramref name="defaultSeconds"/> when there is none; <paramref name="error"/> is
+        /// set when a flag is present but malformed or out of range.
+        /// </summary>
+        public static string Extract(string data, int defaultSeconds, out int seconds, out bool specified, out string error)
+        {
+            seconds = defaultSeconds;
+            specified = false;
+            error = null;
+            if (string.IsNullOrEmpty(data) || data.IndexOf("--timeout", StringComparison.OrdinalIgnoreCase) < 0)
+                return data;
+
+            var matches = Valued.Matches(data);
+            if (matches.Count > 0)
+            {
+                string raw = matches[matches.Count - 1].Groups[1].Value;
+                if (int.TryParse(raw, out int parsed) && parsed >= 1 && parsed <= MaxSeconds)
+                {
+                    seconds = parsed;
+                    specified = true;
+                }
+                else
+                {
+                    error = $"--timeout must be a whole number of seconds from 1 to {MaxSeconds} (got '{raw}').";
+                }
+                data = Valued.Replace(data, "");
+            }
+            if (Bare.IsMatch(data))
+            {
+                error ??= "--timeout needs a value in seconds, e.g. --timeout 120 or --timeout=120.";
+                data = Bare.Replace(data, "");
+            }
+            return data.Trim();
         }
     }
 }

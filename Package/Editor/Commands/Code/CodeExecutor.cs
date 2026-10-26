@@ -17,11 +17,15 @@ namespace clibridge4unity
 {
     /// <summary>
     /// Compile and execute C# code using Roslyn (preferred) or CSharpCodeProvider/mcs (fallback).
-    /// CODE_EXEC: fire-and-forget (returns immediately, check LOG for result)
-    /// CODE_EXEC_RETURN: waits for result (25s main thread timeout)
+    /// CODE_EXEC: runs the snippet, answers with the logs it produced
+    /// CODE_EXEC_RETURN: waits for the result
+    /// Both wait up to 25s by default; `--timeout N` changes that per call.
     /// </summary>
     public static class CodeExecutor
     {
+        /// <summary>How long a snippet may run when the caller passes no --timeout.</summary>
+        const int DefaultTimeoutSeconds = 25;
+
         private static ConcurrentDictionary<int, Assembly> cachedAssemblies = new ConcurrentDictionary<int, Assembly>();
         private static bool initialized = false;
 
@@ -73,10 +77,13 @@ namespace clibridge4unity
             return code;
         }
 
-        [BridgeCommand("CODE_EXEC", "Compile and execute C# code (fire-and-forget)",
+        [BridgeCommand("CODE_EXEC", "Compile and execute C# code, return its logs (25s default timeout, --timeout N)",
             Category = "Code",
             Usage = "CODE_EXEC <c# code>\n" +
                     "  CODE_EXEC @/path/to/tempfile.cs  (read code from file — preferred for multi-line / $\"…\")\n" +
+                    "  CODE_EXEC <code> --timeout <seconds>  run for up to N s (default 25). --timeout=N also works,\n" +
+                    "                                   before or after the path. Past it the command answers but the\n" +
+                    "                                   snippet is NOT stopped — only CLIBridge.Token is cancelled.\n" +
                     "  Code runs on the Unity main thread by default — Unity API is safe to call directly.\n" +
                     "  BLOCKING WORK (HTTP, sockets, large file IO, downloads) must NOT run on the main thread\n" +
                     "  — it freezes the whole Editor. Hop off and back with the await-able CLIBridge utility:\n" +
@@ -90,6 +97,9 @@ namespace clibridge4unity
                     "  NOTE: put the temp .cs file OUTSIDE the Unity project (e.g. $TEMP, /tmp, ~/.cache) —\n" +
                     "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
             RequiresMainThread = false,
+            // Default 25s run + up to 5s of log settling + headroom.
+            TimeoutSeconds = 35,
+            TimeoutFlagGraceSeconds = 10,
             Aliases = new[] { "EXEC" },
             RelatedCommands = new[] { "CODE_EXEC_RETURN", "LOG" })]
         public static async Task<string> Execute(string code)
@@ -99,6 +109,9 @@ namespace clibridge4unity
             // The synchronous helpers below carry the markers that measure real cost.
             try
             {
+                code = TimeoutFlag.Extract(code, DefaultTimeoutSeconds, out int timeoutSec, out bool explicitTimeout, out string timeoutError);
+                if (timeoutError != null)
+                    return Response.Error(timeoutError);
                 code = ExtractFlag(code, "--bg", out bool background);
                 code = ResolveCode(code);
                 if (string.IsNullOrEmpty(code))
@@ -126,7 +139,7 @@ namespace clibridge4unity
                 string desc = code.Length > 80 ? $"CODE_EXEC|{code.Substring(0, 80)}..." : $"CODE_EXEC|{code}";
                 try
                 {
-                    object r = await RunCompiledAsync(asm, desc, background, 25000);
+                    object r = await RunCompiledAsync(asm, desc, background, timeoutSec, explicitTimeout);
                     Debug.Log($"[Bridge] CODE_EXEC completed -> {r ?? "null"}");
                 }
                 catch (Exception ex)
@@ -169,10 +182,15 @@ namespace clibridge4unity
             }
         }
 
-        [BridgeCommand("CODE_EXEC_RETURN", "Compile and execute C# code (waits for result, 25s timeout)",
+        [BridgeCommand("CODE_EXEC_RETURN", "Compile and execute C# code (waits for result, 25s default timeout, --timeout N)",
             Category = "Code",
             Usage = "CODE_EXEC_RETURN <c# code>\n" +
                     "  CODE_EXEC_RETURN @/path/to/tempfile.cs  (read code from file — preferred for multi-line / $\"…\")\n" +
+                    "  CODE_EXEC_RETURN <code> --timeout <seconds>  wait up to N s for the result (default 25) — for\n" +
+                    "                                   snippets that await (e.g. Awaitable.WaitForSecondsAsync sampling).\n" +
+                    "                                   --timeout=N also works, before or after the path. Past it the\n" +
+                    "                                   command answers but the snippet is NOT stopped — only\n" +
+                    "                                   CLIBridge.Token is cancelled.\n" +
                     "  CODE_EXEC_RETURN <expr> --inspect [depth] [--private]\n" +
                     "  CODE_EXEC_RETURN <code> --trace [--maxlines N] [--from N]\n" +
                     "  CODE_EXEC_RETURN <code> --trace --only varName\n" +
@@ -189,7 +207,9 @@ namespace clibridge4unity
                     "  NOTE: put the temp .cs file OUTSIDE the Unity project (e.g. $TEMP, /tmp, ~/.cache) —\n" +
                     "        writing it under Assets/ or Packages/ will trigger a Unity asset import + recompile.",
             RequiresMainThread = false,
+            // Default 25s run + 5s for the reply (a "did not finish" error included) to get back.
             TimeoutSeconds = 30,
+            TimeoutFlagGraceSeconds = 5,
             Aliases = new[] { "EVAL" },
             RelatedCommands = new[] { "CODE_EXEC", "LOG" })]
         public static async Task<string> ExecuteReturn(string code)
@@ -206,6 +226,9 @@ namespace clibridge4unity
                 bool inspect = false, includePrivate = false, trace = false, background = false;
                 int inspectDepth = 1, maxTraceLines = 500;
 
+                code = TimeoutFlag.Extract(code, DefaultTimeoutSeconds, out int timeoutSec, out bool explicitTimeout, out string timeoutError);
+                if (timeoutError != null)
+                    return Response.Error(timeoutError);
                 code = ExtractFlag(code, "--private", out includePrivate);
                 code = ExtractIntFlag(code, "--inspect", out inspect, out inspectDepth, 1);
                 code = ExtractIntFlag(code, "--maxlines", out _, out maxTraceLines, 500);
@@ -225,7 +248,7 @@ namespace clibridge4unity
 
                 // Trace mode: instrument code before compiling
                 if (trace)
-                    return await ExecuteTrace(code, maxTraceLines, traceFrom, traceOnly, traceVars, traceSkip);
+                    return await ExecuteTrace(code, maxTraceLines, traceFrom, traceOnly, traceVars, traceSkip, timeoutSec, explicitTimeout);
 
                 // ExecuteCommand wrapper started log capture for this command — peek when done.
                 string fullCode = WrapCode(code);
@@ -244,7 +267,7 @@ namespace clibridge4unity
                 var asm = assembly;
                 string desc = code.Length > 80 ? $"CODE_EXEC_RETURN|{code.Substring(0, 80)}..." : $"CODE_EXEC_RETURN|{code}";
 
-                object result = await RunCompiledAsync(asm, desc, background, background ? 25000 : 30000);
+                object result = await RunCompiledAsync(asm, desc, background, timeoutSec, explicitTimeout);
 
                 string baseResponse;
                 if (inspect)
@@ -383,7 +406,8 @@ namespace clibridge4unity
         /// Inserts __log.Add() calls as sibling statements after each expression/declaration/return.
         /// Handles for/while/if correctly by only instrumenting their body statements.
         /// </summary>
-        static async Task<string> ExecuteTrace(string code, int maxLines, int fromLine, string onlyVar, string varsFilter, string skipPattern)
+        static async Task<string> ExecuteTrace(string code, int maxLines, int fromLine, string onlyVar, string varsFilter, string skipPattern,
+            int timeoutSec, bool explicitTimeout)
         {
             if (System.Text.RegularExpressions.Regex.IsMatch(code, @"(?m)^\s*(public\s+|internal\s+|static\s+)*class\s") ||
                 System.Text.RegularExpressions.Regex.IsMatch(code, @"(?m)^\s*namespace\s"))
@@ -511,7 +535,7 @@ namespace clibridge4unity
             try
             {
                 var asm = result.Assembly;
-                var obj = await RunCompiledAsync(asm, "CODE_EXEC_RETURN|trace", false, 30000);
+                var obj = await RunCompiledAsync(asm, "CODE_EXEC_RETURN|trace", false, timeoutSec, explicitTimeout);
                 return Response.Success(obj?.ToString() ?? "(no output)");
             }
             catch (TargetInvocationException ex)
@@ -909,8 +933,9 @@ namespace clibridge4unity
         // default — Unity API is legal there. background=true starts on the threadpool. Async snippets
         // move threads themselves via CLIBridge.SwitchToBackground/SwitchToMainThread. On timeout the
         // token is cancelled (cooperative APIs that were handed CLIBridge.Token will abort).
-        static async Task<object> RunCompiledAsync(Assembly asm, string desc, bool background, int timeoutMs)
+        static async Task<object> RunCompiledAsync(Assembly asm, string desc, bool background, int timeoutSec, bool explicitTimeout)
         {
+            int timeoutMs = timeoutSec * 1000;
             using var cts = new CancellationTokenSource();
             cts.CancelAfter(timeoutMs);
 
@@ -939,8 +964,12 @@ namespace clibridge4unity
             if (done != work)
             {
                 cts.Cancel();
+                string applied = explicitTimeout
+                    ? $"{timeoutSec}s (--timeout {timeoutSec})"
+                    : $"{timeoutSec}s (the default; pass --timeout <seconds> to wait longer)";
                 throw new TimeoutException(
-                    $"Code did not finish within {timeoutMs / 1000}s. For blocking work, hop off the main thread: " +
+                    $"Code did not finish within {applied}. It was not stopped: CLIBridge.Token is cancelled, but " +
+                    "anything not observing it keeps running in Unity. For blocking work, hop off the main thread: " +
                     "await CLIBridge.SwitchToBackground(); /* blocking */ await CLIBridge.SwitchToMainThread(); " +
                     "and pass CLIBridge.Token to cancellable APIs so the timeout can abort them.");
             }
