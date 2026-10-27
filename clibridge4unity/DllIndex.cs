@@ -220,7 +220,7 @@ internal sealed class DllIndex
         if (resolvedPkgDirs.Count > 0)
             roots.AddRange(resolvedPkgDirs);
         else
-            roots.Add(Path.Combine(projectPath, "Library", "PackageCache"));
+            roots.Add(Worktree.LibraryPath(projectPath, "PackageCache"));
 
         // Unity engine reference DLLs (UnityEngine.CoreModule.dll, etc.) live in the Unity install,
         // not the project. Without these, queries for built-in types like MonoBehaviour or Vector3

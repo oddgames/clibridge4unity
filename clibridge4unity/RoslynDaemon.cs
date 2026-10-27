@@ -386,7 +386,7 @@ static class RoslynDaemon
 
         string assetsDir = Path.Combine(projectPath, "Assets");
         string packagesDir = Path.Combine(projectPath, "Packages");
-        string packageCacheDir = Path.Combine(projectPath, "Library", "PackageCache");
+        string packageCacheDir = Worktree.LibraryPath(projectPath, "PackageCache");
         if (!Directory.Exists(assetsDir))
         {
             Console.Error.WriteLine("Error: Assets/ directory not found.");

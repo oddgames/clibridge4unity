@@ -24,6 +24,7 @@ internal static class LintSemantic
     sealed class Cache
     {
         public string ProjectPath;
+        public string LibraryRoot;
         public DateTime UnityDllMtime;
         public DateTime ProjectSettingsMtime;
         public List<MetadataReference> References;
@@ -62,8 +63,11 @@ internal static class LintSemantic
             string projSettingsAsset = Path.Combine(projectPath, "ProjectSettings", "ProjectSettings.asset");
             DateTime engineMtime = File.Exists(engineDll) ? File.GetLastWriteTimeUtc(engineDll) : DateTime.MinValue;
             DateTime psMtime = File.Exists(projSettingsAsset) ? File.GetLastWriteTimeUtc(projSettingsAsset) : DateTime.MinValue;
+            // A worktree copy reads ScriptAssemblies and PackageCache from its origin (see Worktree).
+            string libraryRoot = Worktree.LibraryRoot(projectPath);
 
             if (_cache != null && _cache.ProjectPath == projectPath
+                && _cache.LibraryRoot == libraryRoot
                 && _cache.UnityDllMtime == engineMtime
                 && _cache.ProjectSettingsMtime == psMtime)
             {
@@ -150,7 +154,7 @@ internal static class LintSemantic
             //    the source AND the prebuilt DLL gives every type two definitions → cascading
             //    CS0121/CS0433/CS0104 false positives ("ambiguous" / "defined in multiple
             //    assemblies"). Only keep DLLs whose source is OUTSIDE Assets/ (= packages).
-            string scriptAsmDir = Path.Combine(projectPath, "Library", "ScriptAssemblies");
+            string scriptAsmDir = Path.Combine(libraryRoot, "ScriptAssemblies");
             if (Directory.Exists(scriptAsmDir))
             {
                 var skipDllNames = CollectUserAsmdefDllNames(projectPath);
@@ -214,7 +218,7 @@ internal static class LintSemantic
             // by DLL filename, the alphabetically-first folder wins — which can be the stale one,
             // binding types against an outdated DLL and producing phantom errors (e.g. CS1739 for
             // a parameter the live package version changed). See LintAsmdef.ResolvedPackageCacheDirs.
-            string pkgCacheRoot = Path.Combine(projectPath, "Library", "PackageCache");
+            string pkgCacheRoot = Path.Combine(libraryRoot, "PackageCache");
             var resolvedPkgDirs = LintAsmdef.ResolvedPackageCacheDirs(projectPath);
             if (resolvedPkgDirs.Count > 0)
                 ScanPackageDirs(resolvedPkgDirs);
@@ -249,7 +253,11 @@ internal static class LintSemantic
             // but the user-written define lingers in ProjectSettings.asset). Reading the YAML
             // directly causes false-positive errors on `#if PHOTON_UNITY_NETWORKING` blocks.
             // Fallback: compute defines manually (older or non-IDE-projected projects).
+            // A worktree copy has no generated csproj; its origin's carries the same defines
+            // unless the manifests differ, which LINT unity reports beside the results.
             string asmCSharpCsproj = Path.Combine(projectPath, "Assembly-CSharp.csproj");
+            if (!File.Exists(asmCSharpCsproj))
+                asmCSharpCsproj = Path.Combine(Worktree.LibraryOwner(projectPath), "Assembly-CSharp.csproj");
             string[] csprojDefines = ReadCsprojDefines(asmCSharpCsproj);
             string[] userDefines;
             string[] builtinDefines;
@@ -269,6 +277,7 @@ internal static class LintSemantic
             _cache = new Cache
             {
                 ProjectPath = projectPath,
+                LibraryRoot = libraryRoot,
                 UnityDllMtime = engineMtime,
                 ProjectSettingsMtime = psMtime,
                 References = refs,

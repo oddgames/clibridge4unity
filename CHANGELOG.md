@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **`WORKTREE create <branch> [--adopt <workspace>] | remove [<path>] | list`** makes a second checkout of the project on an existing branch beside the current one, for an agent working in parallel while this checkout keeps the Unity editor. Plastic: a regular workspace with cloaked rules written before the first update, so the copy holds code, prefabs, scenes and `.meta` files only (a 48 GB project came down to 1.4 GB in two minutes); git: `git worktree add`. The branch must exist (nothing ever creates one on a shared repository); a Plastic branch whose project folder or root contains a `.git` is refused, since Claude Code refuses such a worktree; an existing copy on the branch is reused; removal refuses pending changes and new files. Configuration under `"worktree"` in `ProjectSettings/clibridge4unity.json`: `root`, `namePrefix`, `cloaked` (+ `cloakedDefaults`), `hooks`. See [WorktreeCommands.cs](clibridge4unity/WorktreeCommands.cs).
+- **`HOOK worktree-create` / `HOOK worktree-remove`** are Claude Code's `WorktreeCreate`/`WorktreeRemove` hooks, so `EnterWorktree` and `claude -w <branch>` go through `WORKTREE`. `SETUP` registers them in `.claude/settings.json` for Plastic projects (git projects opt in with `"hooks": true`, since Claude Code's own git worktrees already work and are now recognised as copies without any marker).
+- **`clibridge4unity-worktree` skill**: when to make a worktree, the branch questions to ask first, what works inside one and how to finish.
+- **Worktree copies.** A project folder holding `.clibridge4unity/worktree.json` (`{"origin": "<launch project folder>", "editor": false, …}`) is a copy of another checkout with no Unity editor of its own — the shape an agent gets when it works on a second branch beside the project that has the editor. In a copy, commands that need the pipe or target an editor (`STATUS`, `COMPILE`, `PLAY`, `OPEN`, `WAKEUP`, `DISMISS`, `READY`, …) fail at once with a message naming the origin, before any ledger, tick flag or daemon state is written into the copy; `OPEN force` opts in. The Roslyn daemon no longer autostarts there (`ANALYZE`, `MAP` and `LINT` still start it on demand). `LINT unity`, `ANALYZE`, `MAP` and the DLL index read `Library/ScriptAssemblies`, `Library/PackageCache` and `Library/PackageManager/ProjectCache` from the origin, so a copy lints its own sources against real compiled packages. The report names the borrowed Library, says when the origin has no ScriptAssemblies yet, and flags a `Packages/manifest.json` or `packages-lock.json` that differs from the origin's. The incremental "DLL up-to-date" skip and the stale-DLL note are off while the Library is borrowed, since the origin's DLLs were built from the origin's sources. See [Worktree.cs](clibridge4unity/Worktree.cs).
+
+### Fixed
+- **Pipe discovery could adopt another project's editor.** When the project's own pipe was silent, the heartbeat lookup matched status files by project *folder name* and fell back to the only candidate even when it named a different path — and a copy of a project keeps the origin's folder name. A status file is now adopted by name only when it doesn't say which project it serves.
+- The generated CLAUDE.md/AGENTS.md said `LINT unity` "falls back to `COMPILE`" past its budget. It stops with partial results and says so; it never runs `COMPILE`. The text now matches.
+
 ## v1.1.90 — 2026-10-26
 
 ## v1.1.90
