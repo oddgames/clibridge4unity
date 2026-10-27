@@ -90,7 +90,7 @@ internal static class LintAsmdef
         if (resolvedPkgDirs.Count > 0)
             roots.AddRange(resolvedPkgDirs);
         else
-            roots.Add(Path.Combine(projectPath, "Library", "PackageCache"));
+            roots.Add(Worktree.LibraryPath(projectPath, "PackageCache"));
         roots.AddRange(ResolveFilePackagePaths(projectPath));
         var asmdefs = new List<string>();
         foreach (var r in roots)
@@ -274,13 +274,14 @@ internal static class LintAsmdef
     /// subdir makes LINT/analysis bind types against a stale DLL and report phantom errors
     /// (e.g. CS1739 for a parameter the live version added/removed). Returns an empty set if the
     /// file is missing or unreadable — callers should fall back to enumerating all subdirs so a
-    /// fresh checkout (before Unity's first resolve) still works.</summary>
+    /// fresh checkout (before Unity's first resolve) still works. For a worktree copy both the
+    /// cache file and the directories are the origin's (see <see cref="Worktree"/>).</summary>
     public static HashSet<string> ResolvedPackageCacheDirs(string projectPath)
     {
         var dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        string cacheFile = Path.Combine(projectPath, "Library", "PackageManager", "ProjectCache");
+        string cacheFile = Worktree.LibraryPath(projectPath, "PackageManager", "ProjectCache");
         if (!File.Exists(cacheFile)) return dirs;
-        string pkgCacheRoot = Path.Combine(projectPath, "Library", "PackageCache")
+        string pkgCacheRoot = Worktree.LibraryPath(projectPath, "PackageCache")
             .Replace('\\', '/');
         try
         {

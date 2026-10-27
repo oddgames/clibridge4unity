@@ -94,7 +94,7 @@ internal sealed class AssetGraph
         {
             Path.Combine(_projectPath, "Assets"),
             Path.Combine(_projectPath, "Packages"),
-            Path.Combine(_projectPath, "Library", "PackageCache"),
+            Worktree.LibraryPath(_projectPath, "PackageCache"),
         };
         var metaFiles = new List<string>();
         foreach (var root in metaRoots)

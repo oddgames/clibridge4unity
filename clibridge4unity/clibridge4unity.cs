@@ -220,6 +220,7 @@ class Program
                     or "ANALYZE" or "CODE_ANALYZE" or "CODE_SEARCH" or "MAP" or "LINT"
                     or "EDITORLOG" or "ELOG" or "EDITORLOGS" or "SETUP" or "UPDATE" or "HOOK"
                     or "CAPTURE" or "RECORD" or "MEMSNAP" or "DEVICE" or "ADB" or "BUGPUNCH" or "BP"
+                    or "WORKTREE"
                     ;
 
     private static int SafeCurrentPid()
@@ -1000,6 +1001,7 @@ class Program
             case "INSTALL":
             case "PREFLIGHT":
             case "SESSIONS":
+            case "WORKTREE":
             case "PING":
             case "PROBE":
             case "DIAG":
@@ -1745,9 +1747,14 @@ class Program
             return RoslynDaemon.Run(projectPath, data);
         }
 
-        // HOOK: Claude Code PreToolUse hook handler — reads JSON from stdin, no pipe/project needed
+        // HOOK: Claude Code hook handlers — read JSON from stdin, no pipe/project needed. Bare HOOK
+        // is the PreToolUse hook; `worktree-create` / `worktree-remove` are the WorktreeCreate /
+        // WorktreeRemove hooks (see WorktreeCommands).
         if (cmdUpper == "HOOK")
         {
+            string hookKind = (data ?? "").Trim().ToLowerInvariant();
+            if (hookKind == "worktree-create") return WorktreeCommands.HookCreate();
+            if (hookKind == "worktree-remove") return WorktreeCommands.HookRemove();
             return HandleHook();
         }
 
@@ -1809,6 +1816,9 @@ class Program
         // Anchor every .clibridge4unity path to the absolute project root, not the CWD.
         projectPath = Path.GetFullPath(projectPath);
         _resolvedProjectPath = projectPath;
+        // A worktree copy has no editor of its own and never will; see Worktree.
+        var worktree = Worktree.Read(projectPath);
+        bool inWorktreeCopy = worktree != null && worktree.IsCopy;
 
         // LAST: replay (or filter) the previous response without re-executing the command.
         // Modes: bare = full | head N | tail N | grep PATTERN
@@ -1823,6 +1833,21 @@ class Program
         // SESSIONS: list other active CLI agents on this project (no Unity needed).
         if (cmdUpper == "SESSIONS")
             return HandleSessionsCommand(projectPath);
+
+        // WORKTREE: make, remove or list copies of this project on other branches (no Unity needed).
+        if (cmdUpper == "WORKTREE")
+            return WorktreeCommands.Run(projectPath, _dataArgs);
+
+        // Refused before the ledgers, the tick flag and the daemon touch the copy: the pipe check
+        // below would fail the same way, but only after writing state into a folder that has no
+        // editor to read it.
+        if (inWorktreeCopy && !WorksWithoutEditor(cmdUpper, data))
+        {
+            Console.Error.WriteLine(Worktree.EditorRefusal(cmdUpper, worktree));
+            return EXIT_CONNECTION;
+        }
+        if (inWorktreeCopy && cmdUpper == "OPEN")
+            Console.Error.WriteLine($"Opening a worktree copy of {worktree.Origin}: Unity will import the whole project into this copy's Library.");
 
         // Register this invocation in the session ledger + peek at anyone else who's active.
         // Pure presence / advisory — never blocks or rewrites command behaviour.
@@ -1867,7 +1892,7 @@ class Program
         // rate. Matters most across a domain reload, when the pipe is down and the server has no
         // other way to know. Deadline-based and re-armed while waiting, so killing this process
         // stops the fast ticking within seconds instead of pegging an editor core forever.
-        if (!IsTrivialForTick(cmdUpper))
+        if (!IsTrivialForTick(cmdUpper) && !inWorktreeCopy)
         {
             try
             {
@@ -1902,8 +1927,10 @@ class Program
 
         // Daemon autostart — fire and forget. Daemon provides FileSystemWatcher-based change tracking
         // for COMPILE/SCREENSHOT/INSPECTOR. Skipped for commands that don't need it or that manage
-        // the daemon themselves.
-        if (!IsDaemonAutostartSkippedFor(cmdUpper))
+        // the daemon themselves, and in a worktree copy, where no editor consumes the change
+        // tracking and a resident index per copy is a cost nobody asked for; ANALYZE/MAP/LINT
+        // still start it on demand.
+        if (!inWorktreeCopy && !IsDaemonAutostartSkippedFor(cmdUpper))
         {
             try
             {
@@ -2578,6 +2605,9 @@ class Program
         Console.Error.WriteLine("  DEVICE list|install <apk|ipa>|uninstall|launch|log|tools   Phone over the cable (adb / libimobiledevice)");
         Console.Error.WriteLine("  BUGPUNCH auth <token> | devices | <device> run|tap|swipe|screenshot|hierarchy|log|info|get|post");
         Console.Error.WriteLine("                             Drive INTERNAL devices running the Bugpunch SDK via the server API");
+        Console.Error.WriteLine("  WORKTREE create <branch> [--adopt <ws>] | remove [<path>] | list");
+        Console.Error.WriteLine("                             A second checkout of this project on another branch (Plastic cloaked workspace or git worktree)");
+        Console.Error.WriteLine("                             for a parallel agent; Claude Code's EnterWorktree uses it via `HOOK worktree-create|worktree-remove`");
         Console.Error.WriteLine("  LAST [N|-n N|-all|-list] [-head N|-tail N|-grep PAT]  Replay one of the last 10 responses (no re-run)");
         Console.Error.WriteLine("  OPEN                       Launch Unity (or restart if in Safe Mode)");
         Console.Error.WriteLine("  KILL                       Force-terminate Unity for this project (loses unsaved work)");
@@ -2991,11 +3021,35 @@ class Program
     {
         "DISMISS", "LAST", "OPEN", "KILL", "WAKEUP", "CODE_ANALYZE", "MAP", "LINT", "SCREENSHOT",
         "EDITORLOG", "EDITORLOGS", "ELOG", "RELEASENOTES", "UNITYNOTES", "RELNOTES",
-        "DEVICE", "ADB", "BUGPUNCH", "BP",
+        "DEVICE", "ADB", "BUGPUNCH", "BP", "WORKTREE",
         // The gate must answer while the editor is busy in a play session — that is the
         // entire situation it exists for, so it can never depend on the pipe.
         "REQUESTS", "ALLOW", "DENY"
     };
+
+    // What a worktree copy (see Worktree) may run: the offline analysis commands and the CLI-side
+    // maintenance paths dispatched before the pipe check. The editor-targeting members of
+    // NoPipeNeeded aim at an editor the copy doesn't have, so they are refused like pipe commands;
+    // `OPEN force` opts in to importing the copy, and KILL stays so a forced editor can be closed.
+    static bool WorksWithoutEditor(string cmdUpper, string data)
+    {
+        switch (cmdUpper)
+        {
+            case "OPEN":
+                return data != null && data.Contains("force", StringComparison.OrdinalIgnoreCase);
+            case "WAKEUP":
+            case "DISMISS":
+            case "READY":
+                return false;
+            case "SETUP":
+            case "INSTALL":
+            case "PREFLIGHT":
+            case "REFERENCES":
+            case "REFS":
+                return true;
+        }
+        return NoPipeNeeded.Contains(cmdUpper);
+    }
 
     /// <summary>
     /// Sub-millisecond probe: is anything actually serving this pipe? Named pipes live in the
@@ -3118,8 +3172,12 @@ class Program
                 .OrderBy(c => c.Age)
                 .FirstOrDefault();
 
+            // Only a status file that doesn't say which project it serves may be adopted by
+            // folder name. Copies of a project keep the origin's folder name (a worktree's
+            // UnityProj beside the origin's), so a file naming another path is that project's
+            // editor, not an alternative spelling of ours.
             var selected = exact;
-            if (selected == null && candidates.Count == 1)
+            if (selected == null && candidates.Count == 1 && string.IsNullOrWhiteSpace(candidates[0].ProjectPath))
                 selected = candidates[0];
 
             if (selected == null)
@@ -6383,11 +6441,15 @@ class Program
         md.AppendLine("`STATUS` reports uncompiled script changes either way — believe it over this heuristic.");
         md.AppendLine();
         md.AppendLine("- `LINT` (default) — offline syntax-only. Sub-second. Catches missing braces, unclosed strings, bad keywords, malformed declarations, errors in NEW .cs Unity hasn't seen. No type binding. Works when Unity is busy/closed.");
-        md.AppendLine("- `LINT unity` — Unity-faithful **per-asmdef** compile. ~5-60s depending on project size. Parses every asmdef, builds the dependency DAG, compiles each user asmdef separately with correct refs + defines + `UNITY_EDITOR` scoping. Catches missing methods, wrong arg counts, type errors, missing usings. Asmdef-aware so no cross-asmdef type collision false-positives. Caps at 60s — falls back to `COMPILE` if exceeded.");
+        md.AppendLine("- `LINT unity` — Unity-faithful **per-asmdef** compile. ~5-60s depending on project size. Parses every asmdef, builds the dependency DAG, compiles each user asmdef separately with correct refs + defines + `UNITY_EDITOR` scoping. Catches missing methods, wrong arg counts, type errors, missing usings. Asmdef-aware so no cross-asmdef type collision false-positives. Past its budget it stops with partial results and says so — it never runs `COMPILE` for you.");
         md.AppendLine("- Append `warnings` to any mode to include warnings.");
         md.AppendLine();
         md.AppendLine("Backed by the Roslyn daemon's FileSystemWatcher → catches errors in `.cs` files Unity hasn't seen yet.");
         md.AppendLine("`LINT` (unity mode) uses `Library/ScriptAssemblies/<package>.dll` as MetadataReferences for package asmdefs (Unity already compiled them) — only USER asmdefs get re-compiled, hence the speed.");
+        md.AppendLine();
+        md.AppendLine("**Worktrees.** `WORKTREE create <branch>` makes a second checkout of this project on an existing branch beside this one (Plastic: a cloaked workspace holding code, prefabs, scenes and `.meta` only; git: `git worktree add`), for an agent working in parallel; Claude Code's `EnterWorktree` goes through it when SETUP has registered the hooks. The copy carries `.clibridge4unity/worktree.json` naming its `origin` (this checkout), and a plain git worktree is recognised without one.");
+        md.AppendLine("In a copy, editor commands (`STATUS`, `COMPILE`, `PLAY`, `OPEN`, `WAKEUP`, …) fail at once and name the origin; `ANALYZE`, `MAP`, `LINT` and `LINT unity` work, the last compiling the copy's sources against the origin's `Library`.");
+        md.AppendLine("Run editor commands from the origin after switching it to the copy's branch. `WORKTREE remove` refuses a copy with pending changes. Details: the `clibridge4unity-worktree` skill.");
         md.AppendLine();
         md.AppendLine("When something IS broken, escalate cheapest-first: `STATUS` (shows current compile errors) → `LINT` (offline syntax) → `LINT unity` (type binding) → `COMPILE` (ground truth — domain reload, breaks the pipe; needed for source generators / post-compile callbacks).");
         md.AppendLine();
@@ -7787,6 +7849,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         // Step 3: Install Claude Code hooks (Codex/ChatGPT reads AGENTS.md; no hook support needed)
         Console.WriteLine();
         InstallHooks(projectPath);
+        WorktreeCommands.InstallHooks(projectPath);
 
         // Step 4: Install per-task skill files into .claude/skills/
         Console.WriteLine();

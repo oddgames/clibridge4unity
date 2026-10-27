@@ -58,6 +58,7 @@ internal static class LintUnity
         public int SourceGeneratorFailures; // failed to load (version mismatch etc)
         public int FreshAsmdefCount;     // asmdefs skipped because their prebuilt DLL was up-to-date
         public string UnityVersion;
+        public List<string> Notes = new(); // worktree provenance: borrowed Library, manifest drift
     }
 
     /// <summary>Run the Unity-faithful lint on USER asmdefs only. Package asmdefs use their
@@ -79,6 +80,18 @@ internal static class LintUnity
     {
         var swTotal = Stopwatch.StartNew();
         var result = new RunResult();
+
+        // A worktree copy compiles against its origin's Library (see Worktree). Without a
+        // ScriptAssemblies there every package type is unresolved and the run is a flood of
+        // CS0246/CS0234, so say what is missing instead.
+        string scriptAsmDir = Worktree.LibraryPath(projectPath, "ScriptAssemblies");
+        bool borrowedLibrary = Worktree.LibraryIsBorrowed(projectPath);
+        result.Notes.AddRange(Worktree.LintNotes(projectPath));
+        if (borrowedLibrary && !Directory.Exists(scriptAsmDir))
+        {
+            result.Error = $"this worktree copy borrows Library from {Worktree.LibraryOwner(projectPath)}, which has no Library/ScriptAssemblies. Open that project in Unity once so it compiles, then retry.";
+            return result;
+        }
 
         // 1) Engine refs (BCL + UnityEngine + UnityEditor + ScriptAssemblies). Reused across asmdefs.
         //    LintSemantic.Resolve already loads ALL Library/ScriptAssemblies DLLs — package asmdef
@@ -102,7 +115,6 @@ internal static class LintUnity
         // Map: asmdef name → its compiled DLL in Library/ScriptAssemblies (Unity emits one .dll per asmdef).
         // Used as ref for user asmdef → package asmdef deps WITHOUT recompiling.
         var prebuiltAsmdefRefs = new Dictionary<string, MetadataReference>(StringComparer.OrdinalIgnoreCase);
-        string scriptAsmDir = Path.Combine(projectPath, "Library", "ScriptAssemblies");
         if (Directory.Exists(scriptAsmDir))
         {
             foreach (var dll in Directory.EnumerateFiles(scriptAsmDir, "*.dll", SearchOption.TopDirectoryOnly))
@@ -138,7 +150,11 @@ internal static class LintUnity
             if (projectRsp.NoWarn.Count > 0) bits.Add($"+{projectRsp.NoWarn.Count} nowarn");
             result.ProjectRspNote = "csc.rsp: " + string.Join(", ", bits);
         }
-        DetectStaleDlls(projectPath, userAsmdefs, scriptAsmDir, result.StaleDlls);
+        // Both mtime comparisons below are meaningless against a borrowed Library: the origin's
+        // DLLs were built from the origin's sources, not this copy's, whatever the timestamps say.
+        // A copy therefore always compiles every user asmdef and reports no stale DLLs.
+        if (!borrowedLibrary)
+            DetectStaleDlls(projectPath, userAsmdefs, scriptAsmDir, result.StaleDlls);
 
         // Incremental skip: any user asmdef whose Library/ScriptAssemblies DLL is newer than every
         // input (source files + .asmdef config) can be reused as-is. Unity already compiled it
@@ -150,7 +166,9 @@ internal static class LintUnity
         // asmdef stays "fresh" until Unity recompiles. Acceptable — the DLL also still contains
         // the deleted file's symbols, so type-binding would still pass; mismatch self-corrects on
         // next Unity refresh.
-        var freshDllRefs = ComputeFreshAsmdefs(userAsmdefs, scriptAsmDir, prebuiltAsmdefRefs);
+        var freshDllRefs = borrowedLibrary
+            ? new Dictionary<string, MetadataReference>(StringComparer.OrdinalIgnoreCase)
+            : ComputeFreshAsmdefs(userAsmdefs, scriptAsmDir, prebuiltAsmdefRefs);
         result.FreshAsmdefCount = freshDllRefs.Count;
 
         // Source generators: discover Roslyn-tagged DLLs across project + packages. Cached after first call.
@@ -303,7 +321,7 @@ internal static class LintUnity
             catch { }
         }
         // PackageCache/<name>@<hash>/
-        string cache = Path.Combine(graph.ProjectPath, "Library", "PackageCache");
+        string cache = Worktree.LibraryPath(graph.ProjectPath, "PackageCache");
         if (Directory.Exists(cache))
         {
             try
@@ -883,6 +901,8 @@ internal static class LintUnity
         sb.AppendLine($"Files: {totalFiles}  Errors: {totalErrors}{(includeWarnings ? $"  Warnings: {totalWarnings}" : "")}  Mode: unity (asmdef-aware, {asmdefsCompiled} compiled, {asmdefsSkipped} skipped{incNote}, {run.UserAsmdefCount} user asmdefs, {run.RefCount} engine refs, {run.FilterDebugCount} dupe-refs filtered, {run.SourceGeneratorCount} source generators, {run.TotalMs}ms)");
         if (!string.IsNullOrEmpty(run.ProjectRspNote))
             sb.AppendLine(run.ProjectRspNote);
+        foreach (var note in run.Notes)
+            sb.AppendLine(note);
         if (run.StaleDlls.Count > 0)
         {
             sb.AppendLine($"Stale ScriptAssemblies DLLs ({run.StaleDlls.Count}) — Unity hasn't recompiled these asmdefs since their source changed; missing-type errors below may be false positives. Run COMPILE to refresh:");

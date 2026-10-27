@@ -25,6 +25,7 @@ internal static class LintSourceGenerators
     sealed class Cache
     {
         public string ProjectPath;
+        public string PackageCache;
         public List<ISourceGenerator> Generators;
         public List<DiagnosticAnalyzer> Analyzers;
         public List<string> LoadFailures;
@@ -38,13 +39,13 @@ internal static class LintSourceGenerators
     {
         lock (_lock)
         {
-            if (_cache != null && _cache.ProjectPath == projectPath)
+            string packageCache = Worktree.LibraryPath(projectPath, "PackageCache");
+            if (_cache != null && _cache.ProjectPath == projectPath && _cache.PackageCache == packageCache)
                 return (_cache.Generators, _cache.LoadFailures);
 
-            var result = new Cache { ProjectPath = projectPath, Generators = new(), Analyzers = new(), LoadFailures = new() };
+            var result = new Cache { ProjectPath = projectPath, PackageCache = packageCache, Generators = new(), Analyzers = new(), LoadFailures = new() };
             var seenDll = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            string[] roots = { Path.Combine(projectPath, "Assets"), Path.Combine(projectPath, "Packages"),
-                               Path.Combine(projectPath, "Library", "PackageCache") };
+            string[] roots = { Path.Combine(projectPath, "Assets"), Path.Combine(projectPath, "Packages"), packageCache };
 
             foreach (var root in roots)
             {
