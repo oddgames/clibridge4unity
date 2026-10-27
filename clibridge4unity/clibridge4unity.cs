@@ -3029,7 +3029,8 @@ class Program
 
     // What a worktree copy (see Worktree) may run: the offline analysis commands and the CLI-side
     // maintenance paths dispatched before the pipe check. The editor-targeting members of
-    // NoPipeNeeded aim at an editor the copy doesn't have, so they are refused like pipe commands;
+    // NoPipeNeeded aim at an editor the copy doesn't have, so they are refused like pipe commands
+    // (SCREENSHOT included: its window capture would show the origin's editor on another branch);
     // `OPEN force` opts in to importing the copy, and KILL stays so a forced editor can be closed.
     static bool WorksWithoutEditor(string cmdUpper, string data)
     {
@@ -3040,6 +3041,7 @@ class Program
             case "WAKEUP":
             case "DISMISS":
             case "READY":
+            case "SCREENSHOT":
                 return false;
             case "SETUP":
             case "INSTALL":
@@ -8277,13 +8279,15 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
     }
 
     // ─── Skill installation ────────────────────────────────────────────
-    // Embeds curated per-task skill files (skills/*.md) into the CLI exe and unpacks them into
-    // <project>/.claude/skills/ on SETUP. Every shipped skill is named clibridge4unity-<topic>.md
-    // and SETUP wipes the whole prefix-matched set before re-installing — so the on-disk copy is
-    // always exactly what the current CLI ships. If a user wants to keep a customised version of a
-    // shipped skill, they rename it (drop the prefix); files not matching `clibridge4unity-*` are
-    // never touched. Legacy files installed by an older CLI (no prefix, but with our SHA marker)
-    // are also wiped — both as a one-time cleanup.
+    // Embeds curated per-task skill files (skills/*.md) into the CLI exe and unpacks each one into
+    // <project>/.claude/skills/<name>/SKILL.md on SETUP — the only layout Claude Code discovers; a
+    // flat .claude/skills/<name>.md is never loaded (its debug guide lists exactly that as the
+    // reason a skill is missing from /skills). Every shipped skill is named clibridge4unity-<topic>
+    // and SETUP wipes the whole prefix-matched set (directories, and flat files from older CLIs)
+    // before re-installing — so the on-disk copy is always exactly what the current CLI ships. If a
+    // user wants to keep a customised version of a shipped skill, they rename it (drop the prefix);
+    // entries not matching `clibridge4unity-*` are never touched. Legacy files installed by an older
+    // CLI (no prefix, but with our SHA marker) are also wiped — both as a one-time cleanup.
     static void InstallSkills(string projectPath)
     {
         string skillsDir = Path.Combine(projectPath, ".claude", "skills");
@@ -8295,13 +8299,19 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             return;
         }
 
-        // 1. Wipe every shipped skill: files matching `clibridge4unity-*.md` (current naming) AND
-        //    files that carry the legacy `<!-- clibridge4unity:installed-sha=… -->` marker (older
-        //    CLI versions). Files outside both buckets are user-authored and never touched —
-        //    rename a shipped skill to keep a customised copy.
+        // 1. Wipe every shipped skill: `clibridge4unity-*/` directories (current layout), flat
+        //    `clibridge4unity-*.md` files (the layout older CLIs wrote, which Claude Code never
+        //    read) AND files that carry the legacy `<!-- clibridge4unity:installed-sha=… -->`
+        //    marker. Entries outside those buckets are user-authored and never touched — rename a
+        //    shipped skill to keep a customised copy.
         int wiped = 0;
         try
         {
+            foreach (var dir in Directory.GetDirectories(skillsDir, "clibridge4unity-*"))
+            {
+                try { Directory.Delete(dir, recursive: true); wiped++; }
+                catch (Exception ex) { Console.Error.WriteLine($"     skipped delete .claude/skills/{Path.GetFileName(dir)}/ ({ex.Message})"); }
+            }
             foreach (var path in Directory.GetFiles(skillsDir, "*.md"))
             {
                 string fileName = Path.GetFileName(path);
@@ -8347,7 +8357,9 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
         foreach (var resourceName in resourceNames)
         {
             string fileName = resourceName.Substring("skills/".Length);
-            string targetPath = Path.Combine(skillsDir, fileName);
+            string skillName = Path.GetFileNameWithoutExtension(fileName);
+            string targetDir = Path.Combine(skillsDir, skillName);
+            string targetPath = Path.Combine(targetDir, "SKILL.md");
 
             string body;
             try
@@ -8359,19 +8371,20 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"     skipped     .claude/skills/{fileName} (read error: {ex.Message})");
+                Console.Error.WriteLine($"     skipped     .claude/skills/{skillName}/SKILL.md (read error: {ex.Message})");
                 skipped++;
                 continue;
             }
 
             try
             {
+                Directory.CreateDirectory(targetDir);
                 File.WriteAllText(targetPath, body);
                 installed++;
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"     skipped     .claude/skills/{fileName} (write error: {ex.Message})");
+                Console.Error.WriteLine($"     skipped     .claude/skills/{skillName}/SKILL.md (write error: {ex.Message})");
                 skipped++;
             }
         }

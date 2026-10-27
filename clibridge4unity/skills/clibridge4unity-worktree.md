@@ -18,6 +18,11 @@ its pipe, so it says so at once instead of waiting.
 - **The branch must already exist.** `WORKTREE create` never creates one on a shared repository. If
   it is missing, offer to create it, name its parent, and do it only on a yes
   (Plastic: `cm branch create /main/x`, from Git Bash with `MSYS_NO_PATHCONV=1`; git: `git branch x`).
+- **Does the task need the Unity editor?** Seeing or running prefabs, menus and scenes, play mode,
+  tests, screenshots and imports all need one, and a cloaked copy has neither an editor nor the
+  textures, models and audio. Ask before creating anything. If it does, offer adopting a full
+  workspace on the branch (`--adopt`, below) or doing the work in this checkout once it is on the
+  branch. A cloaked copy is for code, YAML-level prefab and scene edits, lint and analysis.
 - A session holds one worktree. If the working directory already contains
   `.clibridge4unity/worktree.json`, this is a worktree: a second parallel task gets its own tab.
 - Creation downloads the branch: minutes, and a GB or two for a large project. Say so first.
@@ -48,12 +53,15 @@ What you get:
 
 ## 3. Working inside a worktree
 
-- Editor commands (`STATUS`, `COMPILE`, `PLAY`, `OPEN`, `WAKEUP`, `DISMISS`, `READY`, `PING`, …)
-  exit 10 at once with "This is a worktree copy … of <origin>". Do not retry them, do not run
-  `OPEN` (`OPEN force` imports the whole project into the copy and is almost never wanted), and do
-  not run them against the origin either: the origin's editor is on its own branch and belongs to
-  whoever launched it. Editor work on this branch means switching the origin to it, which is the
-  user's call.
+- Editor commands (`STATUS`, `COMPILE`, `PLAY`, `OPEN`, `WAKEUP`, `DISMISS`, `READY`, `PING`,
+  `SCREENSHOT`, …) exit 10 at once with "This is a worktree copy … of <origin>". Do not retry them,
+  do not run `OPEN` (`OPEN force` imports the whole project into the copy and is almost never
+  wanted), and do not run them against the origin either: the origin's editor is on its own branch
+  and belongs to whoever launched it.
+- If the task turns out to need the editor after all, the first such command is that refusal. Stop
+  there and tell the user; the choice is theirs: switch the origin to this branch (ask, every
+  time), adopt a full workspace, or finish the code part here and test from the origin after it
+  is checked in.
 - `LINT`, `LINT unity`, `ANALYZE` and `MAP` work. `LINT unity` compiles this copy's sources against
   the **origin's** `Library` (ScriptAssemblies, packages) and says so in its header; it is as current
   as the origin's last compile, it recompiles every user asmdef (no "DLL up-to-date" skip), and it
