@@ -22,7 +22,7 @@ namespace clibridge4unity;
 /// The dimmed backdrop is precomputed into a second HBITMAP rather than alpha-blended per paint:
 /// one pass over the pixel buffer at startup beats an AlphaBlend on every mouse-move.
 /// </summary>
-static class RegionCapture
+static partial class RegionCapture
 {
     // ─── Win32 ────────────────────────────────────────────────────────
 
@@ -150,6 +150,7 @@ static class RegionCapture
     [DllImport("kernel32.dll")] static extern IntPtr GlobalFree(IntPtr hMem);
     const uint CF_UNICODETEXT = 13;
     const uint CF_DIB = 8;
+    const uint CF_HDROP = 15;
     const uint GMEM_MOVEABLE = 0x0002;
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int max);
@@ -203,6 +204,7 @@ static class RegionCapture
             if ((p == "--out" || p == "-o") && i + 1 < parts.Length) outPath = parts[++i].Trim('"');
             else if (p == "--daemon" || p == "daemon") daemon = true;
             else if (p == "--full") full = true;
+            else if (p == "--no-annotate") _annotateEnabled = false;
             else if (p == "--rect" && i + 1 < parts.Length) fixedRect = parts[++i];
             else if (TryParseClipOption(parts, ref i)) { }
             else if (p == "--last-prompt" || p == "last-prompt") return CopyLastPrompt();
@@ -269,18 +271,23 @@ static class RegionCapture
         if (!GrabDesktop()) return false;
         try
         {
-            if (!SelectInternal(out int rx, out int ry, out int rw, out int rh)) return false;
+            if (!SelectInternal(false, out int rx, out int ry, out int rw, out int rh)) return false;
             sx = _vx + rx; sy = _vy + ry; sw = rw; sh = rh;
             return true;
         }
         finally { ReleaseDesktop(); }
     }
 
-    /// <summary>Run the overlay and resolve the dragged rectangle. Assumes the desktop is grabbed.</summary>
-    static bool SelectInternal(out int rx, out int ry, out int rw, out int rh)
+    /// <summary>
+    /// Run the overlay and resolve the dragged rectangle. Assumes the desktop is grabbed. With
+    /// <paramref name="annotate"/> the drag ends in the annotation toolbar rather than closing;
+    /// RECORD never annotates — it needs the region and nothing else.
+    /// </summary>
+    static bool SelectInternal(bool annotate, out int rx, out int ry, out int rw, out int rh)
     {
         rx = ry = rw = rh = 0;
         _haveRect = false; _dragging = false;
+        ResetAnnotation(annotate);
         if (!ShowOverlay() || !_haveRect) return false;
 
         rx = Math.Clamp(Math.Min(_x0, _x1), 0, Math.Max(0, _vw - 1));
@@ -294,6 +301,7 @@ static class RegionCapture
     public static string CaptureOnce(string outPath, bool full = false, string fixedRect = null)
     {
         _lastClipStatus = null;
+        _annotationNotes = null;
         // Sample the foreground owner FIRST — the overlay is about to become the foreground
         // window, and after that we can no longer tell which editor you were looking at.
         uint fgPid = ForegroundPid();
@@ -324,10 +332,11 @@ static class RegionCapture
                 rw = Math.Min(rw, _vw - rx);
                 rh = Math.Min(rh, _vh - ry);
             }
-            else if (!SelectInternal(out rx, out ry, out rw, out rh))
+            else if (!SelectInternal(_annotateEnabled, out rx, out ry, out rw, out rh))
             {
                 return null;
             }
+            else BurnAnnotations(rx, ry);
 
             var crop = Crop(_pixels, _vw, _vh, rx, ry, rw, rh);
             string dest = outPath;
@@ -397,7 +406,8 @@ static class RegionCapture
     /// following the same clipboard mode as a still. Previously this put the prompt text on the
     /// clipboard regardless of mode, and nothing at all when no Unity editor was open.
     /// </summary>
-    public static void WriteContextFor(string capturePath, byte[] sheetDib = null)
+    /// <returns>What reached the clipboard, for the recording bar; null when nothing did.</returns>
+    public static string WriteContextFor(string capturePath, byte[] sheetDib = null)
     {
         string clipText = null;
         if (_collectContext)
@@ -405,7 +415,7 @@ static class RegionCapture
             var all = Program.EnumerateUnityWorkspaces();
             if (all != null && all.Count > 0) TryWriteContext(capturePath, all[0], null, out clipText);
         }
-        if (_clipMode == ClipMode.Off) return;
+        if (_clipMode == ClipMode.Off) return null;
 
         bool wantText = _clipMode == ClipMode.Text || _clipMode == ClipMode.Both;
         byte[] dib = _clipMode == ClipMode.Text ? null : sheetDib;
@@ -414,11 +424,13 @@ static class RegionCapture
         string what = dib != null && text != null ? "contact sheet + " + (clipText != null ? "prompt" : "path")
                     : dib != null ? "contact sheet"
                     : clipText != null ? "prompt" : "path";
-        string status = TrySetClipboard(text, dib)
+        bool ok = TrySetClipboard(text, dib);
+        string status = ok
             ? $"clipboard: {what} copied"
             : $"clipboard: could not copy ({_lastClipError})";
         Console.WriteLine(status);
         DaemonLog($"recording {Path.GetFileName(capturePath)}: {status}");
+        return ok ? char.ToUpperInvariant(what[0]) + what.Substring(1) + " copied" : null;
     }
 
     /// <summary>
@@ -565,21 +577,49 @@ static class RegionCapture
 
     static bool TrySetClipboard(string text, byte[] dib)
     {
+        var items = new List<(uint, byte[], string)>();
+        if (dib != null) items.Add((CF_DIB, dib, "image"));
+        if (text != null) items.Add((CF_UNICODETEXT, Encoding.Unicode.GetBytes(text + "\0"), "text"));
+        return TrySetClipboardFormats(items);
+    }
+
+    /// <summary>
+    /// Put files on the clipboard the way Explorer's Copy does (CF_HDROP), so a paste into Slack,
+    /// Discord, a mail client or a folder attaches the file itself — the only paste form a
+    /// recording has, since an mp4 has no image or text a paste target would take instead.
+    /// </summary>
+    static bool TrySetClipboardFiles(params string[] paths)
+    {
+        // DROPFILES: pFiles (offset of the list) = 20, pt = 0,0, fNC = 0, fWide = 1; then a
+        // double-NUL-terminated list of UTF-16 paths.
+        byte[] names = Encoding.Unicode.GetBytes(string.Join("\0", paths) + "\0\0");
+        var data = new byte[20 + names.Length];
+        BitConverter.GetBytes(20).CopyTo(data, 0);
+        BitConverter.GetBytes(1).CopyTo(data, 16);
+        Buffer.BlockCopy(names, 0, data, 20, names.Length);
+        return TrySetClipboardFormats(new List<(uint, byte[], string)> { (CF_HDROP, data, "file") });
+    }
+
+    // A real owner window, not NULL: per the docs, EmptyClipboard after OpenClipboard(NULL) leaves
+    // the clipboard ownerless and SetClipboardData may then fail — intermittently. The daemon window
+    // owns it in the daemon; the recording bar owns it in a RECORD process, which before the bar
+    // existed had no window at all and copied its contact sheet through OpenClipboard(NULL).
+    static IntPtr ClipOwner => _daemonHwnd != IntPtr.Zero ? _daemonHwnd : _hudBar;
+
+    static bool TrySetClipboardFormats(List<(uint, byte[], string)> items)
+    {
         _lastClipError = "another app is holding it";
         for (int attempt = 0; attempt < 15; attempt++)
         {
             // ~1.5s of patience: clipboard contention is routine (a password manager, a clipboard
             // history tool, another paste in flight), and 300ms was short enough to lose races
             // that would have resolved on their own.
-            // A real owner window, not NULL: per the docs, EmptyClipboard after OpenClipboard(NULL)
-            // leaves the clipboard ownerless and SetClipboardData may then fail — intermittently.
-            if (!OpenClipboard(_daemonHwnd)) { Thread.Sleep(100); continue; }
+            if (!OpenClipboard(ClipOwner)) { Thread.Sleep(100); continue; }
             bool ok = true;
             try
             {
                 if (!EmptyClipboard()) { ok = false; _lastClipError = $"EmptyClipboard failed ({Marshal.GetLastWin32Error()})"; }
-                if (dib != null) ok &= PutClipboard(CF_DIB, dib, "image");
-                if (text != null) ok &= PutClipboard(CF_UNICODETEXT, Encoding.Unicode.GetBytes(text + " "), "text");
+                foreach (var (format, data, what) in items) ok &= PutClipboard(format, data, what);
                 return ok;
             }
             catch (Exception ex) { _lastClipError = ex.Message; return false; }
@@ -627,6 +667,13 @@ static class RegionCapture
             else
                 sb.AppendLine($"Project: `{pick.ProjectPath}`");
             sb.AppendLine();
+            if (!string.IsNullOrEmpty(_annotationNotes))
+            {
+                sb.AppendLine("## Marked on the image");
+                sb.AppendLine("(pixel coordinates within the image)");
+                sb.Append(_annotationNotes);
+                sb.AppendLine();
+            }
             sb.AppendLine(markdown.TrimEnd());
             string prompt = sb.ToString();
             File.WriteAllText(dest, prompt);
@@ -780,6 +827,9 @@ static class RegionCapture
         if (_hdcScreen != IntPtr.Zero) { DeleteDC(_hdcScreen); _hdcScreen = IntPtr.Zero; }
         if (_hdcDim != IntPtr.Zero) { DeleteDC(_hdcDim); _hdcDim = IntPtr.Zero; }
         _pixels = null;
+        _shapes.Clear();
+        _live = null;
+        ReleaseAnnotationGdi();
     }
 
     static BITMAPINFO NewBmi(int w, int h)
@@ -824,8 +874,13 @@ static class RegionCapture
 
         _brushBorder = CreateSolidBrush(0x00D7A24E);  // COLORREF is BGR — a Unity-ish blue
 
+        InitOverlayScale();
+
+        // At the virtual screen's origin, not (0,0): client coordinates are virtual-desktop-
+        // relative everywhere in this file, and with a monitor left of or above the primary a
+        // window at (0,0) painted the frozen desktop shifted by that monitor's width.
         IntPtr hwnd = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, cls, "Select region",
-            WS_POPUP | WS_VISIBLE, 0, 0, _vw, _vh, IntPtr.Zero, IntPtr.Zero, inst, IntPtr.Zero);
+            WS_POPUP | WS_VISIBLE, _vx, _vy, _vw, _vh, IntPtr.Zero, IntPtr.Zero, inst, IntPtr.Zero);
         if (hwnd == IntPtr.Zero)
         {
             Console.Error.WriteLine("Error: could not create the selection overlay window.");
@@ -842,12 +897,15 @@ static class RegionCapture
             DispatchMessage(ref msg);
         }
 
+        ReleaseOverlayGdi();
         DeleteObject(_brushBorder);
         return true;
     }
 
     static IntPtr OverlayProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
+        if (_annotating && AnnotateMessage(hWnd, msg, wParam, lParam, out IntPtr handled)) return handled;
+
         switch (msg)
         {
             case WM_SETCURSOR:
@@ -860,19 +918,7 @@ static class RegionCapture
             case WM_PAINT:
             {
                 IntPtr hdc = BeginPaint(hWnd, out PAINTSTRUCT ps);
-                BitBlt(hdc, 0, 0, _vw, _vh, _hdcDim, 0, 0, SRCCOPY);
-                if (_dragging || _haveRect)
-                {
-                    int rx = Math.Min(_x0, _x1), ry = Math.Min(_y0, _y1);
-                    int rw = Math.Abs(_x1 - _x0), rh = Math.Abs(_y1 - _y0);
-                    if (rw > 0 && rh > 0)
-                    {
-                        // Undimmed inside the selection, so the crop is judged on real pixels.
-                        BitBlt(hdc, rx, ry, rw, rh, _hdcScreen, rx, ry, SRCCOPY);
-                        var border = new RECT { Left = rx - 1, Top = ry - 1, Right = rx + rw + 1, Bottom = ry + rh + 1 };
-                        FrameRect(hdc, ref border, _brushBorder);
-                    }
-                }
+                PaintOverlay(hdc, ps.rcPaint);
                 EndPaint(hWnd, ref ps);
                 return IntPtr.Zero;
             }
@@ -881,13 +927,14 @@ static class RegionCapture
                 _dragging = true; _haveRect = false;
                 _x0 = _x1 = LoWord(lParam); _y0 = _y1 = HiWord(lParam);
                 SetCapture(hWnd);
+                InvalidateOverlay(hWnd);
                 return IntPtr.Zero;
 
             case WM_MOUSEMOVE:
                 if (_dragging)
                 {
                     _x1 = LoWord(lParam); _y1 = HiWord(lParam);
-                    InvalidateRect(hWnd, IntPtr.Zero, false);
+                    InvalidateOverlay(hWnd);
                 }
                 return IntPtr.Zero;
 
@@ -897,7 +944,8 @@ static class RegionCapture
                     _dragging = false; _haveRect = true;
                     _x1 = LoWord(lParam); _y1 = HiWord(lParam);
                     ReleaseCapture();
-                    DestroyWindow(hWnd);
+                    if (_wantAnnotate && Math.Abs(_x1 - _x0) >= 4 && Math.Abs(_y1 - _y0) >= 4) BeginAnnotate(hWnd);
+                    else DestroyWindow(hWnd);
                 }
                 return IntPtr.Zero;
 
@@ -1184,6 +1232,7 @@ static class RegionCapture
         Console.WriteLine($"  Start with PC   {(auto ? "yes" : "no")}");
         Console.WriteLine($"  Captures        {CapturesDir}");
         Console.WriteLine($"  Editor state    {(_collectContext ? "collected with each capture (.context.md)" : "off")}");
+        Console.WriteLine($"  Annotate        {(_annotateEnabled ? "toolbar after the drag; Enter copies" : "off; the drag copies at once")}   (CAPTURE --no-annotate)");
         Console.WriteLine($"  Clipboard       {ClipModeLabel()}   (CAPTURE --clipboard image|text|both|off)");
         if (File.Exists(StoppedMarker))
             Console.WriteLine("  Auto-restart    suppressed (stopped on purpose) — CAPTURE --daemon re-enables it");
@@ -1468,6 +1517,7 @@ static class RegionCapture
     const int MENU_CAPTURE = 1, MENU_REC = 2, MENU_REC_TRANSCRIBE = 3, MENU_REC_STOP = 4;
     const int MENU_FOLDER = 5, MENU_AUTOSTART = 6, MENU_EXIT = 7, MENU_CONTEXT = 8;
     const int MENU_CLIP_IMAGE = 9, MENU_CLIP_TEXT = 10, MENU_CLIP_BOTH = 11, MENU_LAST_PROMPT = 12;
+    const int MENU_ANNOTATE = 13;
 
     static WndProcDelegate _daemonProcRef;  // separate GC root — ShowOverlay reassigns _wndProcRef
     static uint _taskbarCreated;
@@ -1500,6 +1550,7 @@ static class RegionCapture
         var items = new List<TrayIcon.Item>
         {
             new TrayIcon.Item { Id = MENU_CAPTURE, Text = "Capture region\tPrtScn", Disabled = rec },
+            new TrayIcon.Item { Id = MENU_ANNOTATE, Text = "Annotate before copying", Checked = _annotateEnabled },
             TrayIcon.Item.Sep(),
             rec
                 ? new TrayIcon.Item { Id = MENU_REC_STOP, Text = "Stop recording\tCtrl+PrtScn" }
@@ -1544,6 +1595,10 @@ static class RegionCapture
 
             case MENU_CONTEXT:
                 _collectContext = !_collectContext;
+                break;
+
+            case MENU_ANNOTATE:
+                _annotateEnabled = !_annotateEnabled;
                 break;
 
             case MENU_CLIP_IMAGE: _clipMode = ClipMode.Image; break;
@@ -1606,12 +1661,13 @@ static class RegionCapture
         finally { _capturing = false; }
     }
 
-    // The recorder child we last started, and whether it has been seen recording yet. Until then
-    // it is showing its region overlay — and since recorder.pid is written only once ffmpeg is
-    // running, IsRecording is false that whole time, so a second Ctrl+PrtScn used to start a
-    // second recorder (and a third: three "starting recording" lines in 17s in daemon.log).
+    // The recorder child we last started. While it shows its region overlay recorder.pid does not
+    // exist yet (it is written once ffmpeg runs), so IsRecording is false that whole time and a
+    // second Ctrl+PrtScn used to start a second recorder (three "starting recording" lines in 17s
+    // in daemon.log). The child marks that window with recorder.starting. Not "has it been seen
+    // recording": the child now stays alive after ffmpeg exits to show what was copied, and a
+    // recording shorter than the 1s timer was never seen at all, which then blocked both chords.
     static Process _recChild;
-    static bool _recChildSeenRecording;
 
     static bool RecorderSelecting
     {
@@ -1620,8 +1676,7 @@ static class RegionCapture
             if (_recChild == null) return false;
             try { if (_recChild.HasExited) { _recChild = null; return false; } }
             catch { _recChild = null; return false; }
-            if (ScreenRecorder.IsRecording) _recChildSeenRecording = true;
-            return !_recChildSeenRecording;
+            return ScreenRecorder.IsStarting;
         }
     }
 
@@ -1637,7 +1692,6 @@ static class RegionCapture
         if (RecorderSelecting) { DaemonLog($"{source}: ignored — recording region selection already up"); return; }
         DaemonLog($"{source}: starting recording");
         _recChild = ScreenRecorder.StartDetached(RecorderArgs());
-        _recChildSeenRecording = false;
     }
 
     static IntPtr DaemonProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)

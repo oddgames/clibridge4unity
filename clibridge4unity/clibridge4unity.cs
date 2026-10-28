@@ -2586,11 +2586,13 @@ class Program
         Console.Error.WriteLine("  MAP <task keywords>        Task-oriented project map: scripts + scenes/prefabs/config wiring for a task");
         Console.Error.WriteLine("  LINT [warnings]            Syntax-only fast check (default, ~1s, catches braces/strings/typos/new files)");
         Console.Error.WriteLine("  LINT unity [warnings]      Per-asmdef Unity-faithful compile (~5-30s, asmdef-aware, type-binding; aborts on 10s no-progress)");
-        Console.Error.WriteLine("  CAPTURE [--out <png>]      Drag-select a screen region (Esc/right-click cancels)");
+        Console.Error.WriteLine("  CAPTURE [--out <png>]      Drag-select a screen region, annotate (box/arrow/pen/highlight/text), click/Enter copies");
+        Console.Error.WriteLine("                             (Esc/right-click cancels; --no-annotate copies on release)");
         Console.Error.WriteLine("  CAPTURE --daemon           Tray icon + PrtScn / Ctrl+PrtScn hotkeys (--stop, --status)");
         Console.Error.WriteLine("  CAPTURE --settings         Show daemon/autostart/hotkey state and how to change it");
         Console.Error.WriteLine("  RECORD [--audio both|mic|system|none] [--seconds N] [--transcribe]");
-        Console.Error.WriteLine("                             Record a screen region with audio; emits mp4 + frame contact sheet");
+        Console.Error.WriteLine("                             Record a screen region with audio; emits mp4 + frame contact sheet;");
+        Console.Error.WriteLine("                             on-screen frame + Stop/Discard bar (--no-hud to hide)");
         Console.Error.WriteLine("  RECORD --stop / --status / --devices  Finish the recording, check state, list audio devices");
         Console.Error.WriteLine("  MEMSNAP <a.snap> [b.snap] [types|objects|labels|allocators|managed] [top:N] [filter:X]");
         Console.Error.WriteLine("                             Inspect a Memory Profiler snapshot, or diff two — no Unity needed;");

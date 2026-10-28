@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **CAPTURE: annotate before copying.** After the drag, the selection stays up with a toolbar: Box (B), Arrow (A), Pen (P), Highlight (H), Text (T), colour swatch (C cycles, 1–6 picks), Undo (Ctrl+Z / Backspace), Copy (a plain click inside the selection, Enter or Ctrl+C), Cancel (Esc / right-click) — so with nothing to mark it is still drag + one click. The toolbar is fitted to the monitor the selection is on, never the next screen. Marks are burned into the PNG and the clipboard image, and listed with image-relative coordinates under "Marked on the image" in the `.context.md`, so the prompt says where to look. Pressing outside the selection before anything is drawn starts a new drag. `--no-annotate` (or the tray's *Annotate before copying*) restores the one-step drag-and-copy. The drag now also shows the selection's size.
+- **RECORD: on-screen frame and Stop button.** A red frame sits just outside the recorded rectangle (clipped to its monitor, so a region against the screen edge has no frame on that side rather than one on the neighbouring screen), with a bar showing elapsed time (and the `--seconds` limit), **Stop** and **Discard**. Neither is ever in the video: both sit outside the grabbed region and are excluded from screen capture (`WDA_EXCLUDEFROMCAPTURE`, Windows 10 2004+). Clicking them doesn't take focus from the game. When the recording is saved, the bar reports what reached the clipboard and offers **Copy video file** (puts the mp4 on the clipboard as a file, like Explorer's Copy, for Slack/Discord/mail) and **Show** (opens Explorer on it). `--no-hud` turns it off.
+
+### Fixed
+- **A recording's clipboard copy had no owner window.** The RECORD process opened the clipboard with no window, which per the docs can make `SetClipboardData` fail intermittently. The recording bar now owns it.
+- **The selection overlay was misplaced with a monitor left of or above the primary.** It was created at (0,0) instead of the virtual screen's origin, so the frozen desktop was drawn shifted by that monitor's size.
+- **A recording shorter than one second blocked both hotkeys.** The daemon treated its recorder child as "still selecting" until its 1s timer had seen it recording. The child now marks the selection window with `recorder.starting`.
+
 ## v1.1.91 — 2026-10-27
 
 ## v1.1.91

@@ -30,6 +30,7 @@ static class ScreenRecorder
     static string PidFile => Path.Combine(Dir, "recorder.pid");
     static string StopFile => Path.Combine(Dir, "recorder.stop");
     static string TargetFile => Path.Combine(Dir, "recorder.target");
+    static string StartingFile => Path.Combine(Dir, "recorder.starting");   // region overlay up, ffmpeg not yet running
 
     static string WhisperDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".clibridge4unity", "whisper");
@@ -50,7 +51,7 @@ static class ScreenRecorder
         }
 
         string outPath = null, audio = "both";
-        bool full = false, transcribe = false, noSheet = false;
+        bool full = false, transcribe = false, noSheet = false, noHud = false;
         int seconds = 0, fps = 30;
 
         var parts = (args ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -64,14 +65,22 @@ static class ScreenRecorder
             else if (p == "--full") full = true;
             else if (p == "--transcribe") transcribe = true;
             else if (p == "--no-sheet") noSheet = true;
+            else if (p == "--no-hud") noHud = true;
             else if (RegionCapture.TryParseClipOption(parts, ref i)) { }
             else if (p == "--stop" || p == "stop") return Stop();
             else if (p == "--status" || p == "status") return Status();
             else if (p == "--devices" || p == "devices") return ListDevices();
         }
 
-        return Record(outPath, full, audio, seconds, fps, transcribe, noSheet);
+        try { return Record(outPath, full, audio, seconds, fps, transcribe, noSheet, !noHud); }
+        finally
+        {
+            if (_wroteStarting) try { File.Delete(StartingFile); } catch { }
+            RegionCapture.HudClose();
+        }
     }
+
+    static bool _wroteStarting;
 
     // ─── ffmpeg discovery ─────────────────────────────────────────────
 
@@ -180,6 +189,7 @@ static class ScreenRecorder
     }
 
     public static bool IsRecording => LivePid() != 0;
+    public static bool IsStarting => File.Exists(StartingFile);
 
     static int Status()
     {
@@ -219,7 +229,7 @@ static class ScreenRecorder
     // ─── Record ───────────────────────────────────────────────────────
 
     static int Record(string outPath, bool full, string audio, int seconds, int fps,
-                      bool transcribe, bool noSheet)
+                      bool transcribe, bool noSheet, bool hud)
     {
         if (!RequireFfmpeg(out string ffmpeg)) return 1;
 
@@ -229,6 +239,9 @@ static class ScreenRecorder
             Console.Error.WriteLine($"Already recording (pid {running}). Use RECORD --stop first.");
             return 1;
         }
+
+        Directory.CreateDirectory(Dir);
+        try { File.WriteAllText(StartingFile, Environment.ProcessId.ToString()); _wroteStarting = true; } catch { }
 
         int x, y, w, h;
         if (full)
@@ -286,6 +299,8 @@ static class ScreenRecorder
 
         File.WriteAllText(PidFile, Process.GetCurrentProcess().Id.ToString());
         File.WriteAllText(TargetFile, dest);
+        try { File.Delete(StartingFile); _wroteStarting = false; } catch { }
+        if (hud) RegionCapture.HudStart(x, y, w, h, full, seconds);
 
         // Drain stderr on a background thread. ffmpeg is chatty and a full pipe buffer deadlocks
         // the child — the classic way a recording silently stops after ~30 seconds.
@@ -307,14 +322,18 @@ static class ScreenRecorder
         Console.Error.WriteLine($"Recording {size} — {audioDesc}");
         Console.Error.WriteLine(seconds > 0
             ? $"Will stop automatically after {seconds}s."
-            : "Stop with: clibridge4unity RECORD --stop   (or the tray menu)");
+            : "Stop with: clibridge4unity RECORD --stop   (or the Stop button / tray menu)");
 
         var started = DateTime.UtcNow;
         try
         {
             while (!ff.HasExited)
             {
-                if (File.Exists(StopFile)) { RequestQuit(ff); break; }
+                if (File.Exists(StopFile) || RegionCapture.HudStopRequested || RegionCapture.HudDiscardRequested)
+                {
+                    RequestQuit(ff);
+                    break;
+                }
                 if (seconds > 0 && (DateTime.UtcNow - started).TotalSeconds >= seconds) { RequestQuit(ff); break; }
                 Thread.Sleep(200);
             }
@@ -331,12 +350,22 @@ static class ScreenRecorder
             try { File.Delete(TargetFile); } catch { }
         }
 
+        if (RegionCapture.HudDiscardRequested)
+        {
+            try { File.Delete(dest); } catch { }
+            Console.WriteLine("Recording discarded.");
+            return 1;
+        }
+
         if (!File.Exists(dest) || new FileInfo(dest).Length < 1024)
         {
             Console.Error.WriteLine("Error: recording produced no usable file. ffmpeg said:");
             lock (log) Console.Error.WriteLine(Tail(log.ToString(), 15));
+            RegionCapture.HudStatus("Recording failed: no usable file");
+            RegionCapture.HudLinger(6);
             return 1;
         }
+        RegionCapture.HudStatus("Saving…");
 
         double dur = ProbeDuration(dest);
         Console.WriteLine("Recorded");
@@ -360,13 +389,19 @@ static class ScreenRecorder
         // was recorded, rather than whenever someone gets round to opening the panel. Before
         // transcription, too — whisper can take longer than the clip, and the clipboard sat on
         // stale content the whole time. The prompt does not reference the transcript.
-        RegionCapture.WriteContextFor(dest, sheetDib);
+        string copied = RegionCapture.WriteContextFor(dest, sheetDib) ?? "Saved (clipboard off)";
 
-        if (transcribe && wanted.Count > 0)
+        bool transcribing = transcribe && wanted.Count > 0;
+        RegionCapture.HudStatus(transcribing ? copied + " · transcribing…" : copied, dest);
+        if (transcribing)
         {
             string txt = Transcribe(ffmpeg, dest);
             if (txt != null) Console.WriteLine($"transcript: {txt}");
+            RegionCapture.HudStatus(copied + (txt != null ? " · transcript saved" : ""));
         }
+        // Long enough to reach "Copy video file", short enough that nobody has to click it away;
+        // it never takes focus or blocks clicks, and × ends it sooner.
+        RegionCapture.HudLinger(5);
         return 0;
     }
 
