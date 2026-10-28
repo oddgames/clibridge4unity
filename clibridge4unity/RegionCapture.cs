@@ -175,7 +175,6 @@ static partial class RegionCapture
 
     static WndProcDelegate _wndProcRef;   // GC root — the window class holds a raw fn pointer to this
     static IntPtr _hbmScreen, _hbmDim, _hdcScreen, _hdcDim;
-    static byte[] _pixels;                // top-down BGRA of the frozen desktop
     static int _vx, _vy, _vw, _vh;
     static bool _dragging, _haveRect;
     static int _x0, _y0, _x1, _y1;
@@ -268,6 +267,7 @@ static partial class RegionCapture
     public static bool TrySelectRegion(out int sx, out int sy, out int sw, out int sh)
     {
         sx = sy = sw = sh = 0;
+        TimingStart();
         if (!GrabDesktop()) return false;
         try
         {
@@ -306,7 +306,9 @@ static partial class RegionCapture
         // window, and after that we can no longer tell which editor you were looking at.
         uint fgPid = ForegroundPid();
 
+        TimingStart();
         if (!GrabDesktop()) return null;
+        Mark("grab");
         try
         {
             int rx, ry, rw, rh;
@@ -336,25 +338,35 @@ static partial class RegionCapture
             {
                 return null;
             }
-            else BurnAnnotations(rx, ry);
+            else
+            {
+                Mark("select (you)");
+                BurnAnnotations(rx, ry);
+            }
 
-            var crop = Crop(_pixels, _vw, _vh, rx, ry, rw, rh);
+            var crop = ReadRegion(rx, ry, rw, rh);
+            Mark("crop");
+
+            bool wantText = _clipMode == ClipMode.Text || _clipMode == ClipMode.Both;
+            bool wantImage = _clipMode == ClipMode.Image || _clipMode == ClipMode.Both;
+
+            // The image goes on the clipboard FIRST — before the PNG is encoded and written, and
+            // before asking Unity for context (a round trip that can take seconds on a busy
+            // editor). A paste that lands before either finishes should find this capture, not
+            // the previous clipboard.
+            bool imageOk = !wantImage || TrySetClipboard(null, crop, rw, rh);
+            Mark("clipboard");
+
             string dest = outPath;
             if (string.IsNullOrWhiteSpace(dest))
                 dest = Path.Combine(CapturesDir, $"region_{DateTime.Now:yyyyMMdd_HHmmss}.png");
             dest = Path.GetFullPath(dest);
             Directory.CreateDirectory(Path.GetDirectoryName(dest));
             Program.WritePng(dest, rw, rh, crop);
+            Mark("png");
 
             PublishLatest(dest);
-
-            bool wantText = _clipMode == ClipMode.Text || _clipMode == ClipMode.Both;
-            bool wantImage = _clipMode == ClipMode.Image || _clipMode == ClipMode.Both;
-
-            // The image goes on the clipboard BEFORE asking Unity for context: that round trip can
-            // take seconds on a busy editor, and a paste inside that window found the previous
-            // clipboard — which reads as "the capture never reached the clipboard".
-            bool imageOk = !wantImage || TrySetClipboard(null, crop, rw, rh);
+            Mark("latest");
 
             // Screen coords, not virtual-desktop-relative: the bridge compares against
             // EditorWindow.position, which is desktop-space.
@@ -364,6 +376,7 @@ static partial class RegionCapture
             bool describedUnity = _collectContext
                                   && TryMatchUnityWindow(sx, sy, rw, rh, fgPid, out var ws, out topmost)
                                   && TryWriteContext(dest, ws, $"{sx},{sy},{rw},{rh}", out clipText);
+            Mark("context");
 
             if (_clipMode != ClipMode.Off)
             {
@@ -381,6 +394,8 @@ static partial class RegionCapture
                     : "clipboard: could not copy (" + _lastClipError + ")";
                 Console.WriteLine(_lastClipStatus);
             }
+            Console.WriteLine(_timing);
+            DaemonLog(_timing.ToString());
             return dest;
         }
         finally { ReleaseDesktop(); }
@@ -747,6 +762,20 @@ static partial class RegionCapture
         catch { return null; }
     }
 
+    // Per-stage wall time for one capture, printed and written to daemon.log — "it's slow" is
+    // answerable from the log instead of by re-instrumenting.
+    static readonly Stopwatch _stage = new();
+    static readonly StringBuilder _timing = new();
+
+    internal static void TimingStart() { _timing.Clear().Append("timing:"); _stage.Restart(); }
+    internal static string Timing => _timing.ToString();
+
+    internal static void Mark(string stage)
+    {
+        _timing.Append($" {stage} {_stage.ElapsedMilliseconds}ms");
+        _stage.Restart();
+    }
+
     /// <summary>Process that owned the foreground window, sampled before the overlay steals it.</summary>
     static uint ForegroundPid()
     {
@@ -796,25 +825,23 @@ static partial class RegionCapture
         _hbmScreen = CreateCompatibleBitmap(screenDC, _vw, _vh);
         SelectObject(_hdcScreen, _hbmScreen);
         BitBlt(_hdcScreen, 0, 0, _vw, _vh, screenDC, _vx, _vy, SRCCOPY | CAPTUREBLT);
+        Mark($"blit {_vw}x{_vh}");
 
-        var bmi = NewBmi(_vw, _vh);
-        _pixels = new byte[_vw * _vh * 4];
-        GetDIBits(_hdcScreen, _hbmScreen, 0, (uint)_vh, _pixels, ref bmi, 0);
-
-        // Precompute the dimmed backdrop once (45% of original luminance).
-        var dim = new byte[_pixels.Length];
-        for (int i = 0; i < _pixels.Length; i += 4)
-        {
-            dim[i] = (byte)(_pixels[i] * 45 / 100);
-            dim[i + 1] = (byte)(_pixels[i + 1] * 45 / 100);
-            dim[i + 2] = (byte)(_pixels[i + 2] * 45 / 100);
-            dim[i + 3] = 255;
-        }
+        // Precompute the dimmed backdrop once (45% of original luminance): copy the still and
+        // blend black over it in GDI. This was a per-byte managed loop between a full-desktop
+        // GetDIBits and SetDIBits — 230-330 ms on a 4K desktop before the overlay could appear.
         _hdcDim = CreateCompatibleDC(screenDC);
         _hbmDim = CreateCompatibleBitmap(screenDC, _vw, _vh);
         SelectObject(_hdcDim, _hbmDim);
-        var bmi2 = NewBmi(_vw, _vh);
-        SetDIBits(_hdcDim, _hbmDim, 0, (uint)_vh, dim, ref bmi2, 0);
+        BitBlt(_hdcDim, 0, 0, _vw, _vh, _hdcScreen, 0, 0, SRCCOPY);
+        IntPtr blackDc = CreateCompatibleDC(screenDC);
+        IntPtr blackBmp = CreateCompatibleBitmap(screenDC, 1, 1);
+        SelectObject(blackDc, blackBmp);
+        FillSolid(blackDc, new RECT { Right = 1, Bottom = 1 }, 0x00000000);
+        AlphaBlend(_hdcDim, 0, 0, _vw, _vh, blackDc, 0, 0, 1, 1, 140u << 16);   // 55% black
+        DeleteDC(blackDc);
+        DeleteObject(blackBmp);
+        Mark("dim");
 
         ReleaseDC(IntPtr.Zero, screenDC);
         return true;
@@ -826,7 +853,6 @@ static partial class RegionCapture
         if (_hbmDim != IntPtr.Zero) { DeleteObject(_hbmDim); _hbmDim = IntPtr.Zero; }
         if (_hdcScreen != IntPtr.Zero) { DeleteDC(_hdcScreen); _hdcScreen = IntPtr.Zero; }
         if (_hdcDim != IntPtr.Zero) { DeleteDC(_hdcDim); _hdcDim = IntPtr.Zero; }
-        _pixels = null;
         _shapes.Clear();
         _live = null;
         ReleaseAnnotationGdi();
@@ -843,15 +869,24 @@ static partial class RegionCapture
         return bmi;
     }
 
-    static byte[] Crop(byte[] src, int srcW, int srcH, int x, int y, int w, int h)
+    /// <summary>
+    /// Top-down BGRA of one rectangle of the frozen desktop. Read at accept time and only for the
+    /// crop: reading the whole desktop up front cost ~45 ms on 4K before the overlay could show,
+    /// for pixels that were almost all thrown away — and annotations are burned in by then anyway.
+    /// </summary>
+    static byte[] ReadRegion(int x, int y, int w, int h)
     {
-        var dst = new byte[w * h * 4];
-        for (int row = 0; row < h; row++)
-        {
-            int sy = Math.Clamp(y + row, 0, srcH - 1);
-            Buffer.BlockCopy(src, (sy * srcW + x) * 4, dst, row * w * 4, w * 4);
-        }
-        return dst;
+        IntPtr dc = CreateCompatibleDC(_hdcScreen);
+        IntPtr bmp = CreateCompatibleBitmap(_hdcScreen, w, h);
+        var old = SelectObject(dc, bmp);
+        BitBlt(dc, 0, 0, w, h, _hdcScreen, x, y, SRCCOPY);
+        SelectObject(dc, old);   // GetDIBits wants the bitmap out of any DC
+        var px = new byte[w * h * 4];
+        var bmi = NewBmi(w, h);
+        GetDIBits(dc, bmp, 0, (uint)h, px, ref bmi, 0);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+        return px;
     }
 
     // ─── Overlay window ───────────────────────────────────────────────
@@ -1691,7 +1726,18 @@ static partial class RegionCapture
         }
         if (RecorderSelecting) { DaemonLog($"{source}: ignored — recording region selection already up"); return; }
         DaemonLog($"{source}: starting recording");
-        _recChild = ScreenRecorder.StartDetached(RecorderArgs());
+
+        // Select the region here, in the resident daemon, and hand it over: the overlay is up in
+        // a quarter of a second instead of after the recorder child's ~0.6s process start. Same
+        // re-entrancy guard as a still — this overlay pumps the daemon's own message loop.
+        _capturing = true;
+        bool picked;
+        int x, y, w, h;
+        try { picked = TrySelectRegion(out x, out y, out w, out h); }
+        finally { _capturing = false; }
+        if (!picked) { DaemonLog($"{source}: recording cancelled"); return; }
+
+        _recChild = ScreenRecorder.StartDetached(RecorderArgs() + $" --rect {x},{y},{w},{h}");
     }
 
     static IntPtr DaemonProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)

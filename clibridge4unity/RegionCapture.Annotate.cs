@@ -89,6 +89,7 @@ static partial class RegionCapture
     static int _hoverBtn = -1;
     static RECT _lastBounds, _barRect;
     static readonly List<(RECT rc, int id, string label)> _buttons = new();
+    static bool _firstPaintDone;
     static string _annotationNotes;      // what was drawn, for the .context.md
 
     const int BTN_COLOUR = 10, BTN_UNDO = 20, BTN_DONE = 30, BTN_CANCEL = 40;
@@ -119,6 +120,7 @@ static partial class RegionCapture
 
     static void ResetAnnotation(bool annotate)
     {
+        _firstPaintDone = false;
         _wantAnnotate = annotate;
         _annotating = false;
         _shapes.Clear();
@@ -171,6 +173,15 @@ static partial class RegionCapture
         int cw = clip.Right - clip.Left, ch = clip.Bottom - clip.Top;
         if (cw <= 0 || ch <= 0) return;
 
+        // Nothing selected yet — notably the very first paint of the whole desktop: one copy
+        // straight to the window, not two through the back buffer.
+        if (!_dragging && !_haveRect && !_annotating)
+        {
+            BitBlt(hdc, clip.Left, clip.Top, cw, ch, _hdcDim, clip.Left, clip.Top, SRCCOPY);
+            if (!_firstPaintDone) { _firstPaintDone = true; Mark("first paint"); }
+            return;
+        }
+
         int saved = SaveDC(_hdcBack);
         IntersectClipRect(_hdcBack, clip.Left, clip.Top, clip.Right, clip.Bottom);
         BitBlt(_hdcBack, clip.Left, clip.Top, cw, ch, _hdcDim, clip.Left, clip.Top, SRCCOPY);
@@ -196,6 +207,7 @@ static partial class RegionCapture
         }
         RestoreDC(_hdcBack, saved);
         BitBlt(hdc, clip.Left, clip.Top, cw, ch, _hdcBack, clip.Left, clip.Top, SRCCOPY);
+        if (!_firstPaintDone) { _firstPaintDone = true; Mark("first paint"); }
     }
 
     /// <summary>Invalidate only what changed: last frame's selection furniture plus this frame's.</summary>
@@ -620,8 +632,7 @@ static partial class RegionCapture
     // ─── Accept ───────────────────────────────────────────────────────
 
     /// <summary>
-    /// Burn the accepted shapes into the undimmed desktop bitmap and re-read the pixel buffer the
-    /// crop comes from, and describe them for the .context.md — a model told "the red box at
+    /// Burn the accepted shapes into the undimmed desktop bitmap the crop is read from, and describe them for the .context.md — a model told "the red box at
     /// 120,40" knows where to look, where a model handed only the picture has to guess.
     /// </summary>
     static void BurnAnnotations(int rx, int ry)
@@ -634,8 +645,6 @@ static partial class RegionCapture
         IntersectClipRect(_hdcScreen, s.Left, s.Top, s.Right, s.Bottom);
         foreach (var shape in _shapes) DrawShape(_hdcScreen, shape, false);
         RestoreDC(_hdcScreen, saved);
-        var bmi = NewBmi(_vw, _vh);
-        GetDIBits(_hdcScreen, _hbmScreen, 0, (uint)_vh, _pixels, ref bmi, 0);
 
         var sb = new StringBuilder();
         foreach (var shape in _shapes)

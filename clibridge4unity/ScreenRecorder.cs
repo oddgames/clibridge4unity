@@ -50,7 +50,7 @@ static class ScreenRecorder
             return 1;
         }
 
-        string outPath = null, audio = "both";
+        string outPath = null, audio = "both", rect = null;
         bool full = false, transcribe = false, noSheet = false, noHud = false;
         int seconds = 0, fps = 30;
 
@@ -63,6 +63,7 @@ static class ScreenRecorder
             else if (p == "--seconds" && i + 1 < parts.Length) int.TryParse(parts[++i], out seconds);
             else if (p == "--fps" && i + 1 < parts.Length) int.TryParse(parts[++i], out fps);
             else if (p == "--full") full = true;
+            else if (p == "--rect" && i + 1 < parts.Length) rect = parts[++i];
             else if (p == "--transcribe") transcribe = true;
             else if (p == "--no-sheet") noSheet = true;
             else if (p == "--no-hud") noHud = true;
@@ -72,7 +73,7 @@ static class ScreenRecorder
             else if (p == "--devices" || p == "devices") return ListDevices();
         }
 
-        try { return Record(outPath, full, audio, seconds, fps, transcribe, noSheet, !noHud); }
+        try { return Record(outPath, full, rect, audio, seconds, fps, transcribe, noSheet, !noHud); }
         finally
         {
             if (_wroteStarting) try { File.Delete(StartingFile); } catch { }
@@ -96,11 +97,36 @@ static class ScreenRecorder
             try
             {
                 string c = Path.Combine(dir.Trim(), exe);
-                if (File.Exists(c)) return c;
+                if (File.Exists(c)) return ResolveScoopShim(c);
             }
             catch { }
         }
         return null;
+    }
+
+    /// <summary>
+    /// `scoop install ffmpeg` (the install line this file recommends) puts a shim on PATH, which
+    /// starts the real ffmpeg as a second process. That doubles the start-up cost of every call —
+    /// device listing, contact sheet, probe — and when the recorder dies the real ffmpeg is not
+    /// the shim's child to the OS, so it keeps recording. The shim's sibling .shim file names the
+    /// real exe: `path = "C:\...\ffmpeg.exe"`.
+    /// </summary>
+    static string ResolveScoopShim(string exe)
+    {
+        try
+        {
+            string shim = Path.ChangeExtension(exe, ".shim");
+            if (!File.Exists(shim)) return exe;
+            foreach (var line in File.ReadLines(shim))
+            {
+                int eq = line.IndexOf('=');
+                if (eq < 0 || !line.Substring(0, eq).Trim().Equals("path", StringComparison.OrdinalIgnoreCase)) continue;
+                string target = line.Substring(eq + 1).Trim().Trim('"');
+                if (File.Exists(target)) return target;
+            }
+        }
+        catch { }
+        return exe;
     }
 
     static bool RequireFfmpeg(out string ffmpeg)
@@ -228,7 +254,7 @@ static class ScreenRecorder
 
     // ─── Record ───────────────────────────────────────────────────────
 
-    static int Record(string outPath, bool full, string audio, int seconds, int fps,
+    static int Record(string outPath, bool full, string rect, string audio, int seconds, int fps,
                       bool transcribe, bool noSheet, bool hud)
     {
         if (!RequireFfmpeg(out string ffmpeg)) return 1;
@@ -243,10 +269,28 @@ static class ScreenRecorder
         Directory.CreateDirectory(Dir);
         try { File.WriteAllText(StartingFile, Environment.ProcessId.ToString()); _wroteStarting = true; } catch { }
 
+        // Device discovery is an ffmpeg run of its own; do it while the region is being dragged,
+        // not after — it sat between releasing the mouse and the recording starting.
+        var devices = audio == "none"
+            ? System.Threading.Tasks.Task.FromResult<(string, string)>((null, null))
+            : System.Threading.Tasks.Task.Run(FindAudioDevices);
+
         int x, y, w, h;
         if (full)
         {
             x = y = 0; w = 0; h = 0;   // gdigrab grabs the whole desktop when no size is given
+        }
+        else if (rect != null)
+        {
+            // Chosen by the daemon's own overlay (see RegionCapture.ToggleRecording).
+            var f = rect.Split(',');
+            if (f.Length != 4 || !int.TryParse(f[0], out x) || !int.TryParse(f[1], out y)
+                || !int.TryParse(f[2], out w) || !int.TryParse(f[3], out h) || w < 2 || h < 2)
+            {
+                Console.Error.WriteLine("Error: --rect expects x,y,w,h in screen pixels.");
+                return 1;
+            }
+            w -= w % 2; h -= h % 2;
         }
         else
         {
@@ -266,7 +310,7 @@ static class ScreenRecorder
             : Path.GetFullPath(outPath);
         Directory.CreateDirectory(Path.GetDirectoryName(dest));
 
-        var (mic, sys) = FindAudioDevices();
+        var (mic, sys) = devices.GetAwaiter().GetResult();
         var wanted = new List<string>();
         if (audio != "none")
         {
@@ -316,6 +360,22 @@ static class ScreenRecorder
             catch { }
         }) { IsBackground = true };
         drain.Start();
+
+        // -progress pipe:1 reports the encoded duration as it goes, so the length is known the
+        // moment ffmpeg exits — no ffprobe launch (~0.3-1.3 s cold) before the save can start.
+        long outTimeUs = 0;
+        var progress = new Thread(() =>
+        {
+            try
+            {
+                string line;
+                while ((line = ff.StandardOutput.ReadLine()) != null)
+                    if (line.StartsWith("out_time_us=") && long.TryParse(line.AsSpan(12), out long us) && us > 0)
+                        Interlocked.Exchange(ref outTimeUs, us);
+            }
+            catch { }
+        }) { IsBackground = true };
+        progress.Start();
 
         string size = full ? "full desktop" : $"{w}x{h} at {x},{y}";
         string audioDesc = wanted.Count == 0 ? "no audio" : string.Join(" + ", wanted);
@@ -367,7 +427,10 @@ static class ScreenRecorder
         }
         RegionCapture.HudStatus("Saving…");
 
-        double dur = ProbeDuration(dest);
+        RegionCapture.TimingStart();
+        progress.Join(2000);
+        double dur = Interlocked.Read(ref outTimeUs) / 1_000_000.0;
+        if (dur <= 0) dur = ProbeDuration(dest);
         Console.WriteLine("Recorded");
         Console.WriteLine($"output: {dest}");
         Console.WriteLine($"duration: {dur:0.0}s");
@@ -376,12 +439,9 @@ static class ScreenRecorder
         byte[] sheetDib = null;
         if (!noSheet)
         {
-            string sheet = BuildContactSheet(ffmpeg, dest, dur);
-            if (sheet != null)
-            {
-                Console.WriteLine($"frames: {sheet}");
-                sheetDib = SheetDib(ffmpeg, sheet);
-            }
+            string sheet = BuildContactSheet(ffmpeg, dest, dur, out sheetDib);
+            RegionCapture.Mark("sheet");
+            if (sheet != null) Console.WriteLine($"frames: {sheet}");
         }
 
         RegionCapture.PublishLatest(dest);
@@ -390,6 +450,8 @@ static class ScreenRecorder
         // transcription, too — whisper can take longer than the clip, and the clipboard sat on
         // stale content the whole time. The prompt does not reference the transcript.
         string copied = RegionCapture.WriteContextFor(dest, sheetDib) ?? "Saved (clipboard off)";
+        RegionCapture.Mark("context + clipboard");
+        Console.WriteLine(RegionCapture.Timing);
 
         bool transcribing = transcribe && wanted.Count > 0;
         RegionCapture.HudStatus(transcribing ? copied + " · transcribing…" : copied, dest);
@@ -414,7 +476,7 @@ static class ScreenRecorder
     static string BuildFfmpegArgs(int x, int y, int w, int h, int fps, bool full,
                                   List<string> audioDevices, int seconds, string dest)
     {
-        var sb = new StringBuilder("-hide_banner -loglevel warning -y ");
+        var sb = new StringBuilder("-hide_banner -loglevel warning -nostats -progress pipe:1 -y ");
 
         sb.Append($"-f gdigrab -framerate {fps} ");
         if (!full) sb.Append($"-offset_x {x} -offset_y {y} -video_size {w}x{h} ");
@@ -480,19 +542,25 @@ static class ScreenRecorder
     /// nothing. Evenly spaced rather than scene-cut detected: a UI jitter or a one-frame pop is
     /// exactly what scene detection discards as insignificant.
     /// </summary>
-    static string BuildContactSheet(string ffmpeg, string video, double duration)
+    static string BuildContactSheet(string ffmpeg, string video, double duration, out byte[] dib)
     {
         const int cols = 4, rows = 3, count = cols * rows;
         string sheet = Path.ChangeExtension(video, ".frames.png");
+        string bmp = Path.Combine(Path.GetTempPath(), $"clibridge_sheet_{Environment.ProcessId}.bmp");
+        dib = null;
 
         // Guard the degenerate cases: a sub-second clip cannot yield 12 distinct frames, and
         // fps=0 would make ffmpeg emit nothing at all.
         double rate = duration > 0.5 ? count / duration : 4.0;
         string fpsExpr = rate.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
 
+        // One decode, two outputs: the PNG kept beside the video, and a 24-bit .bmp for the
+        // clipboard. A .bmp is a DIB behind a 14-byte file header, so no PNG decoder is needed —
+        // and no second ffmpeg launch, which cost as much as the sheet itself.
         string args = $"-hide_banner -loglevel error -y -i \"{video}\" " +
-                      $"-vf \"fps={fpsExpr},scale=480:-2:flags=lanczos,tile={cols}x{rows}\" " +
-                      $"-frames:v 1 \"{sheet}\"";
+                      $"-filter_complex \"[0:v]fps={fpsExpr},scale=480:-2:flags=lanczos,tile={cols}x{rows},split[p][b]\" " +
+                      $"-map \"[p]\" -frames:v 1 \"{sheet}\" " +
+                      $"-map \"[b]\" -frames:v 1 -pix_fmt bgr24 \"{bmp}\"";
         try
         {
             using var p = Process.Start(new ProcessStartInfo(ffmpeg, args)
@@ -503,37 +571,17 @@ static class ScreenRecorder
             });
             string err = p.StandardError.ReadToEnd();
             p.WaitForExit(120000);
+            if (File.Exists(bmp))
+            {
+                byte[] file = File.ReadAllBytes(bmp);
+                if (file.Length > 14 && file[0] == (byte)'B' && file[1] == (byte)'M') dib = file[14..];
+            }
             if (File.Exists(sheet)) return sheet;
             Console.Error.WriteLine($"Warning: contact sheet failed. {Tail(err, 4)}");
         }
         catch (Exception ex) { Console.Error.WriteLine($"Warning: contact sheet failed: {ex.Message}"); }
-        return null;
-    }
-
-    /// <summary>
-    /// The contact sheet as CF_DIB bytes. ffmpeg writes it as a 24-bit .bmp, and a .bmp is a DIB
-    /// behind a 14-byte file header — so no PNG decoder is needed to put it on the clipboard.
-    /// </summary>
-    static byte[] SheetDib(string ffmpeg, string sheetPng)
-    {
-        string bmp = Path.Combine(Path.GetTempPath(), $"clibridge_sheet_{Environment.ProcessId}.bmp");
-        try
-        {
-            using var p = Process.Start(new ProcessStartInfo(ffmpeg,
-                $"-hide_banner -loglevel error -y -i \"{sheetPng}\" -pix_fmt bgr24 \"{bmp}\"")
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardError = true,
-            });
-            p.StandardError.ReadToEnd();
-            p.WaitForExit(30000);
-            byte[] file = File.ReadAllBytes(bmp);
-            if (file.Length <= 14 || file[0] != (byte)'B' || file[1] != (byte)'M') return null;
-            return file[14..];
-        }
-        catch { return null; }
         finally { try { File.Delete(bmp); } catch { } }
+        return null;
     }
 
     /// <summary>
