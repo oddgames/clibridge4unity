@@ -60,6 +60,8 @@ class Program
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [DllImport("user32.dll")]
@@ -268,12 +270,8 @@ class Program
     private struct BITMAPINFO { public BITMAPINFOHEADER bmiHeader; }
 
     /// <summary>
-    /// Wakes Unity Editor's message pump by sending WM_NULL to its main window.
-    /// </summary>
-    /// <summary>
-    /// Nudge Unity's message pump without stealing focus.
-    /// Server-side Win32 timer handles the main thread processing.
-    /// This just ensures the message pump is awake.
+    /// Nudge Unity's message pump without stealing focus. A backgrounded editor's loop goes idle,
+    /// so a compile it was asked for stalls until something wakes it — or someone clicks on it.
     /// </summary>
     static void WakeUnityEditor(string projectPath)
     {
@@ -281,30 +279,100 @@ class Program
         if (!OperatingSystem.IsWindows()) return;
         try
         {
-            string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
-
-            IntPtr hwnd = IntPtr.Zero;
-            foreach (var proc in Process.GetProcessesByName("Unity"))
-            {
-                if (proc.MainWindowHandle != IntPtr.Zero &&
-                    proc.MainWindowTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase))
-                {
-                    hwnd = proc.MainWindowHandle;
-                    break;
-                }
-            }
-
-            if (hwnd != IntPtr.Zero)
+            foreach (var hwnd in UnityWindowsFor(projectPath))
             {
                 // Multiple wake strategies — WM_NULL alone doesn't trigger the import pipeline
                 PostMessage(hwnd, WM_NULL, IntPtr.Zero, IntPtr.Zero);
                 // WM_TIMER forces Unity's internal timer tick which processes pending reloads
-                PostMessage(hwnd, 0x0113 /*WM_TIMER*/, IntPtr.Zero, IntPtr.Zero);
+                PostMessage(hwnd, WM_TIMER, IntPtr.Zero, IntPtr.Zero);
                 // InvalidateRect forces a repaint cycle which triggers EditorApplication.update
                 InvalidateRect(hwnd, IntPtr.Zero, false);
             }
         }
         catch { }
+    }
+
+    static uint _wakePid;
+    static IntPtr _wakeHwnd;
+
+    /// <summary>
+    /// A top-level window of the editor that has THIS project open (any one will do — posted messages
+    /// land in the editor's UI-thread queue whichever window they name). Matched by the pid in the project's
+    /// heartbeat, never by window title: titles carry only the folder name, so two checkouts named
+    /// alike (a worktree, an agent copy) are indistinguishable, and the first match woke the wrong
+    /// editor — the one compiling slept until the user clicked on it. Looked up by EnumWindows, not
+    /// Process.MainWindowHandle, which reads zero for a backgrounded editor mid-reload: exactly when
+    /// the wake matters. Falls back to every title match when there is no heartbeat yet (an extra
+    /// WM_NULL to an unrelated editor is harmless; missing the right one is not).
+    /// </summary>
+    static List<IntPtr> UnityWindowsFor(string projectPath)
+    {
+        var result = new List<IntPtr>();
+        uint pid = HeartbeatPid(projectPath);
+        if (pid != 0)
+        {
+            if (pid == _wakePid && _wakeHwnd != IntPtr.Zero && IsWindow(_wakeHwnd))
+            {
+                result.Add(_wakeHwnd);
+                return result;
+            }
+            IntPtr found = IntPtr.Zero;
+            var cls = new StringBuilder(64);
+            EnumWindows((h, _) =>
+            {
+                GetWindowThreadProcessId(h, out uint owner);
+                if (owner != pid) return true;
+                cls.Clear();
+                GetClassName(h, cls, cls.Capacity);
+                if (cls.ToString() != "UnityContainerWndClass") return true;
+                found = h;
+                return false;
+            }, IntPtr.Zero);
+            if (found != IntPtr.Zero)
+            {
+                _wakePid = pid; _wakeHwnd = found;
+                CliTrace("WakeUnityEditor", $"resolved pid={pid} hwnd=0x{found.ToInt64():X} from heartbeat");
+                result.Add(found);
+                return result;
+            }
+        }
+
+        string projectName = Path.GetFileName(Path.GetFullPath(projectPath));
+        foreach (var proc in Process.GetProcessesByName("Unity"))
+        {
+            try
+            {
+                if (proc.MainWindowHandle != IntPtr.Zero &&
+                    proc.MainWindowTitle.Contains(projectName, StringComparison.OrdinalIgnoreCase))
+                    result.Add(proc.MainWindowHandle);
+            }
+            catch { }
+        }
+        return result;
+    }
+
+    /// <summary>The editor pid from the project's heartbeat, if that process is still a live Unity.
+    /// Freshness is not required — the pid outlives a reload that pauses heartbeat writes.</summary>
+    static uint HeartbeatPid(string projectPath)
+    {
+        try
+        {
+            string statusFile = HeartbeatStatusFile(projectPath);
+            if (!File.Exists(statusFile)) return 0;
+            var m = System.Text.RegularExpressions.Regex.Match(File.ReadAllText(statusFile), @"""pid"":\s*(\d+)");
+            if (!m.Success || !uint.TryParse(m.Groups[1].Value, out uint pid)) return 0;
+            using var proc = Process.GetProcessById((int)pid);
+            return proc.ProcessName.Equals("Unity", StringComparison.OrdinalIgnoreCase) ? pid : 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>The heartbeat file the package writes for this project (same hash as the pipe name).</summary>
+    static string HeartbeatStatusFile(string projectPath)
+    {
+        string normalizedPath = Path.GetFullPath(projectPath).ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
+        int hash = GetDeterministicHashCode(normalizedPath);
+        return Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}_{GetProjectName(projectPath)}.status");
     }
 
     // ───────────────────── Update Check ─────────────────────
@@ -3415,16 +3483,7 @@ class Program
         bridgeVersion = "unknown";
         try
         {
-            string normalizedPath = Path.GetFullPath(projectPath).ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
-            int hash1 = 5381, hash2 = hash1;
-            for (int i = 0; i < normalizedPath.Length && normalizedPath[i] != '\0'; i += 2)
-            {
-                hash1 = ((hash1 << 5) + hash1) ^ normalizedPath[i];
-                if (i == normalizedPath.Length - 1 || normalizedPath[i + 1] == '\0') break;
-                hash2 = ((hash2 << 5) + hash2) ^ normalizedPath[i + 1];
-            }
-            int hash = hash1 + (hash2 * 1566083941);
-            string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}_{GetProjectName(projectPath)}.status");
+            string statusFile = HeartbeatStatusFile(projectPath);
             if (!File.Exists(statusFile)) return true;
             string v = ExtractJsonString(File.ReadAllText(statusFile), "version");
             if (string.IsNullOrEmpty(v)) return true;
@@ -4976,16 +5035,7 @@ class Program
     {
         try
         {
-            string normalizedPath = Path.GetFullPath(projectPath).ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
-            int hash1 = 5381, hash2 = hash1;
-            for (int i = 0; i < normalizedPath.Length && normalizedPath[i] != '\0'; i += 2)
-            {
-                hash1 = ((hash1 << 5) + hash1) ^ normalizedPath[i];
-                if (i == normalizedPath.Length - 1 || normalizedPath[i + 1] == '\0') break;
-                hash2 = ((hash2 << 5) + hash2) ^ normalizedPath[i + 1];
-            }
-            int hash = hash1 + (hash2 * 1566083941);
-            string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}_{GetProjectName(projectPath)}.status");
+            string statusFile = HeartbeatStatusFile(projectPath);
 
             if (!File.Exists(statusFile))
             {
@@ -5026,16 +5076,7 @@ class Program
     {
         try
         {
-            string normalizedPath = Path.GetFullPath(projectPath).ToLowerInvariant().Replace("/", "\\").TrimEnd('\\');
-            int hash1 = 5381, hash2 = hash1;
-            for (int i = 0; i < normalizedPath.Length && normalizedPath[i] != '\0'; i += 2)
-            {
-                hash1 = ((hash1 << 5) + hash1) ^ normalizedPath[i];
-                if (i == normalizedPath.Length - 1 || normalizedPath[i + 1] == '\0') break;
-                hash2 = ((hash2 << 5) + hash2) ^ normalizedPath[i + 1];
-            }
-            int hash = hash1 + (hash2 * 1566083941);
-            string statusFile = Path.Combine(Path.GetTempPath(), $"clibridge4unity_{hash:X8}_{GetProjectName(projectPath)}.status");
+            string statusFile = HeartbeatStatusFile(projectPath);
             if (!File.Exists(statusFile)) { CliTrace("ReadStaleHeartbeat", "no file"); return null; }
 
             double ageSec = (DateTime.UtcNow - File.GetLastWriteTimeUtc(statusFile)).TotalSeconds;

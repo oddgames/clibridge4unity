@@ -62,7 +62,7 @@ A suite of tools for communicating with Unity Editor via Named Pipes using moder
 - `EditorApplication.QueuePlayerLoopUpdate()` is main-thread-only — CANNOT be called from background threads
 - Solution: `PostMessage(hwnd, WM_NULL, 0, 0)` wakes the message pump (WM_NULL is a harmless no-op)
 - Both the CLI (externally) and the server-side polling loop (internally) send WM_NULL when work is pending
-- CLI finds Unity's window via `Process.GetProcessesByName("Unity")` matching by window title
+- CLI finds Unity's window by the `pid` in the project's heartbeat file (`EnumWindows` → `UnityContainerWndClass`), **never by window title** — titles carry only the folder name, so two checkouts named alike woke the wrong editor and a backgrounded COMPILE stalled until clicked. Title match is only the no-heartbeat fallback, and then wakes every match
 
 ### CRITICAL: SessionState for Domain Reload Persistence
 **ALWAYS use SessionState to persist state that must survive assembly reloads.**
@@ -112,7 +112,7 @@ tool_claude_unity_bridge/
 │   │       ├── Code/          # CODE_EXEC, CODE_EXEC_RETURN, TEST, DEBUG (ANALYZE + LINT are CLI-side)
 │   │       └── UI/            # UI_DISCOVER, SCREENSHOT (server-side renders)
 │   ├── Tools/                 # Pre-built CLI executables (win/osx/linux)
-│   └── package.json           # UPM manifest (v1.1.92)
+│   └── package.json           # UPM manifest (v1.1.93)
 ├── UnityTestProject/          # Test Unity project
 └── vscode-extension/          # VSCode/Cursor status-bar extension (built to a .vsix, embedded in the CLI)
 ```

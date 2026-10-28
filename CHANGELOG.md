@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.93 — 2026-10-28
+
+### Fixed
+- **COMPILE stalled in the background until you clicked on the editor, when two open projects shared a folder name** (an agent checkout beside the original, a worktree, `Proj` next to `Proj2`). The CLI's wake found the editor by window title, which carries only the folder name, so it nudged whichever editor matched first — often the wrong one — and the compiling editor slept. MTD compiles went from ~25 s to 100–200 s once a second `UnityProj_MTD` editor was open. The wake now targets the pid in the project's heartbeat, and looks the window up with `EnumWindows` rather than `Process.MainWindowHandle`, which reads zero for a backgrounded editor mid-reload.
+
 ## v1.1.92 — 2026-10-28
 
 ### New
