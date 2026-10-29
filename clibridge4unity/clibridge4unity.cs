@@ -2187,12 +2187,15 @@ class Program
             return HandleKill(projectPath, unityInfo, data);
         }
 
-        // WAKEUP: bring Unity to foreground — CLI-side, no pipe needed
-        // WAKEUP refresh — also sends Ctrl+R to force asset refresh/recompile
+        // WAKEUP: nudge a stalled editor from the background, focus untouched — CLI-side, no pipe needed
+        // WAKEUP refresh — also asks the bridge for REFRESH
+        // WAKEUP front [refresh] — the old behaviour: foreground Unity (and send Ctrl+R)
         if (command.Equals("WAKEUP", StringComparison.OrdinalIgnoreCase))
         {
             bool refresh = data != null && data.Contains("refresh", StringComparison.OrdinalIgnoreCase);
-            return HandleWakeup(projectPath, refresh);
+            bool front = data != null && data.Contains("front", StringComparison.OrdinalIgnoreCase);
+            if (front || !OperatingSystem.IsWindows()) return HandleWakeup(projectPath, refresh);
+            return HandleBackgroundWake(projectPath, pipeName, refresh);
         }
 
         // EDITORLOG: dump/tail Unity's Editor.log FILE from disk — CLI-side, no pipe needed.
@@ -2665,8 +2668,9 @@ class Program
         Console.Error.WriteLine("  MEMSNAP <a.snap> [b.snap] [types|objects|labels|allocators|managed] [top:N] [filter:X]");
         Console.Error.WriteLine("                             Inspect a Memory Profiler snapshot, or diff two — no Unity needed;");
         Console.Error.WriteLine("                             managed crawls the heap (objects by type, referrers with filter:X)");
-        Console.Error.WriteLine("  WAKEUP                     Bring Unity to foreground (targets -d project)");
-        Console.Error.WriteLine("  WAKEUP refresh             Bring to foreground + force recompile (Ctrl+R)");
+        Console.Error.WriteLine("  WAKEUP [refresh]           Nudge a stalled editor in the background (focus untouched);");
+        Console.Error.WriteLine("                             refresh also asks the bridge for REFRESH");
+        Console.Error.WriteLine("  WAKEUP front [refresh]     Bring Unity to foreground (+ Ctrl+R) — steals focus");
         Console.Error.WriteLine("  DISMISS [button]           Close modal dialogs or click specific button");
         Console.Error.WriteLine("  SCREENSHOT [view]          Capture Unity window screenshot");
         Console.Error.WriteLine("  EDITORLOG [N|errors|grep PAT|path|reload [N]]  Tail Unity's Editor.log FILE (works with no pipe / on clones; aliases: ELOG)");
@@ -3778,7 +3782,7 @@ class Program
             CliTrace("SendCommand", $"connect timeout command={command}");
             Console.Error.WriteLine($"Error: Pipe connection timed out for command '{command}'.");
             Console.Error.Write(BuildDiagnosticReport(projectPath));
-            Console.Error.WriteLine("action: Try 'clibridge4unity WAKEUP refresh' to wake Unity and force recompile.");
+            Console.Error.WriteLine("action: Try 'clibridge4unity WAKEUP' to nudge Unity in the background, then retry.");
             return EXIT_CONNECTION;
         }
         catch (OperationCanceledException)
@@ -5168,7 +5172,7 @@ class Program
             sb.AppendLine("verdict: appears frozen (no log activity, no cpu, no progress bar movement).");
             sb.AppendLine("action: in order, try");
             sb.AppendLine("  1. clibridge4unity DIAG          (look for modal dialogs blocking the main thread)");
-            sb.AppendLine("  2. clibridge4unity WAKEUP        (foreground Unity — sometimes unsticks the message pump)");
+            sb.AppendLine("  2. clibridge4unity WAKEUP        (nudges the message pump in the background — focus untouched)");
             sb.Append("  3. clibridge4unity KILL && clibridge4unity OPEN   (last resort)");
         }
 
@@ -6580,7 +6584,7 @@ class Program
         md.AppendLine("- Assets: `ASSET_SEARCH query` | `ASSET_DISCOVER [category]` | `ASSET_MOVE src dst` | `ASSET_COPY src dst` | `ASSET_DELETE path...` | `ASSET_MKDIR path...` | `ASSET_LABEL path [+a -b]` | `ASSET_RESERIALIZE [paths...]`");
         md.AppendLine("- Tests: `TEST` (EditMode) | `TEST playmode` | `TEST all` | `TEST Group1,Group2` | `TEST --category A,B` | `TEST --tests Full.Name,Other.Name` (filters OR'd) | `TEST list [filter]`");
         md.AppendLine("- Menu / profiler: `MENU Window/General/Console` | `PROFILE [enable|disable|clear|hierarchy]`");
-        md.AppendLine("- Window mgmt: `WAKEUP` (bring Unity to front) | `WAKEUP refresh` (front + Ctrl+R) | `DISMISS` (close modal dialogs)");
+        md.AppendLine("- Window mgmt: `WAKEUP` (nudge a stalled editor in the background — never takes focus) | `DISMISS` (close modal dialogs). Don't use `WAKEUP front` — it steals the user's focus.");
         md.AppendLine();
         md.AppendLine("## Coordinating with other Claude windows (peers)");
         md.AppendLine();
@@ -6602,7 +6606,7 @@ class Program
         md.AppendLine();
         md.AppendLine("## Diagnosing a stuck command");
         md.AppendLine();
-        md.AppendLine("If a command hangs or returns a main-thread timeout: run `DIAG` first (always responds, no main thread). It tells you whether Unity is compiling, importing, has open dialogs, or is just slow. `LOG errors` shows what's broken. `WAKEUP` brings Unity forward if it's been backgrounded.");
+        md.AppendLine("If a command hangs or returns a main-thread timeout: run `DIAG` first (always responds, no main thread). It tells you whether Unity is compiling, importing, has open dialogs, or is just slow. `LOG errors` shows what's broken. `WAKEUP` nudges a backgrounded editor without taking focus.");
         md.AppendLine();
         md.AppendLine("## Slicing big responses — use LAST, NEVER `| head` / `| tail`");
         md.AppendLine();
@@ -6780,6 +6784,44 @@ class Program
         }
         if (printedHeartbeat) Console.Error.WriteLine();
         return $"Error: Daemon indexing exceeded {totalDeadlineSec}s. Retry shortly or run `clibridge4unity DAEMON status`.";
+    }
+
+    /// <summary>
+    /// WAKEUP without `front`: nudge the editor's message pump from the background and leave focus
+    /// where it is. The wake targets the editor by heartbeat pid, so posted messages reach a stalled
+    /// backgrounded editor on their own — foregrounding it only stole the user's focus, and agents
+    /// ran WAKEUP on every hiccup. `WAKEUP front` keeps the old behaviour for what genuinely needs a
+    /// focused editor (Ctrl+R with the bridge down).
+    /// </summary>
+    static int HandleBackgroundWake(string projectPath, string pipeName, bool refresh)
+    {
+        if (UnityWindowsFor(projectPath).Count == 0)
+        {
+            Console.Error.WriteLine($"Error: No Unity window found for project '{GetProjectName(projectPath)}'");
+            return EXIT_CONNECTION;
+        }
+
+        // A short burst under the tick lease: one posted message buys one tick, and a stalled
+        // editor needs several to drain its queue.
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 2000)
+        {
+            RenewTickLease();
+            WakeUnityEditor(projectPath);
+            Thread.Sleep(100);
+        }
+
+        var hb = ReadHeartbeatFile(projectPath);
+        Console.WriteLine(hb != null
+            ? $"Nudged Unity in the background (focus untouched) — state: {hb.Value.state}"
+            : "Nudged Unity in the background (focus untouched) — no fresh heartbeat; run DIAG if it stays stuck");
+        if (!refresh) return EXIT_SUCCESS;
+
+        // Ctrl+R only reaches a focused window; REFRESH over the pipe does the same without focus.
+        int rc = SendCommand(pipeName, projectPath, "REFRESH", "");
+        if (rc == EXIT_CONNECTION)
+            Console.Error.WriteLine("Bridge unreachable — 'WAKEUP front refresh' sends Ctrl+R to a foregrounded editor instead.");
+        return rc;
     }
 
     static int HandleWakeup(string projectPath, bool sendRefresh = false)

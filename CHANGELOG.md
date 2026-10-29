@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.94 — 2026-10-29
+
+## v1.1.94
+
+### Fixed
+- **UXML `SCREENSHOT` no longer brings Unity to the front.** The render's throwaway `ShowPopup()` window activated the editor, and closing it then activated the main window — so every UXML render (agents run them every few seconds) pulled a backgrounded Unity over whatever you were doing. The render now hands the foreground back to the window that had it, right after showing the popup and again after closing it.
+- **`WAKEUP` no longer steals focus.** It now nudges the editor from the background (a 2 s burst of wake messages to the editor found by its heartbeat pid) and reports the editor state; `WAKEUP refresh` follows up with `REFRESH` over the pipe. The old foreground behaviour is `WAKEUP front [refresh]`. Error hints, DIAG's frozen-editor advice, the generated CLAUDE.md and the bridge skill all pointed agents at `WAKEUP`, so every hiccup used to steal focus.
+
+---
+Install: `irm https://raw.githubusercontent.com/oddgames/clibridge4unity/main/install.ps1 | iex`
+
+## Unreleased
+
+### Changed
+- **`WAKEUP` no longer steals focus.** It now nudges the editor from the background (a 2 s burst of wake messages to the editor found by its heartbeat pid) and reports the editor state; `WAKEUP refresh` follows up with `REFRESH` over the pipe. The foreground behaviour moved to `WAKEUP front [refresh]`. Error hints, DIAG's frozen-editor advice, the generated CLAUDE.md and the bridge skill all pointed agents at `WAKEUP`, so every hiccup pulled Unity in front of whatever you were doing. Projects whose installed docs still say `WAKEUP` get the background behaviour without updating them.
+
+### Fixed
+- **UXML `SCREENSHOT` no longer brings Unity to the front.** The render's throwaway `ShowPopup()` window activated the editor, and closing it activated the main window, so every UXML render stole focus. The render now gives the foreground back to the window that had it, right after showing the popup and again after closing it.
+
 ## v1.1.93 — 2026-10-28
 
 ### Fixed

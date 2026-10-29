@@ -164,6 +164,24 @@ namespace clibridge4unity
             return set;
         }
 
+        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        // ShowPopup activates Unity, and closing the active popup then activates the main window,
+        // so a backgrounded editor jumped in front of whatever the user was doing on every UXML
+        // render. Unity holds the foreground at both points, which is what lets it hand it back.
+        static void GiveBackForeground(IntPtr previous)
+        {
+#if UNITY_EDITOR_WIN
+            if (previous == IntPtr.Zero) return;
+            uint me = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+            GetWindowThreadProcessId(previous, out uint prevPid);
+            if (prevPid == me) return;   // Unity was already in front — nothing was taken
+            GetWindowThreadProcessId(GetForegroundWindow(), out uint fgPid);
+            if (fgPid == me) SetForegroundWindow(previous);
+#endif
+        }
+
         static void MoveOffscreen(IntPtr window)
         {
             // -30000 is well past any conceivable monitor, and inside X11's 16-bit coordinate range.
@@ -331,6 +349,7 @@ namespace clibridge4unity
 
             EditorWindow window = null;
             VisualElement instantiatedRoot = null;
+            IntPtr previousForeground = IntPtr.Zero;
 
             // Infer viewport from UXML root child's declared pixel size if caller did not specify.
             // UXML authors usually set width/height on the top-level VisualElement (e.g. 1920x1080
@@ -366,15 +385,16 @@ namespace clibridge4unity
                 //  1. Unity's ContainerWindow clamps EditorWindow.position to the nearest
                 //     monitor — so setting position to (-4000,-4000) does not actually park
                 //     the popup offscreen; it ends up onscreen.
-                //  2. ShowPopup on a backgrounded Unity wakes the message pump and brings
-                //     Unity to the foreground.
+                //  2. ShowPopup on a backgrounded Unity activates it, bringing Unity to the
+                //     foreground.
                 //
                 // Solution: ShowPopup, then in the same main-thread call (before the message pump
-                // can paint it) Win32 SetWindowPos to coords Unity does not clamp. SWP_NOACTIVATE
-                // keeps Unity in the background. GrabPixels renders the view into a RenderTexture,
+                // can paint it) Win32 SetWindowPos to coords Unity does not clamp, and hand the
+                // foreground straight back. GrabPixels renders the view into a RenderTexture,
                 // so it works identically with the window offscreen (verified on 6000.3).
                 await CommandRegistry.RunOnMainThreadAsync<int>(() =>
                 {
+                    previousForeground = GetForegroundWindow();
                     var before = OwnTopLevelWindows();
                     window = ScriptableObject.CreateInstance<EditorWindow>();
                     window.minSize = new Vector2(width, height);
@@ -386,6 +406,7 @@ namespace clibridge4unity
                         if (before.Contains(hwnd)) continue;
                         MoveOffscreen(hwnd);
                     }
+                    GiveBackForeground(previousForeground);
 
                     var root = uxml.Instantiate();
                     root.style.flexGrow = 1;
@@ -534,7 +555,7 @@ namespace clibridge4unity
                 var w = window;
                 if (w != null)
                 {
-                    try { await CommandRegistry.RunOnMainThreadAsync<int>(() => { w.Close(); return 0; }); }
+                    try { await CommandRegistry.RunOnMainThreadAsync<int>(() => { w.Close(); GiveBackForeground(previousForeground); return 0; }); }
                     catch { }
                 }
             }

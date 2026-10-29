@@ -71,7 +71,7 @@ clibridge4unity LAST -list    # table of all 10 cached responses
 1. `DIAG` — always answers, tells you whether Unity is compiling/importing/dialog-blocked.
 2. `LOG errors` — what's broken (over the pipe, from Unity's in-memory console).
    - If `LOG` returns `logCount: 0` / empty, or the bridge isn't running in that instance (e.g. a **clone**), read the on-disk log instead: `EDITORLOG errors` (CLI-side, no pipe). It surfaces import/compile/crash/load failures the console buffer never held. `EDITORLOG grep <pattern>` for a specific cause, `EDITORLOG path` to tail it yourself. Target a specific clone with `-d <cloneProjectPath>`.
-3. `WAKEUP` — bring Unity to the foreground if it's been backgrounded (its message pump may have stalled).
+3. `WAKEUP` — nudge a backgrounded editor whose message pump has stalled. Works in the background and never takes focus; don't use `WAKEUP front`, which steals the user's focus.
 4. `DISMISS` — close modal dialogs that are blocking the main thread.
 5. `CANCEL <NAME>` / `CANCEL --all` — abort an in-flight long-running command (frees queued main-thread work; bypasses the gate and always answers).
 
